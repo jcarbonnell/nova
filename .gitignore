@@ -25,3 +25,8 @@ yarn-error.log
 nova-sdk-rs/Cargo.lock
 nova-sdk-rs/target
 nova-sdk-rs/.env
+
+# NOVA sdk JS
+nova-sdk-js/package-lock.json
+nova-sdk-js/node_modules/
+nova-sdk-js/.env
