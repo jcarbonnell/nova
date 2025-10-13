@@ -384,7 +384,7 @@ This project is licensed under the MIT License - see [LICENSE](https://github.co
 
 ## Resources
 
-- [NOVA Documentation](https://github.com/jcarbonnell/nova)
+- [NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)

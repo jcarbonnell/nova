@@ -41,7 +41,7 @@ pip install nova-mcp-server
 
 **Best for**: Natural language file operations, AI agent workflows, conversational interfaces
 
-**Documentation**: [/mcp-server](./mcp-server) | [GitBook](https://nova-docs.gitbook.io)
+**Documentation**: [/mcp-server](./mcp-server) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
 
 ---
 
@@ -55,7 +55,7 @@ npm install nova-sdk-js
 
 **Best for**: Web dApps, API servers, browser applications, TypeScript projects
 
-**Documentation**: [/nova-sdk-js](./nova-sdk-js) | [GitBook](https://nova-docs.gitbook.io)
+**Documentation**: [/nova-sdk-js](./nova-sdk-js) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
 
 ---
 
@@ -70,7 +70,7 @@ nova-sdk-rs = "0.1.0"
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
 
-**Documentation**: [/nova-sdk-rs](./nova-sdk-rs) | [GitBook](https://nova-docs.gitbook.io)
+**Documentation**: [/nova-sdk-rs](./nova-sdk-rs) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
 
 ---
 
@@ -169,14 +169,14 @@ Ensure your NEAR account has sufficient balance before operations.
 
 Comprehensive documentation is available on GitBook:
 
-📚 **[NOVA Documentation](https://nova-docs.gitbook.io)**
+📚 **[NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)**
 
 ### Quick Links
-- [Getting Started](https://nova-docs.gitbook.io/getting-started)
-- [MCP Server Guide](https://nova-docs.gitbook.io/mcp-server)
-- [JavaScript SDK Reference](https://nova-docs.gitbook.io/js-sdk)
-- [Rust SDK Reference](https://nova-docs.gitbook.io/rust-sdk)
-- [Architecture & Concepts](https://nova-docs.gitbook.io/architecture)
+- [Quick Start Examples](https://nova-25.gitbook.io/nova-docs#quick-start-examples)
+- [MCP Server Guide](https://nova-25.gitbook.io/nova-docs/mcp-server)
+- [JavaScript SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-js)
+- [Rust SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-rs)
+- [Architecture & Concepts](https://nova-25.gitbook.io/nova-docs#architecture)
 
 ## Security Considerations
 
@@ -224,7 +224,7 @@ See individual SDK directories for specific testing instructions.
 ## Resources
 
 ### NOVA Resources
-- [Documentation](https://nova-docs.gitbook.io)
+- [Documentation](https://nova-25.gitbook.io/nova-docs/)
 - [GitHub Repository](https://github.com/jcarbonnell/nova)
 - [Issues](https://github.com/jcarbonnell/nova/issues)
 - [Discussions](https://github.com/jcarbonnell/nova/discussions)
@@ -250,7 +250,7 @@ Need help? We're here for you:
 
 - **Issues**: [GitHub Issues](https://github.com/jcarbonnell/nova/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/jcarbonnell/nova/discussions)
-- **Documentation**: [GitBook](https://nova-docs.gitbook.io)
+- **Documentation**: [GitBook](https://nova-25.gitbook.io/nova-docs/)
 
 ## License
 

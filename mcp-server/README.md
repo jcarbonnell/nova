@@ -322,7 +322,7 @@ Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK f
 
 ## Resources
 
-- [NOVA Documentation](https://nova-docs.gitbook.io)
+- [NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)
 - [Model Context Protocol](https://modelcontextprotocol.io)
 - [Claude Desktop MCP Guide](https://docs.anthropic.com/claude/docs/model-context-protocol)
 - [NEAR Protocol](https://near.org)
