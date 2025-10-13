@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-A Rust SDK for interacting with the NOVA Protocol on NEAR blockchain. Provides encrypted, decentralized file storage using IPFS and NEAR smart contracts with group-based access control.
+A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. Provides encrypted, decentralized file storage using IPFS and NEAR smart contracts with group-based access control.
 
 ## Features
 
@@ -232,7 +232,7 @@ This project is licensed under the MIT License - see [LICENSE](https://github.co
 
 ## Resources
 
-- [NOVA Protocol Documentation](https://github.com/jcarbonnell/nova)
+- [NOVA Documentation](https://github.com/jcarbonnell/nova)
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
