@@ -1,37 +1,132 @@
-import asyncio
-from server import _get_group_key, _encrypt_data, _ipfs_upload, _ipfs_retrieve, _decrypt_data, _record_near_transaction  # Import internals
-import hashlib
 import os
-import random  # For mock noise
+import time
+import base64
+import secrets  # For random noise
+import requests
+import json
+from dotenv import load_dotenv
 
-async def tee_federated_learning():
-    group_id = "health_group"
-    user_id = "YOUR_ACCOUNT_ID"
-    contract_id = os.environ["CONTRACT_ID"]
+load_dotenv()
+
+MCP_BASE_URL = "https://nova-mcp.fastmcp.app/mcp"  # Your live server
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream"  # For MCP compatibility
+}
+
+_request_id = 0  # Global counter for JSON-RPC IDs
+
+def call_mcp_tool(tool_name: str, params: dict) -> dict:
+    """Call MCP tool via JSON-RPC POST, parsing SSE if needed."""
+    global _request_id
+    _request_id += 1
+    payload = {
+        "jsonrpc": "2.0",
+        "id": _request_id,
+        "method": tool_name,
+        "params": params
+    }
+    print(f"Calling tool '{tool_name}' with payload: {json.dumps(payload, indent=2)[:300]}...")
+    response = requests.post(
+        MCP_BASE_URL,  # POST to /mcp (JSON-RPC)
+        headers=HEADERS,
+        json=payload,
+        timeout=60,
+        stream=True  # Enable streaming for SSE
+    )
+    print(f"Status Code: {response.status_code}")
+    if response.status_code != 200:
+        raise Exception(f"MCP tool '{tool_name}' failed: {response.status_code} - {response.text}")
+
+    # Parse SSE response (extract 'data:' lines)
+    result = None
+    error_data = None
+    for line in response.iter_lines(decode_unicode=True):
+        if line and line.startswith('data: '):
+            try:
+                data_str = line[6:].strip()  # Remove 'data: '
+                if data_str:
+                    event_data = json.loads(data_str)
+                    print(f"Parsed event data: {event_data}")  # Log
+                    if "result" in event_data:
+                        result = event_data["result"]
+                    elif "error" in event_data:
+                        error = event_data["error"]
+                        error_data = error.get("data", "")  # Log 'data' field
+                        raise Exception(f"MCP tool '{tool_name}' error: {error['message']} (code: {error['code']}, data: {error_data})")
+                    else:
+                        result = event_data
+            except json.JSONDecodeError as e:
+                print(f"Event JSON error: {e}")
+                continue
+        elif line == '':
+            break  # End of SSE
+
+    if result is None:
+        raise Exception(f"MCP tool '{tool_name}' returned no valid data (error data: {error_data})")
+
+    return result
+
+def main():
+    rpc = os.environ["RPC_URL"]  # Not directly used; for context
+    contract = os.environ["CONTRACT_ID"]
     private_key = os.environ["NEAR_PRIVATE_KEY"]
-    
-    # Step 1: Upload encrypted dataset to NOVA (composite logic)
-    dataset_b64 = 'c2Vuc2l0aXZlX2hlYWx0aF9yZWNvcmRzLmNzdg=='  # Mock b64
-    key = await _get_group_key(group_id, user_id, contract_id, private_key)
-    encrypted_b64 = _encrypt_data(dataset_b64, key)
-    cid = _ipfs_upload(encrypted_b64, "records.csv")
-    file_hash = hashlib.sha256(base64.b64decode(dataset_b64)).hexdigest()
-    trans_id = await _record_near_transaction(group_id, user_id, file_hash, cid, contract_id, user_id, private_key)
-    print(f"Uploaded to NOVA: CID {cid}")
-    
-    # Step 2: Mock TEE (pseudo-enclave: load, process with noise)
-    encrypted_b64 = await _ipfs_retrieve(cid)
-    decrypted_b64 = _decrypt_data(encrypted_b64, key)
-    processed = base64.b64decode(decrypted_b64) + bytes(random.getrandbits(8) for _ in range(16))  # Noise
+    account_id = os.environ["SIGNER_ACCOUNT_ID"]
+
+    # Strip prefix from private_key if present (server expects raw base58)
+    if private_key.startswith("ed25519:"):
+        private_key = private_key[8:]
+
+    print(f"Account ID: {account_id}")
+
+    # Step 0: Define group ID
+    group_id = "tee_demo_healthcare"
+
+    # Step 1: Upload encrypted dataset to NOVA via MCP tool
+    dataset_b64 = base64.b64encode(b"patient_id,name,diagnosis\n1,Alice,hypertension\n2,Bob,diabetes\n3,Carol,asthma").decode('utf-8')
+    upload_params = {
+        "group_id": group_id,
+        "user_id": account_id,
+        "data": dataset_b64,  # Base64 CSV
+        "filename": "health_records.csv",
+        "account_id": account_id,  # For auth
+        "private_key": private_key,  # Stripped
+        "contract_id": contract
+    }
+    upload = call_mcp_tool("composite_upload", upload_params)
+    print(f"Uploaded to NOVA: CID {upload['cid']}")
+
+    # Wait for pin propagation
+    print("Waiting 30s for IPFS pin to propagate...")
+    time.sleep(30)
+
+    # Step 2: Mock TEE (pseudo-enclave: retrieve via MCP, process with noise)
+    retrieve_params = {
+        "group_id": group_id,
+        "ipfs_hash": upload['cid'],
+        "account_id": account_id,
+        "private_key": private_key,  # Stripped
+        "contract_id": contract
+    }
+    retrieve = call_mcp_tool("composite_retrieve", retrieve_params)
+    processed = base64.b64decode(retrieve['decrypted_b64'])  # Decrypted bytes
+    noise = secrets.token_bytes(16)  # Simulate inference noise
+    processed += noise
     processed = b"TEE fine-tuned: " + processed  # Mock output
     processed_b64 = base64.b64encode(processed).decode('utf-8')
-    
-    # Step 3: Store output back to NOVA
-    encrypted_output = _encrypt_data(processed_b64, key)
-    output_cid = _ipfs_upload(encrypted_output, "fine_tuned_model.json")
-    output_hash = hashlib.sha256(processed).hexdigest()
-    output_trans_id = await _record_near_transaction(group_id, user_id, output_hash, output_cid, contract_id, user_id, private_key)
-    print(f"Output stored: CID {output_cid}")
+
+    # Step 3: Store output back to NOVA via MCP tool
+    output_params = {
+        "group_id": group_id,
+        "user_id": account_id,
+        "data": processed_b64,
+        "filename": "fine_tuned_model.json",
+        "account_id": account_id,
+        "private_key": private_key,  # Stripped
+        "contract_id": contract
+    }
+    output_upload = call_mcp_tool("composite_upload", output_params)
+    print(f"Output stored: CID {output_upload['cid']}")
 
 if __name__ == "__main__":
-    asyncio.run(tee_federated_learning())
+    main()

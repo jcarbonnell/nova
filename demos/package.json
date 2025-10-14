@@ -1,0 +1,20 @@
+{
+  "name": "nova-demos",
+  "version": "0.1.0",
+  "description": "NOVA x Phala TEE Demo in JS/TS",
+  "main": "tee_federated_learning.js",
+  "scripts": {
+    "dev": "ts-node tee_federated_learning.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "nova-sdk-js": "^0.1.1",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  },
+  "type": "module"
+}

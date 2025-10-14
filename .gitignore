@@ -32,3 +32,5 @@ nova-sdk-js/yarn-error.log
 demos/.env
 demos/target
 demos/Cargo.lock
+demos/node_modules/
+demos/package-lock.json

@@ -1,6 +1,8 @@
 use nova_sdk_rs::{NovaSdk, CompositeRetrieveResult, CompositeUploadResult};
 use rand::{RngCore, thread_rng}; // For mock noise
 use std::error::Error;
+use std::time::Duration;
+use tokio::time::sleep;
 use dotenv::dotenv;
 
 #[tokio::main]
@@ -22,19 +24,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &pinata_key,
         &pinata_secret,
     )
-    .with_signer(&private_key, &account_id)
-    .map_err(|e| {
-        println!("With signer error: {:?}", e);
-        e
-    })?;
+    .with_signer(&private_key, &account_id)?;
     
+    // Step 0: Define group ID if you are creating a new group
+    let group_id = "tee_demo_healthcare";
+
     // Step 1: Upload encrypted dataset to NOVA
-    let dataset = b"sensitive_health_records.csv"; // Mock data
-    let upload: CompositeUploadResult = sdk.composite_upload("tee_demo_healthcare", &account_id, dataset, "records.csv").await?;
+    let dataset = b"patient_id,name,diagnosis\n1,Alice,hypertension\n2,Bob,diabetes\n3,Carol,asthma"; // CSV bytes
+    let filename = "health_records.csv";
+    let upload: CompositeUploadResult = sdk.composite_upload(group_id, &account_id, dataset, filename).await?;
     println!("Uploaded to NOVA: CID {}", upload.cid);
+
+    // Wait for pin propagation (fixes delay)
+    println!("Waiting 30s for IPFS pin to propagate...");
+    sleep(Duration::from_secs(30)).await;
     
     // Step 2: Mock TEE (pseudo-enclave: load, process with noise)
-    let retrieve: CompositeRetrieveResult = sdk.composite_retrieve("tee_demo_healthcare", &upload.cid).await?;
+    let retrieve: CompositeRetrieveResult = sdk.composite_retrieve(group_id, &upload.cid).await?;
     let mut processed = retrieve.data.clone();
     let mut noise = [0u8; 16];
     thread_rng().fill_bytes(&mut noise); // Simulate inference noise

@@ -8,7 +8,7 @@ name = "tee_federated_learning"
 path = "tee_federated_learning.rs"
 
 [dependencies]
-nova-sdk-rs = "0.1.0" # version check https://crates.io/crates/nova-sdk-rs
+nova-sdk-rs = "0.1.1" # check last version https://crates.io/crates/nova-sdk-rs
 tokio = { version = "1.47.1", features = ["full"] }
 dotenv = "0.15"
 rand = "0.8"
