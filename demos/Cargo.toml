@@ -1,0 +1,17 @@
+[package]
+name = "nova-demos"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tee_federated_learning"
+path = "tee_federated_learning.rs"
+
+[dependencies]
+nova-sdk-rs = "0.1.0" # version check https://crates.io/crates/nova-sdk-rs
+tokio = { version = "1.47.1", features = ["full"] }
+dotenv = "0.15"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+# phala-sdk = "x.y.z" # Phala mocked for demo

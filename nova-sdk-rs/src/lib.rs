@@ -132,8 +132,8 @@ impl NovaSdk {  // REMOVED generic type parameter
         let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
-                let key_str = String::from_utf8(result.result).map_err(|e| NovaError::Near(e.to_string()))?;
-                Ok(key_str)
+                let key: String = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                Ok(key)
             }
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
