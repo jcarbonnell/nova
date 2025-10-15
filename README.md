@@ -20,6 +20,16 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 - **Revocation & Key Rotation**: Remove members and rotate keys with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
+## Group Key Security: Addressing Common Concerns
+
+**The group key is not published publicly in a way that allows unrestricted access by anyone.**
+
+While the group key is stored on-chain in the NEAR smart contract's state (as a base64-encoded string in the groups map), retrieval is strictly gated by access controls enforced at the contract level. This keeps the key private and secure, even though it's on a public blockchain.
+
+NEAR contract state isn't "broadcast" or queryable like public variables. Instead, access requires explicit view calls to methods like get_group_key(group_id, user_id), which include built-in authorization checks. You must provide a valid private_key and account_id (matching a group member) to make the view call—the contract verifies is_authorized by scanning the group_members vector for the user_id. If not a member, it panics with "Unauthorized," preventing key return. Signed calls (via SDKs/MCP) use the caller's authenticated predecessor_account_id for enforcement.
+
+In short: keys are fetchable only by verified members, with revocation (remove + rotate) ensuring non-members can't access future data. No key leaks via raw state dumps (RPCs respect logic); future extensions (e.g., TEE-gated or asymmetric wrapping) will add layers without redesign.
+
 ## NOVA x NEAR
 
 NOVA complements NEAR’s AI-focused tools:
