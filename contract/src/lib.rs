@@ -27,7 +27,6 @@ enum StorageKey {
 pub struct Group {
     owner: AccountId,
     group_key: Option<String>,
-    publish_rights: LookupMap<AccountId, bool>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Serialize, Deserialize, JsonSchema)]
@@ -131,7 +130,6 @@ impl Contract {
         assert!(self.groups.contains_key(&group_id), "Group not found");
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "User not authorized");
         let caller = env::predecessor_account_id();
-        assert_eq!(caller, self.owner, "Only owner can record"); // MVP: limit to owner, add agents later.
         let trans_id = hex::encode(env::sha256(&format!(
             "{}{}{}{}{}",
             group_id,
@@ -322,6 +320,29 @@ mod tests {
         assert_eq!(transactions[0].user_id, member.to_string());
         assert_eq!(transactions[0].file_hash, "file_hash");
         assert_eq!(transactions[0].ipfs_hash, "ipfs_hash");
+        assert!(contract.transactions.contains_key(&trans_id));
+    }
+
+    #[test]
+    fn record_transaction_works_for_member() {
+        let owner: AccountId = "owner.testnet".parse().expect("Invalid AccountId");
+        let member: AccountId = "member.testnet".parse().expect("Invalid AccountId");
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone());
+        contract.register_group("test_group".to_string());
+        contract.add_group_member("test_group".to_string(), member.clone());
+    
+        // Switch to member context (non-owner)
+        let context = get_context(member.clone());
+        testing_env!(context.build());
+    
+        let trans_id = contract.record_transaction(
+            "test_group".to_string(),
+            member.clone(),
+            "file_hash".to_string(),
+            "ipfs_hash".to_string(),
+        );
         assert!(contract.transactions.contains_key(&trans_id));
     }
 
