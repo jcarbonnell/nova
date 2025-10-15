@@ -67,15 +67,32 @@ def call_mcp_tool(tool_name: str, args: dict, account_id: str = None, private_ke
                     event_str = line[6:].strip()
                     event_data = json.loads(event_str)
                     events.append(event_data)
-                    print(f"Debug SSE event: {event_data}")  # Print each event
+                    print(f"Debug SSE event: {event_data}")
                     if 'result' in event_data:
                         result = event_data['result']
-                        print(f"Debug: Full result keys: {list(result.keys())}")  # Print keys
-                        print(f"Debug: Full result: {result}")  # Print full dict
-                        return result
+                        print(f"Debug: Full result keys: {list(result.keys())}")
+                        print(f"Debug: Full result: {result}")
+                        
+                        # Check for error
+                        if result.get('isError'):
+                            error_text = result.get('content', [{}])[0].get('text', 'Unknown error')
+                            raise Exception(f'MCP tool error: {error_text}')
+                        
+                        # Return structuredContent if available, otherwise try to parse content
+                        if 'structuredContent' in result:
+                            return result['structuredContent']
+                        elif 'content' in result and len(result['content']) > 0:
+                            content_text = result['content'][0].get('text', '{}')
+                            try:
+                                return json.loads(content_text)
+                            except json.JSONDecodeError:
+                                return {'text': content_text}
+                        else:
+                            return result
                 except json.JSONDecodeError as e:
                     print(f"Debug: SSE parse error: {e}")
                     continue
+        
         if events:
             # Last event likely has result
             last_event = events[-1]
@@ -83,7 +100,23 @@ def call_mcp_tool(tool_name: str, args: dict, account_id: str = None, private_ke
                 result = last_event['result']
                 print(f"Debug: Full result keys (last): {list(result.keys())}")
                 print(f"Debug: Full result (last): {result}")
-                return result
+                
+                # Check for error
+                if result.get('isError'):
+                    error_text = result.get('content', [{}])[0].get('text', 'Unknown error')
+                    raise Exception(f'MCP tool error: {error_text}')
+                
+                # Return structuredContent if available
+                if 'structuredContent' in result:
+                    return result['structuredContent']
+                elif 'content' in result and len(result['content']) > 0:
+                    content_text = result['content'][0].get('text', '{}')
+                    try:
+                        return json.loads(content_text)
+                    except json.JSONDecodeError:
+                        return {'text': content_text}
+                else:
+                    return result
             elif 'error' in last_event:
                 raise Exception(f'MCP RPC error: {last_event["error"]}')
             else:
@@ -96,9 +129,25 @@ def call_mcp_tool(tool_name: str, args: dict, account_id: str = None, private_ke
             rpc_reply = response.json()
             if "result" in rpc_reply:
                 result = rpc_reply["result"]
-                print(f"Debug: Full result keys: {list(result.keys())}")  # Print keys
-                print(f"Debug: Full result: {result}")  # Print full dict
-                return result
+                print(f"Debug: Full result keys: {list(result.keys())}")
+                print(f"Debug: Full result: {result}")
+                
+                # Check for error
+                if result.get('isError'):
+                    error_text = result.get('content', [{}])[0].get('text', 'Unknown error')
+                    raise Exception(f'MCP tool error: {error_text}')
+                
+                # Return structuredContent if available
+                if 'structuredContent' in result:
+                    return result['structuredContent']
+                elif 'content' in result and len(result['content']) > 0:
+                    content_text = result['content'][0].get('text', '{}')
+                    try:
+                        return json.loads(content_text)
+                    except json.JSONDecodeError:
+                        return {'text': content_text}
+                else:
+                    return result
             elif "error" in rpc_reply:
                 raise Exception(f'MCP RPC error: {rpc_reply["error"]}')
             else:
