@@ -1,7 +1,10 @@
 # NOVA + Phala TEE Demo: Verifiable Federated Learning Datasets
 
 ## Use Case
-In healthcare (e.g., Phala's success story: https://phala.com/success-stories/healthcare-research), hospitals share encrypted records for federated learning without exposure. Phala's TEEs ensure confidential training, but lack persistent storage—NOVA complements by providing secure vaults for datasets pre/post-TEE, with group revocation for compliance (e.g., GDPR). This enables verifiable, multi-party workflows: upload shared data, TEE fine-tunes, store models back—auditable via on-chain metadata.
+In healthcare (e.g., Phala's success story: https://phala.com/success-stories/healthcare-research), hospitals share encrypted records for federated learning without exposure. 
+In the following demo, Hospital A uploads encrypted data to NOVA, Hospital B retrieves and process the data through Phala's TEE, it uploads the output data to NOVA. Hospital A retrieves Hospital B's output data, process it, and uploads the final output to NOVA.
+
+Phala's TEEs ensure confidential training, but lack persistent storage—NOVA complements by providing secure vaults for datasets pre/post-TEE, with group revocation for compliance (e.g., GDPR). This enables verifiable, multi-party workflows: upload shared data, TEE fine-tunes, store models back—auditable via on-chain metadata.
 
 ### Other Scenarios
 - **Finance: Secure Portfolio Sharing Before TEE Risk Analysis** (https://phala.com/success-stories/financial-services): NOVA's group-keyed vaults store encrypted portfolios; TEE loads for private risk modeling (e.g., fraud detection), outputs back without leaks—ensures data sovereignty in multi-bank collaborations.
@@ -16,5 +19,14 @@ Phala focuses on runtime privacy ("no storage, no logs"); NOVA adds decentralize
 - Set .env (NEAR_PRIVATE_KEY, etc.).
 - Rust: `cargo run --bin tee_federated_learning`.
 - JS: `ts-node demos/tee_federated_learning.ts`.
-- Python: `python demos/tee_federated_learning.py`.
-Expect: Uploaded CID, mock-processed output CID.
+
+Expected output:
+```
+Primary Account ID (Hospital A): <hospital_A.testnet>
+Secondary Account ID (Hospital B): <hospital_B.testnet>
+Hospital A uploaded to NOVA: CID QmW9oCqbrdMF8cKuYd14cwT3SszMWXRnaJ4aTZXKG4b1QA
+Waiting for IPFS pin to propagate...
+Hospital B output stored: CID QmSxuYEMhJpCm2wxC9zRQrbvaJN2irGtNdENCxRzs6J39C
+Waiting for IPFS pin to propagate...
+Hospital A final output stored: CID QmP5TiZYHByf1DDtXxVe5KjHj8r5Sp2E2MzLCMAxfH3Job
+```

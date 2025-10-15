@@ -1,4 +1,4 @@
-// NOVA contract version 0.1.0
+// NOVA contract version 0.1.1
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -27,6 +27,7 @@ enum StorageKey {
 pub struct Group {
     owner: AccountId,
     group_key: Option<String>,
+    publish_rights: LookupMap<AccountId, bool>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Serialize, Deserialize, JsonSchema)]
