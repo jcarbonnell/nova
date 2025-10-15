@@ -1,6 +1,6 @@
 {
   "name": "nova-sdk-js",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "JavaScript SDK for NOVA: Secure file sharing on NEAR. Wraps contract calls, encryption, IPFS.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
