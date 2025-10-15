@@ -19,10 +19,20 @@ load_dotenv()
 mcp = FastMCP(name="nova-mcp")
 
 def _validate_near_key(private_key: str) -> str:
-    """Light validation: base58, 64 chars (ed25519)."""
-    if not private_key or len(private_key) < 64 or not re.match(r'^[1-9A-HJ-NP-Za-km-z]{64,}$', private_key):
-        raise ValueError("Invalid NEAR private_key: Must be base58-encoded (64+ chars, no prefix).")
-    return private_key
+    """Light validation: base58, with optional ed25519: prefix."""
+    if not private_key:
+        raise ValueError("Invalid NEAR private_key: Empty key provided.")
+    
+    # Strip prefix for validation, but preserve original
+    key_to_validate = private_key
+    if private_key.startswith('ed25519:'):
+        key_to_validate = private_key[8:]  # Remove prefix for validation
+    
+    # Validate base58 format (64+ chars)
+    if len(key_to_validate) < 64 or not re.match(r'^[1-9A-HJ-NP-Za-km-z]{64,}$', key_to_validate):
+        raise ValueError(f"Invalid NEAR private_key: Must be base58-encoded (64+ chars). Got length: {len(key_to_validate)}")
+    
+    return private_key  # Return original with prefix
 
 # Helper functions (callable internally)
 async def _get_group_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
