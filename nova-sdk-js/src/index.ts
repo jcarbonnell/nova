@@ -125,12 +125,12 @@ export class NovaSdk {
   private async executeContractCall(methodName: string, args: object, depositYocto: string): Promise<string> {
     if (!this.account) throw new NovaError('No signer attached');
     try {
-      const result = await this.account.functionCall({
+      const result = await this.account.callFunction({
         contractId: this.contractId,
         methodName,
         args,
         gas: 300000000000000n,
-        attachedDeposit: BigInt(depositYocto),
+        deposit: BigInt(depositYocto),
       });
       return result ? 'Success' : 'No result';
     } catch (e) {
@@ -167,7 +167,7 @@ export class NovaSdk {
   async transferTokens(toAccount: string, amountYocto: string): Promise<string> {
     if (!this.account) throw new NovaError('No signer attached');
     try {
-      await this.account.sendMoney(toAccount, BigInt(amountYocto));
+      await this.account.transfer({ receiverId: toAccount, amount: BigInt(amountYocto) });
       return 'Success';
     } catch (e) {
       throw new NovaError(`Near RPC error: ${e}`, e as Error);
@@ -210,8 +210,8 @@ export class NovaSdk {
     if (key.length !== 32) throw new NovaError('Invalid key length');
     const encrypted = Buffer.from(encryptedB64, 'base64');
     if (encrypted.length < 16) throw new NovaError('Invalid encrypted data');
-    const iv = encrypted.slice(0, 16);
-    const ciphertext = encrypted.slice(16);
+    const iv = Uint8Array.prototype.slice.call(encrypted, 0, 16);
+    const ciphertext = Uint8Array.prototype.slice.call(encrypted, 16);
     const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
     let decrypted = decipher.update(ciphertext);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
