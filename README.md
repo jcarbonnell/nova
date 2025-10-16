@@ -210,6 +210,7 @@ Comprehensive documentation is available on GitBook:
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
 - **Dataset Monetization**: Add pricing to file upload so file owners can monetize dataset access.
 - **Multi-Party Upload**: So far all members can upload, but a contract update (New method: grant_publish_rights(group_id: String, user_id: AccountId, can_publish: bool))could add per-member publish rights. 
+- **Group creation access**: So far only contract owner can create groups. in this scenario people who want to create groups should deploy their own contract. Shall I allow anyone to create groups on this contract?
 
 ## Contributing
 

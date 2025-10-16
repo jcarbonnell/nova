@@ -1,10 +1,11 @@
-// NOVA contract version 0.1.1
-use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault};
+// NOVA contract version 0.2.0 - hybridation with Shade/TEEs
+use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde_json::json;
 
 // Define the contract structure
 #[near(contract_state)]
@@ -14,6 +15,8 @@ pub struct Contract {
     groups: LookupMap<String, Group>,
     group_members: LookupMap<String, StoreVec<AccountId>>,
     transactions: IterableMap<String, Transaction>,
+    shade_code_hash: Option<String>,
+    workers: LookupMap<AccountId, String>,
 }
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -21,12 +24,12 @@ enum StorageKey {
     Groups,
     GroupMembers,
     Transactions,
+    Workers,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
 pub struct Group {
     owner: AccountId,
-    group_key: Option<String>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Serialize, Deserialize, JsonSchema)]
@@ -48,6 +51,8 @@ impl Contract {
             groups: LookupMap::new(StorageKey::Groups),
             group_members: LookupMap::new(StorageKey::GroupMembers),
             transactions: IterableMap::new(StorageKey::Transactions),
+            shade_code_hash: None,
+            workers: LookupMap::new(StorageKey::Workers),
         }
     }
 
@@ -56,14 +61,33 @@ impl Contract {
         assert!(!self.groups.contains_key(&group_id), "Group exists");
         let caller = env::predecessor_account_id();
         assert_eq!(caller, self.owner, "Only owner can register");  // MVP: limit to owner, add agents later.
-        let group = Group { owner: caller.clone(), group_key: None };
+        let group = Group { owner: caller.clone() };
         self.groups.insert(group_id.clone(), group);
         // Create new members vector for this group
         let mut members = StoreVec::new(group_id.as_bytes());
         // Add owner as a member
         members.push(caller.clone());
         self.group_members.insert(group_id.clone(), members);
-        log!("Group {} registered by {} (owner added as member)", group_id, caller);
+        log!("Group {} registered by {} (owner added as member; signal Shade for key init)", group_id, caller);
+        // group creation auto-triggers key gen in Shade
+        let shade_contract = "shade-agent.nova-shade-agent.testnet".parse().unwrap();  // Your Shade contract ID
+        let args = json!({ "group_id": group_id, "owner": caller.to_string() }).to_string().into_bytes();
+        Promise::new(shade_contract)
+            .function_call("generate_key".to_string(), args, 0, 300_000_000_000_000u64)  // Gas for Shade call; adjust
+            .then(  // Optional: Callback to this contract (e.g., log success)
+                Promise::new(env::current_account_id())
+                    .function_call("on_key_generated".to_string(), b"{}", 0, 100_000_000_000_000u64)
+            );
+    }
+
+    // Callback stub (handles Shade response; e.g., log or update state)
+    #[private]
+    pub fn on_key_generated(&mut self, group_id: String, checksum: String) {  // Args from Shade callback
+        if let Some(mut group) = self.groups.get(&group_id) {
+            group.shade_checksum = Some(checksum);  // Add field to Group: shade_checksum: Option<String>
+            self.groups.insert(&group_id, &group);
+        }
+        log!("Updated group {} with Shade checksum: {}", group_id, checksum);
     }
 
     pub fn group_contains_key(&self, group_id: String) -> bool {
@@ -71,14 +95,22 @@ impl Contract {
     }
 
     #[payable]
-    pub fn add_group_member(&mut self, group_id: String, user_id: AccountId) {
+    pub fn add_group_member(&mut self, group_id: String, user_id: AccountId) -> Promise {
         let group = self.groups.get(&group_id).expect("Group not found");
         let caller = env::predecessor_account_id();
         assert_eq!(caller, group.owner, "Only group owner can add");
         let members = self.group_members.get_mut(&group_id).expect("Group not found");
         assert!(!members.iter().any(|x| *x == user_id), "User already a member");
         members.push(user_id.clone());
-        log!("Added {} to group {}", user_id, group_id);
+        let shade_args = json!({ "group_id": group_id, "new_member": user_id.to_string() }).to_string().into_bytes();
+        Promise::new(self.shade_contract_id.clone())
+            .function_call(
+                "update_member_access".to_string(),
+                shade_args,
+                1,  // Minimal deposit (1 yocto)
+                300_000_000_000_000  // Gas
+            );
+        log!("Added {} to group {} (Shade access updated)", user_id, group_id);
     }
 
     #[payable]
@@ -89,13 +121,17 @@ impl Contract {
         let members = self.group_members.get_mut(&group_id).expect("Group not found");
         if let Some(pos) = members.iter().position(|x| x == &user_id) {
             members.swap_remove(pos.try_into().unwrap());
-            // Auto-rotate key
-            let new_key_bytes: Vec<u8> = env::random_seed()[0..32].to_vec();
-            let new_key = BASE64_STANDARD.encode(new_key_bytes);
-            let mut group = group.clone();
-            group.group_key = Some(new_key);
-            self.groups.insert(group_id.clone(), group); // Clone group_id to avoid move
-            log!("Revoked {} from group {} and rotated key", user_id, group_id);
+            let shade_contract = "ac-proxy.nova-shade-agent.testnet".parse::<AccountId>().expect("Invalid Shade contract ID");  // Update to ac-sandbox for Phala
+            let rotation_args = json!({ "group_id": group_id.clone() }).to_string().into_bytes();
+            let rotation_promise = Promise::new(shade_contract)
+                .function_call(
+                    "rotate_key".to_string(),  // Shade func to rotate
+                    rotation_args,
+                    0,  // No deposit
+                    300_000_000_000_000  // Gas for rotation
+                );
+            rotation_promise;
+            log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
         } else {
             env::panic_str("User not a member");
         }
@@ -107,29 +143,10 @@ impl Contract {
     }
 
     #[payable]
-    pub fn store_group_key(&mut self, group_id: String, key: String) {
-        let group = self.groups.get(&group_id).expect("Group not found");
-        let caller = env::predecessor_account_id();
-        assert_eq!(caller, group.owner, "Only group owner can store key");
-        let key_bytes = BASE64_STANDARD.decode(&key).expect("Invalid base64 key");
-        assert_eq!(key_bytes.len(), 32, "Key must be 32 bytes");
-        let mut group = group.clone();
-        group.group_key = Some(key);
-        self.groups.insert(group_id.clone(), group);
-        log!("Key stored for group {}", group_id);
-    }
-
-    pub fn get_group_key(&self, group_id: String, user_id: AccountId) -> String {
-        assert!(self.is_authorized(group_id.clone(), user_id), "Unauthorized");
-        let group = self.groups.get(&group_id).expect("Group not found");
-        group.group_key.clone().expect("No key set")
-    }
-
-    #[payable]
     pub fn record_transaction(&mut self, group_id: String, user_id: AccountId, file_hash: String, ipfs_hash: String) -> String {
         assert!(self.groups.contains_key(&group_id), "Group not found");
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "User not authorized");
-        let caller = env::predecessor_account_id();
+        // removed owner only, now any caller in group can record
         let trans_id = hex::encode(env::sha256(&format!(
             "{}{}{}{}{}",
             group_id,
@@ -158,6 +175,47 @@ impl Contract {
             .cloned()
             .collect()
     }
+
+    #[payable]
+    pub fn approve_shade_code_hash(&mut self, code_hash: String) {
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, self.owner, "Only owner can approve code hash");
+        self.shade_code_hash = Some(code_hash);
+        log!("Approved Shade code hash: {}", code_hash);
+    }
+
+    pub fn register_shade_worker(&mut self, worker_id: AccountId, attestation: Vec<u8>) {
+        let expected_hash = self.shade_code_hash.as_ref().expect("No code hash approved");
+        // Simplified verify (in local ac-proxy: assume valid; prod: integrate phala-sdk for TEE quote)
+        let checksum = hex::encode(env::sha256(&attestation));  // Stub: Hash attestation
+        assert!(checksum.starts_with("0x"), "Invalid attestation format");  // Basic check
+        self.workers.insert(worker_id.clone(), checksum);
+        log!("Registered Shade worker: {} with checksum {}", worker_id, checksum);
+    }
+
+    pub fn get_access_token(&self, group_id: String, user_id: AccountId) -> String {
+        assert!(self.is_authorized(group_id.clone(), user_id.clone()), "Unauthorized");
+        let payload = json!({
+            "group_id": group_id,
+            "user_id": user_id.to_string(),
+            "exp": env::block_timestamp() + 3_600_000_000_000u64  // 1h in ns
+        }).to_string();
+        let payload_bytes = payload.as_bytes();
+        let hash = env::sha256(payload_bytes);
+        // Stub sig (local: use env::random; prod: near-crypto::signer)
+        let sig = hex::encode(env::random_seed()[0..64].to_vec());  // 64-byte dummy
+        let token = format!("{}.{}", BASE64_STANDARD.encode(payload_bytes), sig);
+        log!("Generated access token for {}/{}", group_id, user_id);
+        token
+    }
+
+    // Private request_signature (guarded; for key ops only; omni stub)
+    // Call via Shade API; restricts to nova_key_ paths
+    pub fn request_signature(&self, path: String, payload: Vec<u8>, key_type: String) -> String {
+        assert!(path.starts_with("nova_key_"), "Restricted path: key ops only");
+        // Stub: Return dummy sig (prod: Promise to MPC/Shade)
+        hex::encode(env::sha256(&payload))  // Placeholder
+    }
 }
 
 // Inline tests (not compiled into the final contract)
@@ -176,7 +234,7 @@ mod tests {
 
     #[test]
     fn register_group_works() {
-        let owner: AccountId = "owner.testnet".parse().expect("Invalid AccountId");
+        let owner: AccountId = "owner.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone());
@@ -236,7 +294,6 @@ mod tests {
         contract.add_group_member("test_group".to_string(), member.clone());
         contract.revoke_group_member("test_group".to_string(), member.clone());
         assert!(!contract.is_authorized("test_group".to_string(), member));
-        assert!(contract.groups.get(&"test_group".to_string()).unwrap().group_key.is_some());
     }
 
     #[test]
@@ -249,54 +306,6 @@ mod tests {
         let mut contract = Contract::new(owner);
         contract.register_group("test_group".to_string());
         contract.revoke_group_member("test_group".to_string(), member);
-    }
-
-    #[test]
-    fn store_and_get_group_key_works() {
-        let owner: AccountId = "owner.testnet".parse().expect("Invalid AccountId");
-        let member: AccountId = "member.testnet".parse().expect("Invalid AccountId");
-        let context = get_context(owner.clone());
-        testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone());
-        contract.register_group("test_group".to_string());
-        contract.add_group_member("test_group".to_string(), member.clone());
-        let key = BASE64_STANDARD.encode([0u8; 32]); // Valid 32-byte key
-        contract.store_group_key("test_group".to_string(), key.clone());
-        let context = get_context(member.clone());
-        testing_env!(context.build());
-        let retrieved_key = contract.get_group_key("test_group".to_string(), member.clone());
-        assert_eq!(retrieved_key, key);
-    }
-
-    #[test]
-    #[should_panic(expected = "Only group owner can store key")]
-    fn store_group_key_fails_non_owner() {
-        let owner: AccountId = "owner.testnet".parse().expect("Invalid AccountId");
-        let non_owner: AccountId = "not_owner.testnet".parse().expect("Invalid AccountId");
-        let context = get_context(owner.clone());
-        testing_env!(context.build());
-        let mut contract = Contract::new(owner);
-        contract.register_group("test_group".to_string());
-        let context = get_context(non_owner);
-        testing_env!(context.build());
-        let key = BASE64_STANDARD.encode([0u8; 32]);
-        contract.store_group_key("test_group".to_string(), key);
-    }
-
-    #[test]
-    #[should_panic(expected = "Unauthorized")]
-    fn get_group_key_fails_unauthorized() {
-        let owner: AccountId = "owner.testnet".parse().expect("Invalid AccountId");
-        let non_member: AccountId = "non_member.testnet".parse().expect("Invalid AccountId");
-        let context = get_context(owner.clone());
-        testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone());
-        contract.register_group("test_group".to_string());
-        let key = BASE64_STANDARD.encode([0u8; 32]);
-        contract.store_group_key("test_group".to_string(), key);
-        let context = get_context(non_member.clone());
-        testing_env!(context.build());
-        contract.get_group_key("test_group".to_string(), non_member.clone());
     }
 
     #[test]
@@ -332,11 +341,11 @@ mod tests {
         let mut contract = Contract::new(owner.clone());
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
-    
+
         // Switch to member context (non-owner)
         let context = get_context(member.clone());
         testing_env!(context.build());
-    
+
         let trans_id = contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
@@ -400,5 +409,99 @@ mod tests {
         let mut contract = Contract::new(owner.clone());
         contract.register_group("test_group".to_string());
         contract.get_transactions_for_group("test_group".to_string(), non_member);
+    }
+
+    #[test]
+    fn approve_shade_code_hash_works() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner);
+        contract.approve_shade_code_hash("dummy_hash".to_string());
+        assert_eq!(contract.shade_code_hash, Some("dummy_hash".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "Only owner can approve code hash")]
+    fn approve_shade_code_hash_fails_non_owner() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let non_owner: AccountId = "non_owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner);
+        let context = get_context(non_owner);
+        testing_env!(context.build());
+        contract.approve_shade_code_hash("dummy_hash".to_string());
+    }
+
+    #[test]
+    fn register_shade_worker_works() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone());
+        contract.approve_shade_code_hash("dummy_hash".to_string());
+        let worker: AccountId = "worker.testnet".parse().unwrap();
+        let attestation = vec![0u8; 64];  // Dummy
+        contract.register_shade_worker(worker.clone(), attestation);
+        assert!(contract.workers.contains_key(&worker));
+    }
+
+    #[test]
+    #[should_panic(expected = "No code hash approved")]
+    fn register_shade_worker_fails_no_hash() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner);
+        let worker: AccountId = "worker.testnet".parse().unwrap();
+        let attestation = vec![0u8; 64];
+        contract.register_shade_worker(worker, attestation);
+    }
+
+    #[test]
+    fn get_access_token_works() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let member: AccountId = "member.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone());
+        contract.register_group("test_group".to_string());
+        contract.add_group_member("test_group".to_string(), member.clone());
+        let token = contract.get_access_token("test_group".to_string(), member.clone());
+        assert!(!token.is_empty());
+        assert!(token.contains("."));  // Payload + sig
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn get_access_token_fails_unauthorized() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let non_member: AccountId = "non_member.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone());
+        contract.register_group("test_group".to_string());
+        contract.get_access_token("test_group".to_string(), non_member);
+    }
+
+    #[test]
+    fn request_signature_guarded_works() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let contract = Contract::new(owner);
+        let sig = contract.request_signature("nova_key_test".to_string(), vec![0u8; 32], "Ecdsa".to_string());
+        assert!(!sig.is_empty());  // Dummy hash
+    }
+
+    #[test]
+    #[should_panic(expected = "Restricted path: key ops only")]
+    fn request_signature_fails_invalid_path() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let contract = Contract::new(owner);
+        contract.request_signature("invalid_path".to_string(), vec![0u8; 32], "Ecdsa".to_string());
     }
 }
