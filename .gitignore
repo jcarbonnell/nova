@@ -13,13 +13,15 @@ nova-venv/
 contract/target
 contract/*.wasm
 
+# Demos
+demos/.env
+demos/target
+demos/Cargo.lock
+demos/node_modules/
+demos/package-lock.json
+
 # MCP server
 mcp-server/.env
-
-# NOVA sdk RS
-nova-sdk-rs/Cargo.lock
-nova-sdk-rs/target
-nova-sdk-rs/.env
 
 # NOVA sdk JS
 nova-sdk-js/package-lock.json
@@ -28,9 +30,14 @@ nova-sdk-js/.env
 nova-sdk-js/npm-debug.log
 nova-sdk-js/yarn-error.log
 
-# Demos
-demos/.env
-demos/target
-demos/Cargo.lock
-demos/node_modules/
-demos/package-lock.json
+# NOVA sdk RS
+nova-sdk-rs/Cargo.lock
+nova-sdk-rs/target
+nova-sdk-rs/.env
+
+# Shade agent
+shade-agent/node_modules/
+shade-agent/.env
+shade-agent/.env*.local
+shade-agent/package-lock.json
+shade-agent/frontend/package-lock.json

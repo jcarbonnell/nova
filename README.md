@@ -20,7 +20,7 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 - **Revocation & Key Rotation**: Remove members and rotate keys with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
-## Group Key Security: Addressing Common Concerns
+## Group Key Security:
 
 **The group key is not published publicly in a way that allows unrestricted access by anyone.**
 
@@ -209,6 +209,7 @@ Comprehensive documentation is available on GitBook:
 - **Token-Gated Access**: Reinforce access control with NFT/token holdings (Access Token NFTs)?
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
 - **Dataset Monetization**: Add pricing to file upload so file owners can monetize dataset access.
+- **Multi-Party Upload**: So far all members can upload, but a contract update (New method: grant_publish_rights(group_id: String, user_id: AccountId, can_publish: bool))could add per-member publish rights. 
 
 ## Contributing
 
