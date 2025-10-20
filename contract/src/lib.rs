@@ -1,4 +1,4 @@
-// NOVA contract version 0.2.0 - hybridation with Shade/TEEs
+// NOVA contract version 0.2.0 - hybridization with Shade/TEEs
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};

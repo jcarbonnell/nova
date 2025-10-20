@@ -26,7 +26,7 @@ app.get("/", (c) => c.json({ message: "App is running" }));
 app.route("/api/eth-account", ethAccount);
 app.route("/api/agent-account", agentAccount);
 app.route("/api/transaction", transaction);
-app.route('/key', keyMgmt);  // Add this after other routes
+app.route("/api/key-management", keyMgmt);
 
 // Start the server
 const port = Number(process.env.PORT || "3000");
