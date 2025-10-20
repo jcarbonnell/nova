@@ -20,7 +20,7 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 - **Revocation & Key Rotation**: Remove members and rotate keys with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
-## Group Key Security: TEE-stored keys (NOVA v2)
+## Group Key Security (temporary, Shade/TEE upgrade coming soon)
 
 **The group key is not published publicly in a way that allows unrestricted access by anyone.**
 
