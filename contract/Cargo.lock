@@ -2070,10 +2070,13 @@ dependencies = [
 
 [[package]]
 name = "nova"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "borsh",
  "hex",
+ "near-crypto",
+ "near-primitives",
  "near-sdk",
  "near-workspaces",
  "schemars 0.8.22",
