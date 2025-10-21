@@ -27,7 +27,7 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 In NOVA's design, group keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
 - **Off-Chain Key Management**: Keys are derived and encrypted in TEE-secure SQLite databases, accessible only by verified Shade workers (multi-instance with identical code hashes for redundancy and shared access).
 - **No On-Chain Keys**: The smart contract stores only group metadata and Shade attestations (checksums/code hashes)—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
-- **Secure Distribution**: Users request ephemeral JWT access tokens from the contract (gated by on-chain membership). Tokens are verified in-TEE before key release, preventing unauthorized access.
+- **Secure Distribution**: Users request ephemeral nonce-based access tokens from the contract (gated by on-chain membership). Tokens incorporate a timestamp-derived SHA256 nonce (preventing replay attacks) and are verified in-TEE before key release, ensuring single-use validity without shared secrets.
 - **Verification & Attestation**: Every key operation returns a TEE checksum (via agentInfo), proving execution in genuine hardware with unmodified code—no tampering possible.
 - **Rotation & Revocation**: On member removal, keys rotate in-TEE (new derivation), invalidating prior access without re-encryption overhead.
 - **Attack Resistance**: Even targeted attacks (e.g., indexing interactions or RPC dumps) can't extract keys: they're never on-chain. High-value targets (e.g., AI datasets) remain secure against nation-state or sophisticated threats.
@@ -148,7 +148,7 @@ println!("Uploaded: {}", result.cid);
 1. **Client-Side Encryption**: Files encrypted locally before upload
 2. **IPFS Storage**: Encrypted files stored on decentralized IPFS
 3. **NEAR Blockchain**: Access control groups and transaction logs
-4. **Key Management**: Group keys managed off-chain in verifiable TEEs via Shade Agents—never exposed on-chain, distributed via secure tokens with attestation proofs.
+4. **Key Management**: Group keys managed off-chain in verifiable TEEs via Shade Agents—never exposed on-chain, distributed via nonce-based access tokens with attestation proofs.
 
 
 ## Use Cases
