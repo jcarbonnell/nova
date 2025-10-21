@@ -1,4 +1,4 @@
-// NOVA contract v0.2.0 - hybridization with Shade/TEEs
+// NOVA contract v0.2.1 - hybridization with Shade/TEEs (no on-chain secrets)
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise, borsh::BorshDeserialize, NearToken};
 use near_sdk::borsh::{BorshSerialize, BorshSchema};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -27,7 +27,7 @@ pub struct Contract {
     transactions: IterableMap<String, Transaction>,
     shade_code_hash: Option<String>,
     workers: LookupMap<AccountId, String>,
-    jwt_secret: String,
+    used_nonces: LookupMap<String, bool>,
 }
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -36,6 +36,7 @@ enum StorageKey {
     GroupMembers,
     Transactions,
     Workers,
+    UsedNonces,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -57,7 +58,7 @@ pub struct Transaction {
 #[near]
 impl Contract {
     #[init]
-    pub fn new(owner: AccountId, shade_contract_id: AccountId, jwt_secret: String) -> Self {
+    pub fn new(owner: AccountId, shade_contract_id: AccountId) -> Self {
         Self {
             owner,
             shade_contract_id,
@@ -66,7 +67,7 @@ impl Contract {
             transactions: IterableMap::new(StorageKey::Transactions),
             shade_code_hash: None,
             workers: LookupMap::new(StorageKey::Workers),
-            jwt_secret,
+            used_nonces: LookupMap::new(StorageKey::UsedNonces),
         }
     }
 
@@ -191,8 +192,8 @@ impl Contract {
     }
 
     pub fn get_group_checksum(&self, group_id: String) -> Option<String> {
-    self.groups.get(&group_id).and_then(|g| g.shade_checksum.clone())
-}
+        self.groups.get(&group_id).and_then(|g| g.shade_checksum.clone())
+    }
 
     #[payable]
     pub fn approve_shade_code_hash(&mut self, code_hash: String) {
@@ -210,22 +211,33 @@ impl Contract {
         log!("Registered Shade worker: {} with checksum {}", worker_id, checksum);
     }
 
-    pub fn get_access_token(&self, group_id: String, user_id: AccountId) -> String {
+    pub fn get_access_token(&mut self, group_id: String, user_id: AccountId) -> String {
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "Unauthorized");
+        let timestamp = env::block_timestamp();
+        let nonce_input = format!("{}{}{}", group_id, user_id, timestamp);
+        let nonce = hex::encode(env::sha256(nonce_input.as_bytes()));
+        let nonce_key = format!("{}.{}.{}", group_id, user_id, nonce);
+        assert!(!self.used_nonces.contains_key(&nonce_key), "Nonce already used (replay attack)");
+        self.used_nonces.insert(nonce_key, true); // Mark used (single-use)
         let payload = json!({
             "group_id": group_id,
             "user_id": user_id.to_string(),
-            "exp": env::block_timestamp() + 3_600_000_000_000u64
+            "nonce": nonce,
+            "timestamp": timestamp
         }).to_string();
         let payload_bytes = payload.as_bytes();
-        let _hash = env::sha256(payload_bytes);
-        // Stub sig (local: use env::random; prod: near-crypto::signer)
-        let seed = env::random_seed();  // 32 bytes
-        let sig_bytes = [&seed[..], &seed[..]].concat();  // Concat to 64 bytes (dummy)
+        let seed = env::random_seed();
+        let sig_bytes = [&seed[..32], &seed[32..]].concat(); // 64 bytes dummy sig
         let sig = hex::encode(sig_bytes);
         let token = format!("{}.{}", BASE64_STANDARD.encode(payload_bytes), sig);
-        log!("Generated access token for {}/{}", group_id, user_id);
+        log!("Generated nonce-based token for {}/{}", group_id, user_id);
         token
+    }
+
+    // View for Shade verification
+    pub fn get_nonce_validity(&self, group_id: String, user_id: AccountId, nonce: String) -> bool {
+        let nonce_key = format!("{}.{}.{}", group_id, user_id, nonce);
+        !self.used_nonces.contains_key(&nonce_key) // True if not used (fresh)
     }
 
     // Private: request_signature via Shade API; restricts to nova_key_ paths
@@ -249,8 +261,19 @@ mod tests {
         let mut builder = VMContextBuilder::new();
         builder.signer_account_id(signer.clone());
         builder.predecessor_account_id(signer);
-        builder.prepaid_gas(Gas::from_tgas(1500));  // Increased: Covers promises + overhead
+        builder.prepaid_gas(Gas::from_tgas(1500));
         builder
+    }
+
+    #[test]
+    fn test_new_initializes_without_jwt() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let contract = Contract::new(owner.clone(), shade_id.clone());
+        assert_eq!(contract.owner, owner);
+        assert_eq!(contract.shade_contract_id, shade_id);
     }
 
     #[test]
@@ -259,7 +282,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         assert!(contract.groups.contains_key(&"test_group".to_string()));
     }
@@ -272,8 +295,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let mut context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
-        // Switch context to non_owner with gas
+        let mut contract = Contract::new(owner, shade_id);
         context = get_context(non_owner);
         testing_env!(context.build());
         contract.register_group("test_group".to_string());
@@ -286,7 +308,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         assert!(contract.is_authorized("test_group".to_string(), member));
@@ -301,7 +323,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let mut context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner, shade_id);
         contract.register_group("test_group".to_string());
         context = get_context(non_owner);
         testing_env!(context.build());
@@ -315,7 +337,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         contract.revoke_group_member("test_group".to_string(), member.clone());
@@ -330,7 +352,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner, shade_id);
         contract.register_group("test_group".to_string());
         contract.revoke_group_member("test_group".to_string(), member);
     }
@@ -342,7 +364,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         let trans_id = contract.record_transaction(
@@ -367,7 +389,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         let context = get_context(member.clone());
@@ -389,7 +411,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.record_transaction(
             "test_group".to_string(),
@@ -406,7 +428,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         contract.record_transaction(
@@ -435,7 +457,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.get_transactions_for_group("test_group".to_string(), non_member);
     }
@@ -446,7 +468,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner, shade_id);
         contract.approve_shade_code_hash("dummy_hash".to_string());
         assert_eq!(contract.shade_code_hash, Some("dummy_hash".to_string()));
     }
@@ -459,7 +481,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let mut context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner, shade_id);
         context = get_context(non_owner);
         testing_env!(context.build());
         contract.approve_shade_code_hash("dummy_hash".to_string());
@@ -471,7 +493,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.approve_shade_code_hash("dummy_hash".to_string());
         let worker: AccountId = "worker.testnet".parse().unwrap();
         let attestation = vec![0u8; 64];
@@ -486,7 +508,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner, shade_id);
         let worker: AccountId = "worker.testnet".parse().unwrap();
         let attestation = vec![0u8; 64];
         contract.register_shade_worker(worker, attestation);
@@ -499,12 +521,12 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
         let token = contract.get_access_token("test_group".to_string(), member.clone());
         assert!(!token.is_empty());
-        assert!(token.contains("."));
+        assert!(token.contains("."), "Token should contain separator");
     }
 
     #[test]
@@ -515,9 +537,53 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let mut contract = Contract::new(owner.clone(), shade_id, "dummy_jwt".to_string());
+        let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.get_access_token("test_group".to_string(), non_member);
+    }
+
+    #[test]
+    fn get_nonce_validity_works_fresh() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let member: AccountId = "member.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id);
+        contract.register_group("test_group".to_string());
+        contract.add_group_member("test_group".to_string(), member.clone());
+    
+        // Test that a fresh (unused) nonce is valid
+        let fresh_nonce = "some_fresh_nonce_that_was_never_used";
+        let valid = contract.get_nonce_validity("test_group".to_string(), member.clone(), fresh_nonce.to_string());
+        assert!(valid, "Fresh nonce should be valid");
+    }
+
+    #[test]
+    fn get_nonce_validity_fails_used() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let member: AccountId = "member.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id);
+        contract.register_group("test_group".to_string());
+        contract.add_group_member("test_group".to_string(), member.clone());
+    
+        // Generate token which marks the nonce as used
+        let token = contract.get_access_token("test_group".to_string(), member.clone());
+    
+        // Extract the actual nonce from the token
+        let parts: Vec<&str> = token.split('.').collect();
+        let payload_b64 = parts[0];
+        let payload_bytes = BASE64_STANDARD.decode(payload_b64).unwrap();
+        let payload_str = String::from_utf8(payload_bytes).unwrap();
+        let payload_json: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        let nonce = payload_json["nonce"].as_str().unwrap().to_string();
+    
+        // Verify that the used nonce is now invalid
+        let valid = contract.get_nonce_validity("test_group".to_string(), member.clone(), nonce);
+        assert!(!valid, "Used nonce should be invalid");
     }
 
     #[test]
@@ -526,7 +592,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let contract = Contract::new(owner, shade_id);
         let sig = contract.request_signature("nova_key_test".to_string(), vec![0u8; 32], "Ecdsa".to_string());
         assert!(!sig.is_empty());
     }
@@ -538,7 +604,7 @@ mod tests {
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let context = get_context(owner.clone());
         testing_env!(context.build());
-        let contract = Contract::new(owner, shade_id, "dummy_jwt".to_string());
+        let contract = Contract::new(owner, shade_id);
         contract.request_signature("invalid_path".to_string(), vec![0u8; 32], "Ecdsa".to_string());
     }
 }

@@ -3,6 +3,7 @@ use near_workspaces;
 use near_workspaces::types::{NearToken, Gas};
 use near_sdk::serde_json::{json, Value};
 use std::error::Error;
+use base64::Engine;
 
 #[tokio::test]
 async fn test_contract_is_operational() -> Result<(), Box<dyn Error>> {
@@ -42,13 +43,12 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     // Real Shade agent contract ID
     let shade_contract_id = "ac-sandbox.nova-shade-agent.testnet";
 
-    // Initialize NOVA contract with real Shade agent
+    // Initialize NOVA contract with real Shade agent (NO jwt_secret parameter)
     let init_outcome = owner_account
         .call(contract.id(), "new")
         .args_json(json!({
             "owner": owner_account.id().to_string(),
-            "shade_contract_id": shade_contract_id,
-            "jwt_secret": "dummy_jwt_secret"
+            "shade_contract_id": shade_contract_id
         }))
         .transact()
         .await?;
@@ -83,16 +83,14 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     println!("✅ Shade worker registered");
 
     // Test register_group (will call real Shade agent)
-    // Allocate plenty of gas for the entire chain
     let register_outcome = owner_account
         .call(contract.id(), "register_group")
         .args_json(json!({"group_id": "test_group_nova"}))
         .deposit(NearToken::from_yoctonear(10_000_000_000_000))
-        .gas(Gas::from_tgas(300))  // Just give it tons of gas
+        .gas(Gas::from_tgas(300))
         .transact()
         .await?;
     
-    // This should succeed now with real Shade agent
     let result = register_outcome.into_result();
     if let Err(e) = &result {
         println!("⚠️  Register group error: {:?}", e);
@@ -101,7 +99,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
 
     println!("✅ Group registered (Shade agent called)");
 
-    // Wait a moment for cross-contract call to complete
+    // Wait for cross-contract call to complete
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // Verify group exists
@@ -150,18 +148,56 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
 
     println!("✅ Member authorization verified");
 
-    // Test get_access_token
-    let access_token: String = contract
-        .view("get_access_token")
+    // Test get_access_token (now requires a mutable call, not a view)
+    let token_outcome = member_account
+        .call(contract.id(), "get_access_token")
         .args_json(json!({
             "group_id": "test_group_nova",
             "user_id": member_account.id().to_string()
         }))
+        .transact()
+        .await?;
+    
+    let access_token: String = token_outcome.json()?;
+    assert!(!access_token.is_empty(), "Token should not be empty");
+    assert!(access_token.contains("."), "Token should have separator");
+
+    println!("✅ Nonce-based access token generated: {}", &access_token[..30]);
+
+    // NEW: Test get_nonce_validity with a fresh nonce
+    let fresh_nonce_valid: bool = contract
+        .view("get_nonce_validity")
+        .args_json(json!({
+            "group_id": "test_group_nova",
+            "user_id": member_account.id().to_string(),
+            "nonce": "some_fresh_unused_nonce"
+        }))
         .await?
         .json()?;
-    assert!(!access_token.is_empty(), "Token should not be empty");
+    assert!(fresh_nonce_valid, "Fresh nonce should be valid");
 
-    println!("✅ Access token generated: {}", &access_token[..20]);
+    println!("✅ Fresh nonce validation works");
+
+    // NEW: Extract nonce from token and verify it's marked as used
+    let token_parts: Vec<&str> = access_token.split('.').collect();
+    let payload_b64 = token_parts[0];
+    let payload_bytes = base64::engine::general_purpose::STANDARD.decode(payload_b64)?;
+    let payload_str = String::from_utf8(payload_bytes)?;
+    let payload_json: Value = serde_json::from_str(&payload_str)?;
+    let used_nonce = payload_json["nonce"].as_str().unwrap().to_string();
+
+    let used_nonce_valid: bool = contract
+        .view("get_nonce_validity")
+        .args_json(json!({
+            "group_id": "test_group_nova",
+            "user_id": member_account.id().to_string(),
+            "nonce": used_nonce
+        }))
+        .await?
+        .json()?;
+    assert!(!used_nonce_valid, "Used nonce should be invalid");
+
+    println!("✅ Used nonce validation works (replay protection)");
 
     // Test record_transaction
     let record_outcome = member_account
@@ -232,7 +268,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "user_id": member_account.id().to_string()
         }))
         .deposit(NearToken::from_yoctonear(1_000_000_000_000))
-        .max_gas()  // Use maximum available gas
+        .max_gas()
         .transact()
         .await?;
     
@@ -259,7 +295,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     assert!(!is_authorized_after, "Member should not be authorized after revoke");
 
     println!("✅ Member revocation verified");
-    println!("\n🎉 All tests passed with real Shade agent integration!");
+    println!("\n🎉 All tests passed with nonce-based tokens and real Shade agent integration!");
 
     Ok(())
 }
