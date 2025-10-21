@@ -20,15 +20,19 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 - **Revocation & Key Rotation**: Remove members and rotate keys with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
-## Group Key Security (temporary, Shade/TEE upgrade coming soon)
+## Group Key Security
 
-**The group key is not published publicly in a way that allows unrestricted access by anyone.**
+**Keys are managed off-chain in verifiable TEEs via Shade Agents. Never published on-chain, NOVA file-sharing ensures unbreakable privacy against blockchain fetches.**
 
-While the group key is stored on-chain in the NEAR smart contract's state (as a base64-encoded string in the groups map), retrieval is strictly gated by access controls enforced at the contract level. This keeps the key private and secure, even though it's on a public blockchain.
+In NOVA's design, group keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
+- **Off-Chain Key Management**: Keys are derived and encrypted in TEE-secure SQLite databases, accessible only by verified Shade workers (multi-instance with identical code hashes for redundancy and shared access).
+- **No On-Chain Keys**: The smart contract stores only group metadata and Shade attestations (checksums/code hashes)—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
+- **Secure Distribution**: Users request ephemeral JWT access tokens from the contract (gated by on-chain membership). Tokens are verified in-TEE before key release, preventing unauthorized access.
+- **Verification & Attestation**: Every key operation returns a TEE checksum (via agentInfo), proving execution in genuine hardware with unmodified code—no tampering possible.
+- **Rotation & Revocation**: On member removal, keys rotate in-TEE (new derivation), invalidating prior access without re-encryption overhead.
+- **Attack Resistance**: Even targeted attacks (e.g., indexing interactions or RPC dumps) can't extract keys: they're never on-chain. High-value targets (e.g., AI datasets) remain secure against nation-state or sophisticated threats.
 
-NEAR contract state isn't "broadcast" or queryable like public variables. Instead, access requires explicit view calls to methods like get_group_key(group_id, user_id), which include built-in authorization checks. You must provide a valid private_key and account_id (matching a group member) to make the view call—the contract verifies is_authorized by scanning the group_members vector for the user_id. If not a member, it panics with "Unauthorized," preventing key return. Signed calls (via SDKs/MCP) use the caller's authenticated predecessor_account_id for enforcement.
-
-In short: keys are fetchable only by verified members, with revocation (remove + rotate) ensuring non-members can't access future data. No key leaks via raw state dumps (RPCs respect logic); future extensions (e.g., TEE-gated or asymmetric wrapping) will add layers without redesign.
+NOVA's architecture combined with Shade/TEEs confidentiality provides bullet-proof security for your data: verifiable, private, and resilient, aligning with NEAR's user-owned AI vision.
 
 ## NOVA x NEAR
 
@@ -131,20 +135,21 @@ println!("Uploaded: {}", result.cid);
     │   SDK   │
     └────┬────┘
          │
-    ┌────┴─────────────┐
-    │                  │
-┌───▼────┐      ┌─────▼─────┐
-│  IPFS  │      │   NEAR    │
-│(Pinata)│      │ Blockchain│
-└────────┘      └───────────┘
- Encrypted       Access Control
-   Storage        & Metadata
+    ┌────┴─────────────┐─────────────────┐
+    │                  │                 │
+┌───▼────┐      ┌─────▼─────┐        ┌───▼───────┐
+│  IPFS  │      │   NEAR    │        │ Shade/TEE │
+│(Pinata)│      │ Blockchain│        │           │
+└────────┘      └───────────┘        └───────────┘
+ Encrypted       Access Control        Key 
+   Storage        & Group Metadata      Management
 ```
 
 1. **Client-Side Encryption**: Files encrypted locally before upload
 2. **IPFS Storage**: Encrypted files stored on decentralized IPFS
 3. **NEAR Blockchain**: Access control groups and transaction logs
-4. **Key Management**: Group keys stored on-chain, encrypted per member
+4. **Key Management**: Group keys managed off-chain in verifiable TEEs via Shade Agents—never exposed on-chain, distributed via secure tokens with attestation proofs.
+
 
 ## Use Cases
 
