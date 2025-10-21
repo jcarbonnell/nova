@@ -967,8 +967,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "335ff9f135e4384c8150d6f27c6daed433577f86b4750418338c01a1a2528592"
 dependencies = [
  "cfg-if 1.0.3",
+ "js-sys",
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2072,16 +2074,13 @@ dependencies = [
 name = "nova"
 version = "0.2.0"
 dependencies = [
- "base64 0.22.1",
  "borsh",
+ "getrandom 0.2.16",
  "hex",
- "near-crypto",
- "near-primitives",
  "near-sdk",
  "near-workspaces",
  "schemars 0.8.22",
  "serde",
- "serde_json",
  "tokio",
 ]
 

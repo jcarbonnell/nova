@@ -4,10 +4,10 @@ use near_sdk::borsh::{BorshSerialize, BorshSchema};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
-use serde_json::json;
+use near_sdk::serde_json::json;
 use hex;
 use near_sdk::Gas;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use near_sdk::base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 // For callback deserialization
 #[derive(BorshDeserialize, BorshSerialize, BorshSchema)]
@@ -90,7 +90,7 @@ impl Contract {
                 "generate_key".to_string(),
                 args,
                 NearToken::from_yoctonear(0),
-                Gas::from_tgas(300)
+                Gas::from_tgas(250)
             )
             .then(
                 Promise::new(env::current_account_id())
@@ -98,7 +98,7 @@ impl Contract {
                         "on_key_generated".to_string(),
                         callback_args,
                         NearToken::from_yoctonear(0),
-                        Gas::from_tgas(100)
+                        Gas::from_tgas(30)
                     )
             );
     }
@@ -119,22 +119,14 @@ impl Contract {
     }
 
     #[payable]
-    pub fn add_group_member(&mut self, group_id: String, user_id: AccountId) -> Promise {
+    pub fn add_group_member(&mut self, group_id: String, user_id: AccountId) {
         let group = self.groups.get(&group_id).expect("Group not found");
         let caller = env::predecessor_account_id();
         assert_eq!(caller, group.owner, "Only group owner can add");
         let members = self.group_members.get_mut(&group_id).expect("Group not found");
         assert!(!members.iter().any(|x| *x == user_id), "User already a member");
         members.push(user_id.clone());
-        let shade_args = json!({ "group_id": group_id.clone(), "new_member": user_id.to_string(), "action": "add" }).to_string().into_bytes();
-        log!("Added {} to group {} (Shade access updated)", user_id, group_id);
-        Promise::new(self.shade_contract_id.clone())
-            .function_call(
-                "update_member_access".to_string(),
-                shade_args,
-                NearToken::from_yoctonear(1),
-                Gas::from_tgas(300)
-            )
+        log!("Added {} to group {}", user_id, group_id);
     }
 
     #[payable]
@@ -151,7 +143,7 @@ impl Contract {
                     "rotate_key".to_string(),
                     rotation_args,
                     NearToken::from_yoctonear(0),
-                    Gas::from_tgas(300)
+                    Gas::from_tgas(280)
                 );
             log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
         } else {
@@ -233,7 +225,8 @@ impl Contract {
     }
 
     // Private: request_signature via Shade API; restricts to nova_key_ paths
-    pub fn request_signature(&self, path: String, payload: Vec<u8>, _key_type: String) -> String {
+    pub fn request_signature(&self, path: String, payload: Vec<u8>, key_type: String) -> String {
+        let _ = key_type; // explicitly mark as unused to avoid warning
         assert!(path.starts_with("nova_key_"), "Restricted path: key ops only");
         // Stub: Return dummy sig (prod: Promise to MPC/Shade)
         hex::encode(env::sha256(&payload))  // Placeholder

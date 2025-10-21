@@ -1,20 +1,16 @@
+// Shade agent manages keys for NOVA groups in a TEE-secure manner
 import { Hono } from 'hono';
-import { agentInfo, agentView, agentCall } from '@neardefi/shade-agent-js';
+import { agentInfo, agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
-const db = new Database('./nova-keys.db'); // In memory for testing; use file in prod
+const db = new Database('./nova-keys.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS keys (
     group_id TEXT PRIMARY KEY,
     encrypted_key TEXT
-  );
-  CREATE TABLE IF NOT EXISTS group_access (
-    group_id TEXT,
-    user_id TEXT,
-    PRIMARY KEY (group_id, user_id)
   );
 `);
 
@@ -47,7 +43,6 @@ function decryptKey(enc: string): string {
 function verifyToken(token: string): { valid: boolean; user_id?: string; group_id?: string } {
   try {
     const decoded = jwt.verify(token, TEE_SECRET) as jwt.JwtPayload;
-    // Check payload (e.g., exp, group_id match)
     if (decoded.exp && Date.now() >= decoded.exp * 1000) {
       return { valid: false };
     }
@@ -63,12 +58,14 @@ function verifyToken(token: string): { valid: boolean; user_id?: string; group_i
 
 const keyMgmt = new Hono();
 
+// Generate key for a group (called by NOVA contract after group registration)
 keyMgmt.post('/generate_key', async (c) => {
-  const { group_id } = await c.req.json();
+  const { group_id, owner } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
   
   // Verify group exists on-chain
   const groupExists = await agentView({
+    contractId: NOVA_CONTRACT,
     methodName: 'group_contains_key',
     args: { group_id }
   });
@@ -88,31 +85,33 @@ keyMgmt.post('/generate_key', async (c) => {
     return c.json({ error: 'Attestation failed' }, 500);
   }
   
+  console.log(`Generated key for group ${group_id}, owner ${owner}`);
+  
   return c.json({ key, checksum: info.checksum });
 });
 
+// Get key for authorized user (requires JWT token)
 keyMgmt.post('/get_key', async (c) => {
   const { group_id, token } = await c.req.json();
   if (!group_id || !token) return c.json({ error: 'group_id and token required' }, 400);
   
   const tokenInfo = verifyToken(token);
-  if (!tokenInfo.valid) {
+  if (!tokenInfo.valid || !tokenInfo.user_id) {
     return c.json({ error: 'Invalid token' }, 403);
   }
-
-  // Extract user_id from token and verify DB access
-  const user_id = tokenInfo.user_id;
-  if (!user_id) return c.json({ error: 'Token missing user_id' }, 400);
   
-  // Verify on-chain authorization
+  const user_id = tokenInfo.user_id;
+  
+  // Verify on-chain authorization (this is the key security check)
   const authorized = await agentView({
+    contractId: NOVA_CONTRACT,
     methodName: 'is_authorized',
     args: { group_id, user_id }
   });
   if (!authorized) return c.json({ error: 'Unauthorized: On-chain access denied' }, 403);
 
-  // Fetch Key from DB
-  const row = db.prepare('SELECT encrypted_key FROM keys WHERE group_id = ?').get(group_id) as { encrypted_key: string };
+  // Fetch key from DB
+  const row = db.prepare('SELECT encrypted_key FROM keys WHERE group_id = ?').get(group_id) as { encrypted_key: string } | undefined;
   if (!row || !row.encrypted_key) {
     return c.json({ error: 'Key not found' }, 404);
   }
@@ -122,15 +121,19 @@ keyMgmt.post('/get_key', async (c) => {
   // Attest
   const info = await agentInfo();
   
+  console.log(`Retrieved key for group ${group_id}, user ${user_id}`);
+  
   return c.json({ key, checksum: info.checksum });
 });
 
+// Rotate key (called by NOVA contract when member is revoked)
 keyMgmt.post('/rotate_key', async (c) => {
   const { group_id } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
   
   // Verify group exists
   const groupExists = await agentView({
+    contractId: NOVA_CONTRACT,
     methodName: 'group_contains_key',
     args: { group_id }
   });
@@ -139,38 +142,22 @@ keyMgmt.post('/rotate_key', async (c) => {
   // Generate new key, encrypt, update DB (atomic)
   const newKey = crypto.randomBytes(32).toString('base64');  
   const encryptedKey = encryptKey(newKey);
-  db.prepare('UPDATE keys SET encrypted_key = ? WHERE group_id = ?').run([encryptedKey, group_id]);
+  const result = db.prepare('UPDATE keys SET encrypted_key = ? WHERE group_id = ?').run(encryptedKey, group_id);
   
-  // Attest
-  const info = await agentInfo();
-
-  return c.json({ success: true, new_key_hash: crypto.createHash('sha256').update(newKey).digest('hex'), checksum: info.checksum });
-});
-
-// Integrated update_member_access route
-keyMgmt.post('/update_member_access', async (c) => {
-  const { group_id, new_member, action } = await c.req.json();
-  if (!group_id || !new_member || !action) return c.json({ error: 'group_id, new_member, and action (add/remove) required' }, 400);
-  
-  // Call on-chain (e.g., add_group_member or revoke)
-  let onChainMethod = action === 'add' ? 'add_group_member' : 'revoke_group_member';
-  await agentCall({
-    methodName: onChainMethod,
-    args: { group_id, user_id: new_member },
-    gas: '30000000000000'
-  });
-
-  // Update DB access
-  if (action === 'add') {
-    db.prepare('INSERT OR IGNORE INTO group_access (group_id, user_id) VALUES (?, ?)').run(group_id, new_member);
-  } else if (action === 'remove') {
-    db.prepare('DELETE FROM group_access WHERE group_id = ? AND user_id = ?').run(group_id, new_member);
+  if (result.changes === 0) {
+    return c.json({ error: 'Key not found for rotation' }, 404);
   }
-
+  
   // Attest
   const info = await agentInfo();
-  
-  return c.json({ success: true, checksum: info.checksum });
+
+  console.log(`Rotated key for group ${group_id}`);
+
+  return c.json({ 
+    success: true, 
+    new_key_hash: crypto.createHash('sha256').update(newKey).digest('hex'), 
+    checksum: info.checksum 
+  });
 });
 
 export default keyMgmt;
