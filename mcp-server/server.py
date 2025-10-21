@@ -16,6 +16,8 @@ import re
 # Load .env variables
 load_dotenv()
 
+SHADE_API_URL = os.environ.get("SHADE_API_URL", "")
+
 mcp = FastMCP(name="nova-mcp")
 
 def _validate_near_key(private_key: str) -> str:
@@ -35,31 +37,49 @@ def _validate_near_key(private_key: str) -> str:
     return private_key  # Return original with prefix
 
 # Helper functions (callable internally)
-async def _get_group_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
-    """Internal: Retrieves key (async py_near calls)."""
+async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
+    """Internal: Get token from contract → fetch key from Shade → verify checksum."""
     rpc = os.environ["RPC_URL"]
-    private_key = private_key or os.environ.get("NEAR_PRIVATE_KEY", "")
-    private_key = _validate_near_key(private_key)
+    private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
-        result = await acc.view_function(
+        # Step 1: Get token from contract
+        token_result = await acc.view_function(
             contract_id=contract_id,
-            method_name="get_group_key",
+            method_name="get_access_token",
             args={"group_id": group_id, "user_id": user_id}
         )
-        key = result.result  # Str base64
-        if not key:
-            raise Exception(f"No key for {group_id}/{user_id}")
-        key_bytes = base64.b64decode(key)
-        if len(key_bytes) != 32:
-            raise Exception(f"Invalid key length: {len(key_bytes)}")
-        print(f"Retrieved key for {group_id}/{user_id}: {key[:10]}...")  # Debug
-        return key
+        token = token_result.result  # Str token
+        if not token:
+            raise Exception(f"No token for {group_id}/{user_id}")
+        
+        # Step 2: Call Shade API with token
+        if not SHADE_API_URL:
+            raise Exception("SHADE_API_URL not set")
+        shade_response = requests.post(
+            f"{SHADE_API_URL}/api/key-management/get_key",
+            json={"group_id": group_id, "token": token},
+            timeout=15
+        )
+        if shade_response.status_code == 200:
+            shade_data = shade_response.json()
+            key = shade_data.get("key")
+            checksum = shade_data.get("checksum")
+            if not key or not checksum:
+                raise Exception("Invalid Shade response")
+            # Step 3: Verify checksum dynamically against contract
+            verified = await verify_shade_checksum_for_group(group_id, checksum)
+            if not verified:
+                raise Exception(f"Shade attestation invalid: checksum mismatch for {group_id}")
+            print(f"Retrieved key for {group_id}/{user_id} from Shade (verified checksum: {checksum})")
+            return key
+        else:
+            raise Exception(f"Shade fetch failed: {shade_response.text}")
     except Exception as e:
         if "Unauthorized" in str(e):
-            raise Exception("Unauthorized access: Provide your group member account_id and private_key. Or request access from the group owner.")
-        raise Exception(f"Get failed: {str(e)}")
+            raise Exception("Unauthorized: Provide group member creds or request access.")
+        raise Exception(f"Shade key fetch failed: {str(e)}")
     
 async def _group_contains_key(group_id: str, contract_id: str) -> bool:
     """Internal: Check if group exists (view)."""
@@ -223,7 +243,7 @@ def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
 async def register_group(group_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Registers new group on NOVA contract (owner only). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if await _group_contains_key(group_id, contract_id):
@@ -245,7 +265,7 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
 async def add_group_member(group_id: str, member_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Adds member to group (owner only). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if not await _group_contains_key(group_id, contract_id):
@@ -269,7 +289,7 @@ async def add_group_member(group_id: str, member_id: str, account_id: str = None
 async def revoke_group_member(group_id: str, member_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Revokes member from group (owner only, rotates key). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if not await _group_contains_key(group_id, contract_id):
@@ -289,42 +309,21 @@ async def revoke_group_member(group_id: str, member_id: str, account_id: str = N
         return "Revoked"
     raise Exception(f"Revoke failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
 
-@mcp.tool
-async def store_group_key(group_id: str, key: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
-    """Stores symmetric key (base64, 32 bytes) for group on NOVA contract (owner only)."""
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
-    private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
-    rpc = os.environ["RPC_URL"]
-    key_bytes = base64.b64decode(key)
-    if len(key_bytes) != 32:
-        raise Exception(f"Invalid key length: {len(key_bytes)} (must be 32 bytes)")
-    near = Account(account_id, private_key, rpc)
-    await near.startup()  # Initialize account for async calls
-    result = await near.function_call(
-        contract_id=contract_id,
-        method_name="store_group_key",
-        args={"group_id": group_id, "key": key},
-        amount=int("500000000000000000000")  # 0.0005 NEAR yocto
-    )
-    if "SuccessValue" in result.status:
-        print(f"Key stored for {group_id}: {result.status['SuccessValue']}")
-        return "Stored"
-    raise Exception(f"Store failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
 
 @mcp.tool
-async def get_group_key(group_id: str, user_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
-    """Retrieves symmetric key (base64, 32 bytes) for authorized user in group. Provide account_id/private_key as member if not using default."""
+async def get_shade_key(group_id: str, user_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
+    """Retrieves symmetric key from Shade TEE for authorized user. Provide creds as member."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or user_id  # Use user_id as default account
+    account_id = account_id or user_id
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
-    return await _get_group_key(group_id, user_id, contract_id, private_key)
+    return await _get_shade_key(group_id, user_id, contract_id, private_key)
+
 
 @mcp.tool
 async def record_near_transaction(group_id: str, user_id: str, file_hash: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Records file tx on NOVA contract (owner only), returns trans_id. Provide creds as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     return await _record_near_transaction(group_id, user_id, file_hash, ipfs_hash, contract_id, account_id, private_key)
 
@@ -332,11 +331,11 @@ async def record_near_transaction(group_id: str, user_id: str, file_hash: str, i
 async def composite_upload(group_id: str, user_id: str, data: str, filename: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full upload: get_key → encrypt → IPFS pin → record tx (owner for record). Provide creds as owner/member."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
-        # Step 1: Fetch key (uses _get_group_key, which has startup)
-        key = await _get_group_key(group_id, user_id, contract_id, private_key)
+        # Step 1: Fetch key (uses _get_shade_key, which has startup)
+        key = await _get_shade_key(group_id, user_id, contract_id, private_key)
         # Step 2: Encrypt data
         encrypted_b64 = _encrypt_data(data, key)
         # Step 3: Upload (direct)
@@ -354,13 +353,13 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-2.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")
     try:
         # Step 1: Fetch key (member auth)
-        key = await _get_group_key(group_id, account_id, contract_id, private_key)
+        key = await _get_shade_key(group_id, account_id, contract_id, private_key)
         # Step 2: Fetch from IPFS (use internal)
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (use internal)
@@ -403,6 +402,32 @@ async def auth_status(user_id: str, group_id: str = "test_group") -> dict:
         if "Unauthorized" in str(e):
             return {"authorized": False, "groups": [], "member_count": 0}
         raise Exception(f"Auth query failed: {str(e)}")
+    
+@mcp.tool
+async def verify_shade_checksum_for_group(group_id: str, checksum: str) -> bool:
+    """Verifies Shade attestation checksum against on-chain expected for the group."""
+    contract_id = os.environ["CONTRACT_ID"]
+    rpc = os.environ["RPC_URL"]
+    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for views
+    try:
+        acc = Account("dummy", private_key, rpc)  # Dummy account for view
+        await acc.startup()
+        # Fetch expected checksum from contract view
+        checksum_result = await acc.view_function(
+            contract_id=contract_id,
+            method_name="get_group_checksum",  # New view
+            args={"group_id": group_id}
+        )
+        expected_checksum = checksum_result.result  # Str or None
+        if expected_checksum is None:
+            print(f"No checksum set for group {group_id} (key not generated?)")
+            return False
+        verified = expected_checksum == checksum
+        print(f"Checksum verification for {group_id}: expected={expected_checksum}, provided={checksum}, match={verified}")
+        return verified
+    except Exception as e:
+        print(f"Checksum query failed for {group_id}: {str(e)}")
+        return False
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="127.0.0.1", port=8000)

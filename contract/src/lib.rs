@@ -190,6 +190,10 @@ impl Contract {
             .collect()
     }
 
+    pub fn get_group_checksum(&self, group_id: String) -> Option<String> {
+        self.groups.get(&group_id).map(|g| g.shade_checksum.clone())
+    }
+
     #[payable]
     pub fn approve_shade_code_hash(&mut self, code_hash: String) {
         let caller = env::predecessor_account_id();
