@@ -69,7 +69,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             if not key or not checksum:
                 raise Exception("Invalid Shade response")
             # Step 3: Verify checksum dynamically against contract
-            verified = await verify_shade_checksum_for_group(group_id, checksum)
+            verified = await verify_shade_checksum_for_group(group_id, checksum, contract_id)
             if not verified:
                 raise Exception(f"Shade attestation invalid: checksum mismatch for {group_id}")
             print(f"Retrieved key for {group_id}/{user_id} from Shade (verified checksum: {checksum})")
@@ -404,9 +404,9 @@ async def auth_status(user_id: str, group_id: str = "test_group") -> dict:
         raise Exception(f"Auth query failed: {str(e)}")
     
 @mcp.tool
-async def verify_shade_checksum_for_group(group_id: str, checksum: str) -> bool:
+async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract_id: str = None) -> bool:
     """Verifies Shade attestation checksum against on-chain expected for the group."""
-    contract_id = os.environ["CONTRACT_ID"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
     rpc = os.environ["RPC_URL"]
     private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for views
     try:
@@ -415,18 +415,21 @@ async def verify_shade_checksum_for_group(group_id: str, checksum: str) -> bool:
         # Fetch expected checksum from contract view
         checksum_result = await acc.view_function(
             contract_id=contract_id,
-            method_name="get_group_checksum",  # New view
+            method_name="get_group_checksum",
             args={"group_id": group_id}
         )
-        expected_checksum = checksum_result.result  # Str or None
+        # py_near returns result as str; handle None as empty str or explicit check
+        expected_checksum = checksum_result.result if checksum_result.result else None
         if expected_checksum is None:
-            print(f"No checksum set for group {group_id} (key not generated?)")
+            print(f"No checksum set for group {group_id} (key not generated yet?)")
             return False
+        # Ensure str comparison (strip whitespace if needed)
+        expected_checksum = expected_checksum.strip()
         verified = expected_checksum == checksum
         print(f"Checksum verification for {group_id}: expected={expected_checksum}, provided={checksum}, match={verified}")
         return verified
     except Exception as e:
-        print(f"Checksum query failed for {group_id}: {str(e)}")
+        print(f"Checksum query failed for {group_id}: {str(e)} (e.g., RPC error or contract not deployed)")
         return False
 
 if __name__ == "__main__":
