@@ -45,12 +45,14 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
         # Step 1: Get token from contract
-        token_result = await acc.view_function(
+        token_result = await acc.function_call(
             contract_id=contract_id,
             method_name="get_access_token",
-            args={"group_id": group_id, "user_id": user_id}
+            args={"group_id": group_id, "user_id": user_id},
+            amount=int("1000000000000000"),
+            gas=int("50000000000000")
         )
-        token = token_result.result  # Str token
+        token = token_result.status.get('SuccessValue', '')  # Str token
         if not token:
             raise Exception(f"No token for {group_id}/{user_id}")
         
