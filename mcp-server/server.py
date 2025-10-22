@@ -49,7 +49,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             contract_id=contract_id,
             method_name="get_access_token",
             args={"group_id": group_id, "user_id": user_id},
-            amount=int("1000000000000000"),
+            amount=0,
             gas=int("50000000000000")
         )
         token = token_result.status.get('SuccessValue', '')  # Str token

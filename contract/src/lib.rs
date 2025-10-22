@@ -197,6 +197,7 @@ impl Contract {
         log!("Registered Shade worker: {} with checksum {}", worker_id, checksum);
     }
 
+    #[payable]
     pub fn get_access_token(&mut self, group_id: String, user_id: AccountId) -> String {
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "Unauthorized");
         let timestamp = env::block_timestamp();
