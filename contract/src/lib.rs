@@ -1,20 +1,13 @@
 // NOVA contract v0.2.1 - hybridization with Shade/TEEs (no on-chain secrets)
-use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise, borsh::BorshDeserialize, NearToken};
-use near_sdk::borsh::{BorshSerialize, BorshSchema};
+use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, borsh::BorshDeserialize};
+use near_sdk::borsh::{BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use near_sdk::serde_json;
 use near_sdk::serde_json::json;
 use hex;
-use near_sdk::Gas;
 use near_sdk::base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-
-// For callback deserialization
-#[derive(BorshDeserialize, BorshSerialize, BorshSchema)]
-pub struct GroupCallbackArgs {
-    group_id: String,
-    checksum: String,
-}
 
 // Define the contract structure
 #[near(contract_state)]
@@ -30,15 +23,6 @@ pub struct Contract {
     used_nonces: LookupMap<String, bool>,
 }
 
-#[derive(BorshStorageKey, BorshSerialize)]
-enum StorageKey {
-    Groups,
-    GroupMembers,
-    Transactions,
-    Workers,
-    UsedNonces,
-}
-
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
 pub struct Group {
     owner: AccountId,
@@ -52,6 +36,22 @@ pub struct Transaction {
     user_id: String,
     file_hash: String,
     ipfs_hash: String,
+}
+
+#[derive(BorshStorageKey, BorshSerialize)]
+enum StorageKey {
+    Groups,
+    GroupMembers,
+    Transactions,
+    Workers,
+    UsedNonces,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "event_type", content = "data")]
+enum NovaEvent {
+    Registered { group_id: String, owner: AccountId },
+    Revoked { group_id: String, user_id: AccountId, owner: AccountId },
 }
 
 // Implement the contract structure
@@ -81,38 +81,12 @@ impl Contract {
         let mut members = StoreVec::new(group_id.as_bytes());
         members.push(caller.clone());
         self.group_members.insert(group_id.clone(), members);
-        log!("Group {} registered by {} (owner added as member; signal Shade for key init)", group_id, caller);
+        log!("Group {} registered by {} (owner added as member; event emitted for Shade key init)", group_id, caller);
         
-        let args = json!({ "group_id": group_id, "owner": caller.to_string() }).to_string().into_bytes();
-        let callback_args = json!({ "group_id": group_id.clone(), "checksum": "dummy" }).to_string().into_bytes();
-        
-        Promise::new(self.shade_contract_id.clone())
-            .function_call(
-                "generate_key".to_string(),
-                args,
-                NearToken::from_yoctonear(0),
-                Gas::from_tgas(220)
-            )
-            .then(
-                Promise::new(env::current_account_id())
-                    .function_call(
-                        "on_key_generated".to_string(),
-                        callback_args,
-                        NearToken::from_yoctonear(0),
-                        Gas::from_tgas(40)
-                    )
-            );
-    }
-
-    // Callback stub (handles Shade response)
-    #[private]
-    pub fn on_key_generated(&mut self, #[serializer(borsh)] args: GroupCallbackArgs) {
-        if let Some(group) = self.groups.get(&args.group_id) {
-            let mut updated_group = group.clone();
-            updated_group.shade_checksum = Some(args.checksum.clone());
-            self.groups.insert(args.group_id.clone(), updated_group);
-        }
-        log!("Updated group {} with Shade checksum: {}", args.group_id, args.checksum);
+        // Emit Event (parseable by indexer → trigger Shade /generate_key)
+        let event = NovaEvent::Registered { group_id: group_id.clone(), owner: caller.clone() };
+        let event_log = serde_json::to_string(&event).expect("Failed to serialize event");
+        env::log_str(&format!("EVENT_JSON:{}", event_log));
     }
 
     pub fn group_contains_key(&self, group_id: String) -> bool {
@@ -138,15 +112,13 @@ impl Contract {
         let members = self.group_members.get_mut(&group_id).expect("Group not found");
         if let Some(pos) = members.iter().position(|x| x == &user_id) {
             members.swap_remove(pos.try_into().unwrap());
-            let rotation_args = json!({ "group_id": group_id.clone() }).to_string().into_bytes();
-            Promise::new(self.shade_contract_id.clone())
-                .function_call(
-                    "rotate_key".to_string(),
-                    rotation_args,
-                    NearToken::from_yoctonear(0),
-                    Gas::from_tgas(150)
-                );
             log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
+
+            // Emit Event (indexer → Shade /api/key-management/rotate_key {group_id})
+            let event = NovaEvent::Revoked { group_id: group_id.clone(), user_id: user_id.clone(), owner: caller.clone() };
+            let event_log = serde_json::to_string(&event).expect("Failed to serialize event");
+            env::log_str(&format!("EVENT_JSON:{}", event_log));
+
         } else {
             env::panic_str("User not a member");
         }
@@ -193,6 +165,20 @@ impl Contract {
 
     pub fn get_group_checksum(&self, group_id: String) -> Option<String> {
         self.groups.get(&group_id).and_then(|g| g.shade_checksum.clone())
+    }
+
+    #[payable]
+    pub fn update_checksum(&mut self, group_id: String, checksum: String) {
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, self.owner, "Owner only");
+        if let Some(group) = self.groups.get_mut(&group_id) {  // get_mut for mutable ref
+            // Optional: Validate hex (32 bytes)
+            hex::decode(&checksum).expect("Invalid hex checksum");
+            group.shade_checksum = Some(checksum.clone());
+            log!("Updated checksum for {}: {}", group_id, checksum);
+        } else {
+            env::panic_str("Group not found");
+        }
     }
 
     #[payable]

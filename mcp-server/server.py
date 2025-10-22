@@ -259,7 +259,32 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
     )
     if "SuccessValue" in result.status:
         print(f"Registered group: {group_id}")
-        return "Registered"
+
+        # Off-chain: Trigger Shade key gen
+        shade_response = requests.post(
+            f"{SHADE_API_URL}/api/key-management/generate_key",
+            json={"group_id": group_id},
+            timeout=15
+        )
+        if shade_response.status_code == 200:
+            shade_data = shade_response.json()
+            checksum = shade_data.get("checksum")
+            if checksum:
+                # Update on-chain checksum
+                await near.function_call(
+                    contract_id=contract_id,
+                    method_name="update_checksum",
+                    args={"group_id": group_id, "checksum": checksum},
+                    amount=int("10000000000000000000"),  # 0.00001 NEAR
+                    gas=int("50000000000000")  # 50 TGas
+                )
+                print(f"Checksum updated on-chain for {group_id}: {checksum}")
+            else:
+                raise Exception("Shade gen succeeded but no checksum returned")
+        else:
+            raise Exception(f"Shade gen failed: {shade_response.text}")
+        
+        return f"Registered (with Shade key gen for {group_id})"
     raise Exception(f"Register failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
 
 @mcp.tool
@@ -307,7 +332,23 @@ async def revoke_group_member(group_id: str, member_id: str, account_id: str = N
     )
     if "SuccessValue" in result.status:
         print(f"Revoked {member_id} from {group_id}, key rotated")
-        return "Revoked"
+        
+        # Off-chain: Trigger Shade key rotation
+        shade_response = requests.post(
+            f"{SHADE_API_URL}/api/key-management/rotate_key",
+            json={"group_id": group_id},
+            timeout=15
+        )
+        if shade_response.status_code == 200:
+            shade_data = shade_response.json()
+            if shade_data.get("success"):
+                print(f"Key rotated in Shade for {group_id}")
+            else:
+                raise Exception("Shade rotate succeeded but no success flag")
+        else:
+            raise Exception(f"Shade rotate failed: {shade_response.text}")
+        
+        return "Revoked (with Shade key rotate)"
     raise Exception(f"Revoke failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
 
 
