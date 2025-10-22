@@ -91,7 +91,7 @@ impl Contract {
                 "generate_key".to_string(),
                 args,
                 NearToken::from_yoctonear(0),
-                Gas::from_tgas(250)
+                Gas::from_tgas(220)
             )
             .then(
                 Promise::new(env::current_account_id())
@@ -99,7 +99,7 @@ impl Contract {
                         "on_key_generated".to_string(),
                         callback_args,
                         NearToken::from_yoctonear(0),
-                        Gas::from_tgas(30)
+                        Gas::from_tgas(40)
                     )
             );
     }
@@ -144,7 +144,7 @@ impl Contract {
                     "rotate_key".to_string(),
                     rotation_args,
                     NearToken::from_yoctonear(0),
-                    Gas::from_tgas(280)
+                    Gas::from_tgas(150)
                 );
             log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
         } else {

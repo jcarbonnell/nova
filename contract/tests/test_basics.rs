@@ -120,7 +120,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "user_id": member_account.id().to_string()
         }))
         .deposit(NearToken::from_yoctonear(1_000_000_000_000))
-        .gas(Gas::from_tgas(300))
+        .gas(Gas::from_tgas(200))
         .transact()
         .await?;
     
@@ -209,7 +209,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "ipfs_hash": "ipfs_hash_test"
         }))
         .deposit(NearToken::from_yoctonear(1_000_000_000_000))
-        .gas(Gas::from_tgas(200))
+        .gas(Gas::from_tgas(300))
         .transact()
         .await?;
     record_outcome.into_result()?;
@@ -268,7 +268,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "user_id": member_account.id().to_string()
         }))
         .deposit(NearToken::from_yoctonear(1_000_000_000_000))
-        .max_gas()
+        .gas(Gas::from_tgas(200))
         .transact()
         .await?;
     
