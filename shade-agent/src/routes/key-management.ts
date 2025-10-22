@@ -3,7 +3,6 @@ import { Hono } from 'hono';
 import { agentInfo, agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
 const db = new Database('./nova-keys.db');
@@ -15,7 +14,7 @@ db.exec(`
 `);
 
 // TEE-derived secret (in prod, derive from TEE entropy; here simulate)
-const TEE_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
 
 // NOVA contract ID from env
 const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-2.testnet';
@@ -40,18 +39,55 @@ function decryptKey(enc: string): string {
   return decrypted.toString();
 }
 
-function verifyToken(token: string): { valid: boolean; user_id?: string; group_id?: string } {
+async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number }> {
   try {
-    const decoded = jwt.verify(token, TEE_SECRET) as jwt.JwtPayload;
-    if (decoded.exp && Date.now() >= decoded.exp * 1000) {
+    const [payloadB64, sigHex] = token.split('.');
+    if (!payloadB64 || !sigHex) {
       return { valid: false };
     }
+    
+    // Decode payload to JSON
+    const payloadBytes = Buffer.from(payloadB64, 'base64');
+    const payloadStr = payloadBytes.toString('utf-8');
+    const payload = JSON.parse(payloadStr);
+    
+    const { group_id, user_id, nonce, timestamp } = payload;
+    if (!group_id || !user_id || !nonce || !timestamp) {
+      return { valid: false };
+    }
+    
+    // Check timestamp freshness (e.g., < 5min old)
+    const now = Date.now();
+    if (timestamp > now + 300000 || timestamp < now - 300000) {  // 5min window
+      return { valid: false };
+    }
+    
+    // Verify nonce via contract view (prevents replay)
+    const nonceValid = await agentView({
+      contractId: NOVA_CONTRACT,
+      methodName: 'get_nonce_validity',
+      args: { group_id, user_id, nonce }
+    });
+    if (!nonceValid) {
+      return { valid: false };
+    }
+    
+    // Verify sig: HMAC payload hash with TEE_SECRET (matches contract's intent)
+    const payloadHash = crypto.createHash('sha256').update(payloadStr).digest('hex');
+    const expectedSig = crypto.createHmac('sha256', Buffer.from(TEE_SECRET, 'hex')).update(payloadHash).digest('hex');
+    if (sigHex !== expectedSig) {
+      return { valid: false };
+    }
+    
     return { 
       valid: true, 
-      user_id: decoded.user_id as string, 
-      group_id: decoded.group_id as string 
+      user_id, 
+      group_id, 
+      nonce, 
+      timestamp 
     };
-  } catch {
+  } catch (e) {
+    console.error('Token verify error:', e);
     return { valid: false };
   }
 }
@@ -95,7 +131,7 @@ keyMgmt.post('/get_key', async (c) => {
   const { group_id, token } = await c.req.json();
   if (!group_id || !token) return c.json({ error: 'group_id and token required' }, 400);
   
-  const tokenInfo = verifyToken(token);
+  const tokenInfo = await verifyToken(token);
   if (!tokenInfo.valid || !tokenInfo.user_id) {
     return c.json({ error: 'Invalid token' }, 403);
   }
