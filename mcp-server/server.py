@@ -254,7 +254,8 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
         contract_id=contract_id,
         method_name="register_group",
         args={"group_id": group_id},
-        amount=int("100000000000000000000000")  # 0.01 NEAR yocto
+        amount=int("100000000000000000000000"),  # 0.01 NEAR yocto
+        gas=int("300000000000000")  # 300 TGas
     )
     if "SuccessValue" in result.status:
         print(f"Registered group: {group_id}")
