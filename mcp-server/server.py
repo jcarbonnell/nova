@@ -72,9 +72,8 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
         else:
             raise Exception("Invalid privkey format")
-        payload_hash = hashes.Hash(hashes.SHA256())
-        payload_hash.update(payload_bytes)
-        sig_bytes = private_key_obj.sign(payload_hash.finalize())
+        
+        sig_bytes = private_key_obj.sign(payload_bytes)
         sig_hex = sig_bytes.hex()
 
         print("payload_b64 type:", type(payload_b64), "starts:", payload_b64[:10] if payload_b64 else "None")
