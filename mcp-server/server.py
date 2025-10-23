@@ -65,9 +65,10 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         # Step 1: Sign payload with user privkey (ed25519 from seed)
         if private_key.startswith('ed25519:'):
             seed_b58 = private_key[8:]
-            seed_bytes = base58.b58decode(seed_b58)
-            if len(seed_bytes) != 32:
-                raise Exception("Invalid seed length")
+            seed_bytes_full = base58.b58decode(seed_b58)
+            if len(seed_bytes_full) != 64:
+                raise Exception("Invalid full private key length")
+            seed_bytes = seed_bytes_full[:32]  # Extract 32-byte seed
             private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
         else:
             raise Exception("Invalid privkey format")
