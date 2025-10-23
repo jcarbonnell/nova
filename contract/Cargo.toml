@@ -1,6 +1,6 @@
 [package]
 name = "nova"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 repository = "https://github.com/jcarbonnell/nova"
 
@@ -15,11 +15,13 @@ serde = { version = "1.0", features = ["derive"] }
 schemars = "0.8.22"
 serde_json = "1.0.145"
 base64 = "0.22"
+sha2 = "0.10"
 
 [dev-dependencies]
 near-sdk = { version = "5.17.2", features = ["unit-testing"] }
 near-workspaces = { version = "0.21", features = ["unstable"] }
 tokio = { version = "1.12.0", features = ["full"] }
+near-crypto = "0.23.0"
 
 [profile.release]
 codegen-units = 1

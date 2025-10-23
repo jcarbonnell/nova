@@ -1,13 +1,14 @@
-// NOVA contract v0.2.1 - hybridization with Shade/TEEs (no on-chain secrets)
-use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, borsh::BorshDeserialize};
-use near_sdk::borsh::{BorshSerialize};
+// NOVA contract v0.2.2 - hybridization with Shade/TEEs + ed25519 token signing
+use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault};
+use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use near_sdk::serde_json;
 use near_sdk::serde_json::json;
 use hex;
-use near_sdk::base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use near_sdk::base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use sha2::{Sha256, Digest};
 
 // Define the contract structure
 #[near(contract_state)]
@@ -198,33 +199,78 @@ impl Contract {
     }
 
     #[payable]
-    pub fn get_access_token(&mut self, group_id: String, user_id: AccountId) -> String {
-        assert!(self.is_authorized(group_id.clone(), user_id.clone()), "Unauthorized");
-        let timestamp = env::block_timestamp();
-        let nonce_input = format!("{}{}{}", group_id, user_id, timestamp);
-        let nonce = hex::encode(env::sha256(nonce_input.as_bytes()));
+    pub fn claim_token(
+        &mut self,
+        group_id: String,
+        payload_b64: String,
+        signature_hex: String,
+    ) -> String {
+        let caller = env::predecessor_account_id();
+        
+        // Decode payload
+        let payload_bytes = BASE64_STANDARD.decode(&payload_b64)
+            .expect("Invalid base64 payload");
+        let payload_str = String::from_utf8(payload_bytes.clone())
+            .expect("Invalid UTF-8 payload");
+        let payload: serde_json::Value = serde_json::from_str(&payload_str)
+            .expect("Invalid JSON payload");
+        
+        // Extract and validate payload fields
+        let payload_group_id = payload["group_id"].as_str().expect("Missing group_id");
+        let payload_user_id = payload["user_id"].as_str().expect("Missing user_id");
+        let nonce = payload["nonce"].as_str().expect("Missing nonce");
+        let timestamp = payload["timestamp"].as_u64().expect("Missing timestamp");
+        
+        // Validate group_id matches
+        assert_eq!(payload_group_id, group_id, "group_id mismatch");
+        
+        // Validate user is authorized
+        let user_id: AccountId = payload_user_id.parse().expect("Invalid user_id");
+        assert!(self.is_authorized(group_id.clone(), user_id.clone()), "Unauthorized caller");
+        
+        // Verify caller matches payload user_id (ensures only the user can claim their token)
+        assert_eq!(caller, user_id, "Caller must match payload user_id");
+        
+        // Check timestamp freshness (5 min window)
+        let now = env::block_timestamp();
+        let five_min_ns = 300_000_000_000u64; // 5 minutes in nanoseconds
+        assert!(
+            timestamp <= now.saturating_add(five_min_ns) && 
+            timestamp >= now.saturating_sub(five_min_ns),
+            "Token timestamp expired or future"
+        );
+        
+        // Check nonce hasn't been used (replay protection)
         let nonce_key = format!("{}.{}.{}", group_id, user_id, nonce);
         assert!(!self.used_nonces.contains_key(&nonce_key), "Nonce already used (replay attack)");
-        self.used_nonces.insert(nonce_key, true); // Mark used (single-use)
-        let payload = json!({
-            "group_id": group_id,
-            "user_id": user_id.to_string(),
-            "nonce": nonce,
-            "timestamp": timestamp
-        }).to_string();
-        let payload_bytes = payload.as_bytes();
-        let seed = env::random_seed();
-        let sig_bytes = [&seed[..32], &seed[32..]].concat(); // 64 bytes dummy sig
-        let sig = hex::encode(sig_bytes);
-        let token = format!("{}.{}", BASE64_STANDARD.encode(payload_bytes), sig);
-        log!("Generated nonce-based token for {}/{}", group_id, user_id);
+        
+        // Decode signature
+        let sig_bytes_vec = hex::decode(&signature_hex).expect("Invalid hex signature");
+        assert_eq!(sig_bytes_vec.len(), 64, "Signature must be 64 bytes");
+        let sig_bytes: [u8; 64] = sig_bytes_vec.try_into().expect("Sig conversion failed");
+        
+        // Get the public key of the transaction signer
+        let signer_pk = env::signer_account_pk();
+        let pk_bytes = signer_pk.as_bytes();
+        let pk_array: [u8; 32] = pk_bytes[1..33].try_into().expect("Invalid pk length"); // Skip tag byte (0x00 for Ed25519)
+        
+        // Verify ed25519 signature using NEAR's built-in function
+        let is_valid = env::ed25519_verify(&sig_bytes, payload_str.as_bytes(), &pk_array);
+        assert!(is_valid, "Invalid signature on payload");
+        
+        // Mark nonce as used (only after all validations pass)
+        self.used_nonces.insert(nonce_key, true);
+        
+        // Return complete token
+        let token = format!("{}.{}", payload_b64, signature_hex);
+        log!("Issued verified token for {}/{}", group_id, user_id);
         token
     }
 
     // View for Shade verification
     pub fn get_nonce_validity(&self, group_id: String, user_id: AccountId, nonce: String) -> bool {
         let nonce_key = format!("{}.{}.{}", group_id, user_id, nonce);
-        !self.used_nonces.contains_key(&nonce_key) // True if not used (fresh)
+        !self.used_nonces.contains_key(&nonce_key)
     }
 
     // Private: request_signature via Shade API; restricts to nova_key_ paths
@@ -240,9 +286,9 @@ impl Contract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::test_utils::VMContextBuilder;
-    use near_sdk::testing_env;
-    use near_sdk::Gas;
+    use near_sdk::test_utils::{VMContextBuilder};
+    use near_sdk::{testing_env, Gas};
+    use near_crypto::{SecretKey};
 
     fn get_context(signer: AccountId) -> VMContextBuilder {
         let mut builder = VMContextBuilder::new();
@@ -502,31 +548,96 @@ mod tests {
     }
 
     #[test]
-    fn get_access_token_works() {
+    fn claim_token_works() {    
         let owner: AccountId = "owner.testnet".parse().unwrap();
         let member: AccountId = "member.testnet".parse().unwrap();
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
-        let context = get_context(owner.clone());
+        let mut context = get_context(owner.clone());
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
-        let token = contract.get_access_token("test_group".to_string(), member.clone());
-        assert!(!token.is_empty());
-        assert!(token.contains("."), "Token should contain separator");
+    
+        // Create a test Ed25519 keypair for signing
+        let secret_key = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test_seed");
+        let crypto_public_key = secret_key.public_key();
+    
+        // Convert near_crypto::PublicKey to near_sdk::PublicKey
+        let public_key_str = crypto_public_key.to_string();
+        let sdk_public_key: near_sdk::PublicKey = public_key_str.parse().unwrap();
+    
+        // Switch to member context with the test public key
+        context = get_context(member.clone());
+        context.signer_account_pk(sdk_public_key);
+        testing_env!(context.build());
+    
+        // Build valid payload
+        let timestamp = env::block_timestamp();
+        let nonce_input = format!("{}{}{}", "test_group", member, timestamp);
+        let nonce = hex::encode(Sha256::digest(nonce_input.as_bytes()));
+        let payload_json = json!({
+            "group_id": "test_group",
+            "user_id": member.to_string(),
+            "nonce": nonce.clone(),
+            "timestamp": timestamp
+        });
+        let payload_str = payload_json.to_string();
+        let payload_b64 = BASE64_STANDARD.encode(payload_str.as_bytes());
+    
+        // Sign the payload with the secret key
+        let signature = secret_key.sign(payload_str.as_bytes());
+        // Extract the signature bytes based on the signature type
+        let signature_bytes = match signature {
+            near_crypto::Signature::ED25519(sig) => sig.to_bytes(),
+            _ => panic!("Expected ED25519 signature"),
+        };
+        let signature_hex = hex::encode(signature_bytes);
+    
+        // Call claim_token
+        let token = contract.claim_token(
+            "test_group".to_string(),
+            payload_b64.clone(),
+            signature_hex.clone()
+        );
+    
+        // Assert token returned in expected format
+        assert_eq!(token, format!("{}.{}", payload_b64, signature_hex));
+    
+        // Verify nonce is marked as used
+        assert!(!contract.get_nonce_validity("test_group".to_string(), member, nonce));
     }
 
     #[test]
-    #[should_panic(expected = "Unauthorized")]
-    fn get_access_token_fails_unauthorized() {
+    #[should_panic(expected = "Invalid signature on payload")]
+    fn claim_token_fails_invalid_sig() {
         let owner: AccountId = "owner.testnet".parse().unwrap();
-        let non_member: AccountId = "non_member.testnet".parse().unwrap();
+        let member: AccountId = "member.testnet".parse().unwrap();
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
-        let context = get_context(owner.clone());
+        let mut context = get_context(owner.clone());
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
-        contract.get_access_token("test_group".to_string(), non_member);
+        contract.add_group_member("test_group".to_string(), member.clone());
+        
+        // Member context
+        context = get_context(member.clone());
+        testing_env!(context.build());
+        
+        // Valid payload but invalid sig
+        let timestamp = env::block_timestamp();
+        let nonce_input = format!("{}{}{}", "test_group", member, timestamp);
+        let nonce = hex::encode(Sha256::digest(nonce_input.as_bytes()));
+        let payload = json!({
+            "group_id": "test_group",
+            "user_id": member.to_string(),
+            "nonce": nonce,
+            "timestamp": timestamp
+        }).to_string();
+        let payload_b64 = BASE64_STANDARD.encode(payload.as_bytes());
+        
+        let invalid_sig_hex = hex::encode(vec![1u8; 64]);  // Invalid for hash
+        
+        contract.claim_token("test_group".to_string(), payload_b64, invalid_sig_hex);
     }
 
     #[test]
@@ -557,20 +668,30 @@ mod tests {
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
     
-        // Generate token which marks the nonce as used
-        let token = contract.get_access_token("test_group".to_string(), member.clone());
-    
-        // Extract the actual nonce from the token
-        let parts: Vec<&str> = token.split('.').collect();
-        let payload_b64 = parts[0];
-        let payload_bytes = BASE64_STANDARD.decode(payload_b64).unwrap();
-        let payload_str = String::from_utf8(payload_bytes).unwrap();
-        let payload_json: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
-        let nonce = payload_json["nonce"].as_str().unwrap().to_string();
-    
+        // Generate a nonce
+        let timestamp = env::block_timestamp();
+        let nonce_input = format!("{}{}{}", "test_group", member, timestamp);
+        let nonce = hex::encode(Sha256::digest(nonce_input.as_bytes()));
+        
+        // Check nonce is initially valid (not used)
+        let valid_before = contract.get_nonce_validity(
+            "test_group".to_string(), 
+            member.clone(), 
+            nonce.clone()
+        );
+        assert!(valid_before, "Fresh nonce should be valid");
+        
+        // Manually mark the nonce as used (simulating successful claim_token)
+        let nonce_key = format!("{}.{}.{}", "test_group", member, nonce);
+        contract.used_nonces.insert(nonce_key, true);
+        
         // Verify that the used nonce is now invalid
-        let valid = contract.get_nonce_validity("test_group".to_string(), member.clone(), nonce);
-        assert!(!valid, "Used nonce should be invalid");
+        let valid_after = contract.get_nonce_validity(
+            "test_group".to_string(), 
+            member.clone(), 
+            nonce.clone()
+        );
+        assert!(!valid_after, "Used nonce should be invalid");
     }
 
     #[test]
