@@ -16,8 +16,11 @@
   "dependencies": {
     "@hono/node-server": "^1.15.0",
     "@neardefi/shade-agent-js": "^1.0.0",
+    "@noble/ed25519": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jsonwebtoken": "^9.0.10",
+    "axios": "^1.12.2",
+    "bs58": "^6.0.0",
     "better-sqlite3": "^12.4.1",
     "chainsig.js": "^1.1.11",
     "cors": "^2.8.5",

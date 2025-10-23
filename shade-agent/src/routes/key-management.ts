@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import { agentInfo, agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
+import axios from 'axios';
+import bs58 from 'bs58';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
 const db = new Database('./nova-keys.db');
@@ -64,7 +66,6 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     
     // Verify nonce via contract view (prevents replay)
     const nonceValid = await agentView({
-      contractId: NOVA_CONTRACT,
       methodName: 'get_nonce_validity',
       args: { group_id, user_id, nonce }
     });
@@ -72,10 +73,37 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Verify sig: HMAC payload hash with TEE_SECRET (matches contract's intent)
-    const payloadHash = crypto.createHash('sha256').update(payloadStr).digest('hex');
-    const expectedSig = crypto.createHmac('sha256', Buffer.from(TEE_SECRET, 'hex')).update(payloadHash).digest('hex');
-    if (sigHex !== expectedSig) {
+    // Fetch user pubkey via RPC (assume first full access key)
+    const rpcUrl = 'https://rpc.testnet.near.org'; // Mainnet: 'https://rpc.mainnet.near.org'
+    const rpcRes = await axios.post(rpcUrl, {
+      jsonrpc: '2.0',
+      id: 'dontcare',
+      method: 'query',
+      params: {
+        request_type: 'view_access_key',
+        finality: 'final',
+        account_id: user_id,
+        public_key: null  // All keys
+      }
+    });
+    const keys = rpcRes.data.result?.keys || [];
+    if (keys.length === 0) {
+      return { valid: false };  // No access key
+    }
+    const userPkStr = keys[0].public_key;  // First key (assume full access)
+    if (!userPkStr.startsWith('ed25519:')) {
+      return { valid: false };  // Expect ed25519
+    }
+    const userPkBytes = bs58.decode(userPkStr.slice(8));  // Decode base58 part to 32 bytes
+    
+    // Verify ed25519: sha256(payload_str) against sig_hex
+    const payloadHash = crypto.createHash('sha256').update(payloadStr).digest();
+    const sigBytes = Buffer.from(sigHex, 'hex');
+    
+    // Use noble-ed25519 for verify (add dep: npm i @noble/ed25519)
+    const { verify } = await import('@noble/ed25519');
+    const validSig = verify(sigBytes, payloadHash, userPkBytes);
+    if (!validSig) {
       return { valid: false };
     }
     

@@ -6,6 +6,9 @@ import requests
 import time
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import hashes
+import base58
 import py_near
 from py_near.account import Account
 import asyncio
@@ -38,25 +41,56 @@ def _validate_near_key(private_key: str) -> str:
 
 # Helper functions (callable internally)
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
-    """Internal: Get token from contract → fetch key from Shade → verify checksum."""
+    """Internal: Gen payload → sign with user priv → claim token on-chain → fetch key from Shade → verify checksum."""
     rpc = os.environ["RPC_URL"]
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
-        # Step 1: Get token from contract
-        token_result = await acc.function_call(
-            contract_id=contract_id,
-            method_name="get_access_token",
-            args={"group_id": group_id, "user_id": user_id},
-            amount=0,
-            gas=int("50000000000000")
-        )
-        token = token_result.status.get('SuccessValue', '')  # Str token
-        if not token:
-            raise Exception(f"No token for {group_id}/{user_id}")
         
-        # Step 2: Call Shade API with token
+        # Step 0: Gen payload (match contract: timestamp, sha256 nonce)
+        timestamp = int(time.time() * 1_000_000_000)  # ns approx
+        nonce_input = f"{group_id}{user_id}{timestamp}"
+        nonce = hashlib.sha256(nonce_input.encode()).hexdigest()
+        payload_dict = {
+            "group_id": group_id,
+            "user_id": user_id,
+            "nonce": nonce,
+            "timestamp": timestamp
+        }
+        payload_str = json.dumps(payload_dict)
+        payload_bytes = payload_str.encode('utf-8')
+        payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
+        
+        # Step 1: Sign payload with user privkey (ed25519 from seed)
+        if private_key.startswith('ed25519:'):
+            seed_b58 = private_key[8:]
+            seed_bytes = base58.b58decode(seed_b58)
+            if len(seed_bytes) != 32:
+                raise Exception("Invalid seed length")
+            private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
+        else:
+            raise Exception("Invalid privkey format")
+        payload_hash = hashes.Hash(hashes.SHA256())
+        payload_hash.update(payload_bytes)
+        sig_bytes = private_key_obj.sign(payload_hash.finalize())
+        sig_hex = sig_bytes.hex()
+        
+        # Step 2: Claim token on-chain (payable call as user_id)
+        claim_result = await acc.function_call(
+            contract_id=contract_id,
+            method_name="claim_token",
+            args={"group_id": group_id, "payload_b64": payload_b64, "sig_hex": sig_hex},
+            amount=int("1000000000000000000"),  # 0.001 NEAR tiny
+            gas=int("100000000000000")  # 100 TGas
+        )
+        if "SuccessValue" not in claim_result.status:
+            raise Exception(f"Token claim failed: {claim_result.status}")
+        token = claim_result.status['SuccessValue']  # Full token
+        if not token:
+            raise Exception(f"No token claimed for {group_id}/{user_id}")
+        
+        # Step 3: Call Shade API with token
         if not SHADE_API_URL:
             raise Exception("SHADE_API_URL not set")
         shade_response = requests.post(
@@ -70,7 +104,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             checksum = shade_data.get("checksum")
             if not key or not checksum:
                 raise Exception("Invalid Shade response")
-            # Step 3: Verify checksum dynamically against contract
+            # Step 4: Verify checksum
             verified = await verify_shade_checksum_for_group(group_id, checksum, contract_id)
             if not verified:
                 raise Exception(f"Shade attestation invalid: checksum mismatch for {group_id}")
