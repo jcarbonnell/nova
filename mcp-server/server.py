@@ -81,7 +81,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         args_dict = {
             "group_id": group_id,
             "payload_b64": payload_b64,
-            "sig_hex": sig_hex
+            "signature_hex": sig_hex
         }
         # Pass dict - py_near json.dumps once (clean)
         claim_result = await acc.function_call(
