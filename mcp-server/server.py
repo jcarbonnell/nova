@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 import base58
 import py_near
 from py_near.account import Account
+from py_near.key_pair import KeyPair
 import asyncio
 import json
 import hashlib
@@ -45,7 +46,8 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
     rpc = os.environ["RPC_URL"]
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
-        acc = Account(user_id, private_key, rpc)
+        key_pair = KeyPair.from_string(private_key)
+        acc = Account(user_id, key_pair, rpc)
         await acc.startup()
         
         # Step 0: Gen payload (match contract: timestamp, sha256 nonce)
@@ -85,21 +87,19 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "payload_b64": payload_b64,
             "signature_hex": sig_hex
         }
-        print("args_dict payload_b64 type:", type(args_dict["payload_b64"]))
-        
         # Pass dict - py_near json.dumps once
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
-            args=args_dict,  # Dict directly
+            args=args_dict,
             amount=int("1000000000000000000"),
             gas=int("100000000000000")
         )
-        print("Claim args dict:", args_dict)  # Debug: {'group_id': ..., 'payload_b64': ..., 'sig_hex': ...}
+        print("Claim args dict:", args_dict)
         if "SuccessValue" not in claim_result.status:
-            print("Claim status:", claim_result.status)  # e.g., {'Failure': {'ActionError': ... 'Invalid JSON'}}
+            print("Claim status:", claim_result.status)
             raise Exception(f"Token claim failed: {claim_result.status}")
-        token = claim_result.status['SuccessValue']  # Full token
+        token = claim_result.status['SuccessValue']
         if not token:
             raise Exception(f"No token claimed for {group_id}/{user_id}")
         
