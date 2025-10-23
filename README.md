@@ -1,32 +1,32 @@
-# NOVA secure file-sharing
+# NOVA Secure File-Sharing
 
-NOVA is a privacy-first, decentralized file-sharing primitive for NEAR dApps, empowering user-owned AI at scale. NOVA enables secure storage and sharing of sensitive data (e.g., datasets for AI agent fine-tuning) without centralized intermediaries, leveraging group key management, IPFS, and NEAR smart contracts.
+NOVA is a privacy-first, decentralized file-sharing primitive for NEAR dApps, empowering user-owned AI at scale. NOVA enables secure storage and sharing of sensitive data (e.g., datasets for AI agent fine-tuning) without centralized intermediaries, leveraging group key management, IPFS, and NEAR smart contracts, and verifiable TEEs via Shade Agents.
 
 NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistence for TEEs, Intents, or Shade Agents— while inheriting NEAR’s strengths like sharding for scalability, low-cost transactions (~0.01 NEAR/gas), and AI-native tools (e.g., NEAR AI CLI). Whether you're building AI social platforms, DeFi apps, or autonomous agent workflows, NOVA provides a secure, verifiable data layer.
 
 ## Why Use NOVA?
 
-- **Privacy-First**: Encrypt files with group keys, ensuring only authorized users or AI agents access data, critical for AI data pipelines where tampering could bias models.
+- **Privacy-First**: Encrypt files with group keys managed off-chain in TEEs, ensuring only authorized users or AI agents access data—keys never exposed on-chain.
 - **Decentralized**: Store files on IPFS, log metadata on NEAR’s immutable ledger, and manage access via smart contracts. No central servers.
 - **AI-Ready**: Seamlessly integrates with NEAR’s TEEs, Intents, and Shade Agents, enabling secure data for AI training and execution.
-- **Developer-Friendly**: Free-to-integrate SDK (Rust crate and JS package) with pay-per-action fees baked into the contract, blending into your dApp’s backend.
+- **Developer-Friendly**: Free-to-integrate SDKs (Rust crate and JS package) with pay-per-action fees baked into the contract, blending into your dApp’s backend.
 
 ## Key Features
 
-- **Group Creation & Management**: Owners (NEAR AccountIds) create groups via smart contracts, supporting collaborative AI training with multi-group membership.
-- **Access Control**: Smart contracts maintain a mapping table for group keys and members, ensuring only authorized users access files, vital for user-owned AI privacy.
+- **Group Creation & Management**: Owners (NEAR AccountIds) create groups via smart contracts, supporting collaborative AI training with multi-group membership. Anyone can create groups (per future update—currently owner-gated for MVP stability).
+- **Access Control**: Smart contracts maintain a mapping table for members and attestations, ensuring only authorized users access files via ephemeral tokens. Vital for user-owned AI privacy.
 - **Secure Storage**: Files are encrypted with group keys and pinned to IPFS, optimized for AI dApps (e.g., datasets for fine-tuning).
-- **Access Workflow**: Authorized users query on-chain metadata, retrieve encrypted files from IPFS, and receive wrapped keys for local decryption, ensuring verifiable access.
-- **Revocation & Key Rotation**: Remove members and rotate keys with lazy re-encryption to minimize latency/gas costs for large groups.
+- **Access Workflow**: Authorized users claim nonce-based tokens (ed25519-signed payloads) from on-chain, then fetch keys from TEEs for local decryption, ensuring verifiable access.
+- **Revocation & Key Rotation**: Remove members and rotate keys in TEEs with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
 ## Group Key Security
 
 **Keys are managed off-chain in verifiable TEEs via Shade Agents. Never published on-chain, NOVA file-sharing ensures unbreakable privacy against blockchain fetches.**
 
-In NOVA's design, group keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
+In NOVA's v0.2 design, group keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
 - **Off-Chain Key Management**: Keys are derived and encrypted in TEE-secure SQLite databases, accessible only by verified Shade workers (multi-instance with identical code hashes for redundancy and shared access).
-- **No On-Chain Keys**: The smart contract stores only group metadata and Shade attestations (checksums/code hashes)—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
+- **No On-Chain Keys**: The smart contract stores only group metadata, attestations (checksums/code hashes), and used nonces—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
 - **Secure Distribution**: Users request ephemeral nonce-based access tokens from the contract (gated by on-chain membership). Tokens incorporate a timestamp-derived SHA256 nonce (preventing replay attacks) and are verified in-TEE before key release, ensuring single-use validity without shared secrets.
 - **Verification & Attestation**: Every key operation returns a TEE checksum (via agentInfo), proving execution in genuine hardware with unmodified code—no tampering possible.
 - **Rotation & Revocation**: On member removal, keys rotate in-TEE (new derivation), invalidating prior access without re-encryption overhead.
@@ -93,7 +93,7 @@ nova-sdk-rs = "0.1.0"
 ### MCP Server (Natural Language)
 ```
 You: "Create a group called 'research_team' and upload this data securely"
-Claude: [uses NOVA MCP tools to encrypt, upload to IPFS, and record on NEAR]
+Claude: [uses NOVA MCP tools to claim token, fetch TEE key, encrypt, upload to IPFS, and record on NEAR]
 ```
 
 ### JavaScript SDK
@@ -156,7 +156,7 @@ println!("Uploaded: {}", result.cid);
 ### 🤖 AI & Machine Learning
 - **Dataset Sharing**: Securely share training data between researchers
 - **Model Fine-Tuning**: Store and access sensitive data for AI agent training
-- **TEE Integration**: Provide encrypted inputs to confidential compute environments
+- **TEE Integration**: Provide encrypted inputs/outputs to confidential compute environments
 
 ### 🏢 Enterprise & Collaboration
 - **Document Sharing**: Secure file sharing within organizations
@@ -175,7 +175,7 @@ Operations require small NEAR token deposits for storage:
 - Register group: ~0.1 NEAR
 - Add member: ~0.0005 NEAR
 - Revoke member: ~0.0005 NEAR
-- Store key: ~0.0005 NEAR
+- Claim token: ~0.001 NEAR
 - Record transaction: ~0.002 NEAR
 
 Ensure your NEAR account has sufficient balance before operations.
@@ -191,31 +191,32 @@ Comprehensive documentation is available on GitBook:
 - [MCP Server Guide](https://nova-25.gitbook.io/nova-docs/mcp-server)
 - [JavaScript SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-js)
 - [Rust SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-rs)
+- [NOVA Shade Agent](https://nova-25.gitbook.io/nova-docs/shade-agent)
 - [Architecture & Concepts](https://nova-25.gitbook.io/nova-docs#architecture)
 
 ## Security Considerations
 
 ⚠️ **Important Security Notes:**
 
-1. **Private Keys** - Never commit NEAR private keys to version control
-2. **Key Storage** - Store encryption keys securely using proper key management
+1. **Private Keys** - Never publish NEAR private keys to version control
+2. **Key Storage** - Keys managed in TEEs; never handle plaintext in code
 3. **IPFS Privacy** - IPFS content is addressable by CID; encryption is essential
 4. **Access Control** - Always verify user authorization before operations
 5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
 6. **Client-Side Encryption** - Files are encrypted locally, never exposing plaintext to IPFS
+7. **Token Ephemerality** - Nonces and timestamps prevent replay; refresh tokens frequently
+
 
 ## Future Roadmap
 
 ### Potential SDK Enhancements
 - **Pay-per-Action Model**: Add fees to `#[payable]` methods, setup fees to `nova-sdk.near`
-- **Agent Permissions**: Extend file upload through `record_transaction` to agents/members (currently owner-only).
-- **Transaction Listing**: Extend `get_transactions_for_group` calls to agents/members (currently owner-only).
+- **Transaction Listing**: Extend `get_transactions_for_group` calls to authorized agents/members (currently owner-only).
 - **Member Discovery**: Extend `group_members` view to agents/members (currently owner-only).
-- **Token-Gated Access**: Reinforce access control with NFT/token holdings (Access Token NFTs)?
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
-- **Dataset Monetization**: Add pricing to file upload so file owners can monetize dataset access.
-- **Multi-Party Upload**: So far all members can upload, but a contract update (New method: grant_publish_rights(group_id: String, user_id: AccountId, can_publish: bool))could add per-member publish rights. 
-- **Group creation access**: So far only contract owner can create groups. in this scenario people who want to create groups should deploy their own contract. Shall I allow anyone to create groups on this contract?
+- **Dataset Monetization**: Add pricing at file upload so file owners can monetize their datasets.
+- **Publish Rights Control**: So far all members can upload, but a contract update could add per-member publish rights. (e.g.grant_publish_rights(group_id: String, user_id: AccountId, can_publish: bool)).
+- **Group creation access**: Update to allow anyone to create groups (remove owner assert in register_group), with per-group owner for management.
 
 ## Contributing
 
@@ -278,6 +279,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Built with ❤️ for the NEAR ecosystem, leveraging:
 - NEAR Protocol for decentralized access control
 - IPFS/Pinata for decentralized storage
+- Shade Agents & TEEs for verifiable key management
 - Model Context Protocol for AI integration
 
 ---
