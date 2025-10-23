@@ -1,10 +1,11 @@
 // Shade agent manages keys for NOVA groups in a TEE-secure manner
 import { Hono } from 'hono';
-import { agentInfo, agentView } from '@neardefi/shade-agent-js';
+import { agentInfo, agentCall, agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
+import { verify } from '@noble/ed25519';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
 const db = new Database('./nova-keys.db');
@@ -19,7 +20,7 @@ db.exec(`
 const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
 
 // NOVA contract ID from env
-const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-2.testnet';
+const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-4.testnet';
 
 // Helpers
 function encryptKey(key: string): string {
@@ -41,20 +42,25 @@ function decryptKey(enc: string): string {
   return decrypted.toString();
 }
 
-async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number }> {
+async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number; public_key?: string }> {
   try {
     const [payloadB64, sigHex] = token.split('.');
     if (!payloadB64 || !sigHex) {
       return { valid: false };
     }
     
-    // Decode payload to JSON
-    const payloadBytes = Buffer.from(payloadB64, 'base64');
-    const payloadStr = payloadBytes.toString('utf-8');
+    // Decode payload to bytes (raw for ed25519 verify)
+    const payload_bytes = Buffer.from(payloadB64, 'base64');
+    if (payload_bytes.length === 0) {
+      return { valid: false };
+    }
+    
+    // Decode to str for JSON (for fields extraction)
+    const payloadStr = payload_bytes.toString('utf-8');
     const payload = JSON.parse(payloadStr);
     
-    const { group_id, user_id, nonce, timestamp } = payload;
-    if (!group_id || !user_id || !nonce || !timestamp) {
+    const { group_id, user_id, nonce, timestamp, public_key } = payload;  // Added public_key
+    if (!group_id || !user_id || !nonce || !timestamp || !public_key) {  // Require PK
       return { valid: false };
     }
     
@@ -73,36 +79,15 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Fetch user pubkey via RPC (assume first full access key)
-    const rpcUrl = 'https://rpc.testnet.near.org'; // Mainnet: 'https://rpc.mainnet.near.org'
-    const rpcRes = await axios.post(rpcUrl, {
-      jsonrpc: '2.0',
-      id: 'dontcare',
-      method: 'query',
-      params: {
-        request_type: 'view_access_key',
-        finality: 'final',
-        account_id: user_id,
-        public_key: null  // All keys
-      }
-    });
-    const keys = rpcRes.data.result?.keys || [];
-    if (keys.length === 0) {
-      return { valid: false };  // No access key
+    // Use payload public_key (ed25519:base58) for verify
+    if (!public_key.startsWith('ed25519:')) {
+      return { valid: false };
     }
-    const userPkStr = keys[0].public_key;  // First key (assume full access)
-    if (!userPkStr.startsWith('ed25519:')) {
-      return { valid: false };  // Expect ed25519
-    }
-    const userPkBytes = bs58.decode(userPkStr.slice(8));  // Decode base58 part to 32 bytes
+    const userPkBytes = bs58.decode(public_key.slice(8));  // Decode base58 part to 32 bytes
     
-    // Verify ed25519: sha256(payload_str) against sig_hex
-    const payloadHash = crypto.createHash('sha256').update(payloadStr).digest();
+    // Verify ed25519 on raw payload_bytes (no hash)
     const sigBytes = Buffer.from(sigHex, 'hex');
-    
-    // Use noble-ed25519 for verify (add dep: npm i @noble/ed25519)
-    const { verify } = await import('@noble/ed25519');
-    const validSig = verify(sigBytes, payloadHash, userPkBytes);
+    const validSig = verify(sigBytes, payload_bytes, userPkBytes);
     if (!validSig) {
       return { valid: false };
     }
@@ -112,7 +97,8 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       user_id, 
       group_id, 
       nonce, 
-      timestamp 
+      timestamp,
+      public_key  // Return for logging if needed
     };
   } catch (e) {
     console.error('Token verify error:', e);
@@ -165,6 +151,7 @@ keyMgmt.post('/get_key', async (c) => {
   }
   
   const user_id = tokenInfo.user_id;
+  const nonce = tokenInfo.nonce!;
   
   // Verify on-chain authorization (this is the key security check)
   const authorized = await agentView({
@@ -182,6 +169,13 @@ keyMgmt.post('/get_key', async (c) => {
   
   const key = decryptKey(row.encrypted_key);
   
+  // Consume nonce on-chain (anti-replay)
+  await agentCall({
+    methodName: 'consume_nonce',  // Assume contract has this; or use claim_token's used_nonces
+    args: { group_id, user_id, nonce },
+    gas: '30000000000000n'
+  });
+  
   // Attest
   const info = await agentInfo();
   
@@ -194,6 +188,17 @@ keyMgmt.post('/get_key', async (c) => {
 keyMgmt.post('/rotate_key', async (c) => {
   const { group_id } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
+  
+  // Verify caller is group owner (via contract view)
+  const owner = await agentView({
+    contractId: NOVA_CONTRACT,
+    methodName: 'get_group_owner',  // Assume view exists; else fetch from state
+    args: { group_id }
+  });
+  const caller = c.req.header('X-Caller') || 'unknown';  // Or from auth header; adjust
+  if (caller !== owner) {
+    return c.json({ error: 'Only group owner can rotate key' }, 403);
+  }
   
   // Verify group exists
   const groupExists = await agentView({

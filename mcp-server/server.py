@@ -48,7 +48,26 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
         
-        # Step 0: Gen payload (match contract: timestamp, sha256 nonce)
+        # Step 0: Fetch user's public key for payload (first ed25519 full access)
+        rpc_res = requests.post(rpc, json={
+            "jsonrpc": "2.0",
+            "id": "dontcare",
+            "method": "query",
+            "params": {
+                "request_type": "view_access_key",
+                "finality": "final",
+                "account_id": user_id,
+                "public_key": None  # All keys
+            }
+        }, timeout=10)
+        keys = rpc_res.json().get("result", {}).get("keys", [])
+        if not keys:
+            raise Exception(f"No access keys for {user_id}")
+        user_pk_str = next((k["public_key"] for k in keys if k["public_key"].startswith("ed25519:") and k["permission"]["FunctionCall"]), None)
+        if not user_pk_str:
+            raise Exception(f"No suitable ed25519 full access key for {user_id}")
+        
+        # Gen payload (match contract: timestamp, sha256 nonce; add public_key)
         timestamp = int(time.time() * 1_000_000_000)  # ns approx
         nonce_input = f"{group_id}{user_id}{timestamp}"
         nonce = hashlib.sha256(nonce_input.encode()).hexdigest()
@@ -56,7 +75,8 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "group_id": group_id,
             "user_id": user_id,
             "nonce": nonce,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "public_key": user_pk_str  # Added for targeted verify
         }
         payload_str = json.dumps(payload_dict)
         payload_bytes = payload_str.encode('utf-8')
@@ -84,7 +104,6 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "payload_b64": payload_b64,
             "signature_hex": sig_hex
         }
-        # Pass dict directly
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
@@ -92,13 +111,14 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             amount=int("1000000000000000000"),
             gas=int("100000000000000")
         )
-        if "SuccessValue" not in claim_result.status:
-            print("Claim status:", claim_result.status)
+        print("Claim status:", claim_result.status)
+        if "SuccessValue" in claim_result.status:
+            token_b64 = claim_result.status['SuccessValue']
+            # py_near returns base64-wrapped str; decode to get raw token str (payload_b64.sig_hex)
+            token_bytes = base64.b64decode(token_b64)
+            token = token_bytes.decode('utf-8').strip('"')
+        else:
             raise Exception(f"Token claim failed: {claim_result.status}")
-        
-        # Decode the base64-wrapped return value
-        token_b64 = claim_result.status['SuccessValue']
-        token = base64.b64decode(token_b64).decode('utf-8').strip('"')
         
         if not token:
             raise Exception(f"No token claimed for {group_id}/{user_id}")
@@ -445,14 +465,14 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 @mcp.tool
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    contract_id = contract_id or os.environ["NOVA_CONTRACT_ID"]  # Aligned env
+    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")  # Derive user_id
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")
     try:
         # Step 1: Fetch key (member auth)
-        key = await _get_shade_key(group_id, account_id, contract_id, private_key)
+        key = await _get_shade_key(group_id, user_id, contract_id, private_key)  # Use user_id
         # Step 2: Fetch from IPFS (use internal)
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (use internal)
