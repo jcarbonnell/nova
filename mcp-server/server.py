@@ -76,6 +76,8 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         payload_hash.update(payload_bytes)
         sig_bytes = private_key_obj.sign(payload_hash.finalize())
         sig_hex = sig_bytes.hex()
+
+        print("payload_b64 type:", type(payload_b64), "starts:", payload_b64[:10] if payload_b64 else "None")
         
         # Step 2: Claim token on-chain (payable call as user_id)
         args_dict = {
@@ -83,7 +85,9 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "payload_b64": payload_b64,
             "signature_hex": sig_hex
         }
-        # Pass dict - py_near json.dumps once (clean)
+        print("args_dict payload_b64 type:", type(args_dict["payload_b64"]))
+        
+        # Pass dict - py_near json.dumps once
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
