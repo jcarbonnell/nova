@@ -92,8 +92,6 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             amount=int("1000000000000000000"),
             gas=int("100000000000000")
         )
-        print("Claim args dict:", args_dict)  # Debug
-        print("Claim logs:", [log for receipt in claim_result.receipts_outcome for log in receipt.outcome.logs if "token" in log.lower()])
         if "SuccessValue" not in claim_result.status:
             print("Claim status:", claim_result.status)
             raise Exception(f"Token claim failed: {claim_result.status}")
