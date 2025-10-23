@@ -83,17 +83,17 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "payload_b64": payload_b64,
             "sig_hex": sig_hex
         }
-        args_str = json.dumps(args_dict)  # Explicit JSON str (prevents double-escape)
+        # Pass dict - py_near json.dumps once (clean)
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
-            args=args_str,  # Pass JSON str
+            args=args_dict,  # Dict directly
             amount=int("1000000000000000000"),
             gas=int("100000000000000")
         )
-        print("Claim args JSON:", args_str)  # Debug: {"group_id": ..., "payload_b64": ..., "sig_hex": ...}
+        print("Claim args dict:", args_dict)  # Debug: {'group_id': ..., 'payload_b64': ..., 'sig_hex': ...}
         if "SuccessValue" not in claim_result.status:
-            print("Claim status:", claim_result.status)  # Debug: See panic (e.g., "Invalid JSON")
+            print("Claim status:", claim_result.status)  # e.g., {'Failure': {'ActionError': ... 'Invalid JSON'}}
             raise Exception(f"Token claim failed: {claim_result.status}")
         token = claim_result.status['SuccessValue']  # Full token
         if not token:
