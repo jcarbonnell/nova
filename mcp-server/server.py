@@ -78,18 +78,22 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         sig_hex = sig_bytes.hex()
         
         # Step 2: Claim token on-chain (payable call as user_id)
-        args_dict = {"group_id": group_id, "payload_b64": payload_b64, "sig_hex": sig_hex}
-        args_str = json.dumps(args_dict)  # Explicit JSON str
+        args_dict = {
+            "group_id": group_id,
+            "payload_b64": payload_b64,
+            "sig_hex": sig_hex
+        }
+        args_str = json.dumps(args_dict)  # Explicit JSON str (prevents double-escape)
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
-            args=args_str,  # Pass as str
+            args=args_str,  # Pass JSON str
             amount=int("1000000000000000000"),
             gas=int("100000000000000")
         )
-        print("Claim args JSON:", args_str)  # Debug: Confirm sig_hex present
-        print("Claim result status:", claim_result.status)  # Debug: See exact error
+        print("Claim args JSON:", args_str)  # Debug: {"group_id": ..., "payload_b64": ..., "sig_hex": ...}
         if "SuccessValue" not in claim_result.status:
+            print("Claim status:", claim_result.status)  # Debug: See panic (e.g., "Invalid JSON")
             raise Exception(f"Token claim failed: {claim_result.status}")
         token = claim_result.status['SuccessValue']  # Full token
         if not token:
