@@ -95,10 +95,16 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         if "SuccessValue" not in claim_result.status:
             print("Claim status:", claim_result.status)
             raise Exception(f"Token claim failed: {claim_result.status}")
-        token = claim_result.status['SuccessValue']
+        
+        # Decode the base64-wrapped return value
+        token_b64 = claim_result.status['SuccessValue']
+        token = base64.b64decode(token_b64).decode('utf-8').strip('"')
+        
         if not token:
             raise Exception(f"No token claimed for {group_id}/{user_id}")
         
+        print(f"Decoded token: {token[:50]}...") # Debug: show first 50 chars
+
         # Step 3: Call Shade API with token
         if not SHADE_API_URL:
             raise Exception("SHADE_API_URL not set")
