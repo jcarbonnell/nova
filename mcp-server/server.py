@@ -314,7 +314,7 @@ def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
 async def register_group(group_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Registers new group on NOVA contract (owner only). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if await _group_contains_key(group_id, contract_id):
@@ -362,7 +362,7 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
 async def add_group_member(group_id: str, member_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Adds member to group (owner only). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if not await _group_contains_key(group_id, contract_id):
@@ -386,7 +386,7 @@ async def add_group_member(group_id: str, member_id: str, account_id: str = None
 async def revoke_group_member(group_id: str, member_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Revokes member from group (owner only, rotates key). Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     rpc = os.environ["RPC_URL"]
     if not await _group_contains_key(group_id, contract_id):
@@ -436,7 +436,7 @@ async def get_shade_key(group_id: str, user_id: str, account_id: str = None, pri
 async def record_near_transaction(group_id: str, user_id: str, file_hash: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
     """Records file tx on NOVA contract (owner only), returns trans_id. Provide creds as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     return await _record_near_transaction(group_id, user_id, file_hash, ipfs_hash, contract_id, account_id, private_key)
 
@@ -444,7 +444,7 @@ async def record_near_transaction(group_id: str, user_id: str, file_hash: str, i
 async def composite_upload(group_id: str, user_id: str, data: str, filename: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full upload: get_key → encrypt → IPFS pin → record tx (owner for record). Provide creds as owner/member."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")
+    account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
         # Step 1: Fetch key (uses _get_shade_key, which has startup)
@@ -466,7 +466,7 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
     contract_id = contract_id or os.environ["NOVA_CONTRACT_ID"]  # Aligned env
-    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-3.testnet")  # Derive user_id
+    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Derive user_id
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")

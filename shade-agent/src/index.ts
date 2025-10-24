@@ -9,9 +9,9 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 // Import routes
-//import ethAccount from "./routes/ethAccount";
-//import agentAccount from "./routes/agentAccount";
-//import transaction from "./routes/transaction";
+import ethAccount from "./routes/ethAccount";
+import agentAccount from "./routes/agentAccount";
+import transaction from "./routes/transaction";
 import keyMgmt from "./routes/key-management";
 
 const app = new Hono();
@@ -23,9 +23,9 @@ app.use(cors());
 app.get("/", (c) => c.json({ message: "App is running" }));
 
 // Routes
-//app.route("/api/eth-account", ethAccount);
-//app.route("/api/agent-account", agentAccount);
-//app.route("/api/transaction", transaction);
+app.route("/api/eth-account", ethAccount);
+app.route("/api/agent-account", agentAccount);
+app.route("/api/transaction", transaction);
 app.route("/api/key-management", keyMgmt);
 
 // Start the server
