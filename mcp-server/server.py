@@ -56,7 +56,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "group_id": group_id,
             "user_id": user_id,
             "nonce": nonce,
-            "timestamp": str(timestamp)  # As str for JS BigInt precision
+            "timestamp": timestamp # as int
         }
         payload_str = json.dumps(payload_dict)
         payload_bytes = payload_str.encode('utf-8')
