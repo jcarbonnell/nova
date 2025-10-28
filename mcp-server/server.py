@@ -446,9 +446,11 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 
 @mcp.tool
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
-    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
-    contract_id = contract_id or os.environ["NOVA_CONTRACT_ID"]  # Aligned env
-    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Derive user_id
+    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}.
+    Provide user_id/account_id/private_key as member for custom auth (user_id takes precedence)."""
+    contract_id = contract_id or os.environ["CONTRACT_ID"]  # Aligned env
+    user_id = user_id or account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Derive user_id
+    account_id = account_id or user_id # Align account_id to user_id for claim tx
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")
@@ -498,7 +500,7 @@ async def auth_status(user_id: str, group_id: str = "test_group") -> dict:
             return {"authorized": False, "groups": [], "member_count": 0}
         raise Exception(f"Auth query failed: {str(e)}")
     
-    
+
 async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract_id: str = None) -> bool:
     """Verifies Shade attestation checksum against on-chain expected for the group."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
