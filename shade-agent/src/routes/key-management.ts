@@ -66,8 +66,8 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     console.log('Token verify: Payload str len', payloadStr.length);  // Debug
     
     const payload = JSON.parse(payloadStr);
-    const { group_id, user_id, nonce, timestamp } = payload;
-    if (!group_id || !user_id || !nonce || !timestamp ) {
+    const { group_id, user_id, nonce, timestamp, signing_pk_b58 } = payload;
+    if (!group_id || !user_id || !nonce || !timestamp) {  // Core 4 fields only (PK optional)
       console.log('Token verify: Missing payload fields');
       return { valid: false };
     }
@@ -95,36 +95,52 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     }
     console.log('Token verify: Nonce valid');
     
-    // Fetch ALL access keys via RPC
-    const rpcUrl = 'https://rpc.testnet.near.org';
-    const rpcRes = await axios.post(rpcUrl, {
-      jsonrpc: '2.0',
-      id: 'dontcare',
-      method: 'query',
-      params: {
-        request_type: 'view_access_key_list',
-        finality: 'final',
-        account_id: user_id
+    // Prefer payload PK if present (for multi-key); fallback to RPC first ed25519
+    let userPkBytes;
+    if (signing_pk_b58) {
+      try {
+        userPkBytes = bs58.decode(signing_pk_b58);  // Full 32 bytes
+        if (userPkBytes.length !== 32) {
+          console.error('Token verify: Invalid signing PK length');
+          return { valid: false };
+        }
+        console.log('Token verify: Using payload PK', signing_pk_b58.slice(0, 20) + '...');
+      } catch (e) {
+        console.error('Token verify: PK decode error, falling back to RPC', e);
+        // Proceed to RPC fallback
       }
-    });
-    if (rpcRes.status !== 200) {
-      console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
-      return { valid: false };
     }
-    const keys = rpcRes.data.result?.keys || [];
-    if (keys.length === 0) {
-      console.error('Token verify: No access keys for', user_id);
-      return { valid: false };
+    
+    if (!userPkBytes) {  // Fallback: RPC fetch (legacy compat)
+      const rpcUrl = 'https://rpc.testnet.near.org';
+      const rpcRes = await axios.post(rpcUrl, {
+        jsonrpc: '2.0',
+        id: 'dontcare',
+        method: 'query',
+        params: {
+          request_type: 'view_access_key_list',
+          finality: 'final',
+          account_id: user_id
+        }
+      });
+      if (rpcRes.status !== 200) {
+        console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
+        return { valid: false };
+      }
+      const keys = rpcRes.data.result?.keys || [];
+      if (keys.length === 0) {
+        console.error('Token verify: No access keys for', user_id);
+        return { valid: false };
+      }
+      const keyView = keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
+      if (!keyView.public_key.startsWith('ed25519:')) {
+        console.error('Token verify: No ed25519 key found');
+        return { valid: false };
+      }
+      const userPkStr = keyView.public_key;
+      userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
+      console.log('Token verify: Using RPC PK', userPkStr.slice(0, 20) + '...');
     }
-    // Use first ed25519 full-access key (filter if needed, e.g., for FunctionCall permission)
-    const keyView = keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
-    if (!keyView.public_key.startsWith('ed25519:')) {
-      console.error('Token verify: No ed25519 key found');
-      return { valid: false };
-    }
-    const userPkStr = keyView.public_key;
-    const userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
-    console.log('Token verify: Using PK', userPkStr.slice(0, 20) + '...');  // Debug
     
     // Verify ed25519 on raw payload_bytes (no hash)
     const sigBytes = Buffer.from(sigHex, 'hex');
@@ -182,7 +198,7 @@ keyMgmt.post('/generate_key', async (c) => {
   return c.json({ key, checksum: info.checksum });
 });
 
-// Get key for authorized user (requires JWT token)
+// Get key for authorized user
 keyMgmt.post('/get_key', async (c) => {
   const { group_id, token } = await c.req.json();
   if (!group_id || !token) return c.json({ error: 'group_id and token required' }, 400);

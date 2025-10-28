@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 import base58
 import py_near
 from py_near.account import Account
@@ -48,7 +49,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
         
-        # Step 0: Gen payload (no pubkey—unnecessary)
+        # Step 0: Gen payload (derive PK early)
         timestamp = int(time.time() * 1_000_000_000)  # ns approx
         nonce_input = f"{group_id}{user_id}{timestamp}"
         nonce = hashlib.sha256(nonce_input.encode()).hexdigest()
@@ -56,13 +57,10 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "group_id": group_id,
             "user_id": user_id,
             "nonce": nonce,
-            "timestamp": timestamp # as int
+            "timestamp": timestamp  # as int
         }
-        payload_str = json.dumps(payload_dict)
-        payload_bytes = payload_str.encode('utf-8')
-        payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
         
-        # Step 1: Sign payload with user privkey (ed25519 from seed)
+        # Step 1: Derive PK and add to dict (before signing)
         if private_key.startswith('ed25519:'):
             seed_b58 = private_key[8:]
             seed_bytes_full = base58.b58decode(seed_b58)
@@ -73,6 +71,38 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         else:
             raise Exception("Invalid privkey format")
         
+        # Derive public key
+        public_key_obj = private_key_obj.public_key()
+        public_bytes = public_key_obj.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        )
+        # Base58 encode public
+        def base58_encode(b: bytes) -> str:
+            alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+            n = int.from_bytes(b, 'big')
+            res = []
+            while n > 0:
+                n, r = divmod(n, 58)
+                res.append(alphabet[r])
+            res.reverse()
+            # Leading zeros
+            for byte in b:
+                if byte == 0:
+                    res.insert(0, alphabet[0])
+                else:
+                    break
+            return ''.join(res)
+
+        signing_pk_b58 = base58_encode(public_bytes)  # Without prefix
+        payload_dict["signing_pk_b58"] = signing_pk_b58  # Add here
+        
+        # Now gen full payload str/bytes/b64
+        payload_str = json.dumps(payload_dict)
+        payload_bytes = payload_str.encode('utf-8')
+        payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
+        
+        # Sign the FULL payload (with PK)
         sig_bytes = private_key_obj.sign(payload_bytes)  # Raw bytes
         sig_hex = sig_bytes.hex()
 
