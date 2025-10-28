@@ -26,9 +26,6 @@ const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-4.testnet';
 // Set sha512 for noble
 ed25519.hashes.sha512 = sha512;
 
-// explicit, avoid 'shade-agent-api' DNS resolution issues
-const RPC_URL = 'https://rpc.testnet.near.org';
-
 // Helpers
 function encryptKey(key: string): string {
   const iv = crypto.randomBytes(16);
