@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import serialization
 
 # Your vars (match MCP .env)
 group_id = "test_group"  # Known group
-user_id = "user.testnet"  # e.g., nova-sdk-4.testnet
+user_id = "user.testnet" # Known user
 private_key_full = "your_full_private_key_here"  # ed25519
 
 # Step 0: Gen payload (exact MCP: compact JSON, ns timestamp, sha256 nonce)

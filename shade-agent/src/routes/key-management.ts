@@ -215,7 +215,7 @@ keyMgmt.post('/get_key', async (c) => {
   await agentCall({
     methodName: 'consume_nonce',  // Assume contract has this; or use claim_token's used_nonces
     args: { group_id, user_id, nonce },
-    gas: '30000000000000n'
+    gas: 30000000000000n // 30 TGas
   });
   
   // Attest
