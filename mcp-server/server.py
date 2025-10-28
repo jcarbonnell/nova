@@ -498,7 +498,7 @@ async def auth_status(user_id: str, group_id: str = "test_group") -> dict:
             return {"authorized": False, "groups": [], "member_count": 0}
         raise Exception(f"Auth query failed: {str(e)}")
     
-    
+
 async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract_id: str = None) -> bool:
     """Verifies Shade attestation checksum against on-chain expected for the group."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
