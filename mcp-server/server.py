@@ -334,26 +334,28 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
         # Off-chain: Trigger Shade key gen
         shade_response = requests.post(
             f"{SHADE_API_URL}/api/key-management/generate_key",
-            json={"group_id": group_id},
+            json={"group_id": group_id, "owner": account_id},
             timeout=15
         )
         if shade_response.status_code == 200:
             shade_data = shade_response.json()
+            key = shade_data.get("key")
             checksum = shade_data.get("checksum")
             if checksum:
                 # Update on-chain checksum
-                await near.function_call(
+                update_result = await near.function_call(
                     contract_id=contract_id,
                     method_name="update_checksum",
                     args={"group_id": group_id, "checksum": checksum},
                     amount=int("10000000000000000000"),  # 0.00001 NEAR
                     gas=int("50000000000000")  # 50 TGas
                 )
-                print(f"Checksum updated on-chain for {group_id}: {checksum}")
+                if "SuccessValue" in update_result.status:
+                    print(f"Checksum auto-updated for {group_id}: {checksum}")
+                else:
+                    raise Exception(f"Checksum update failed: {update_result.status}")
             else:
-                raise Exception("Shade gen succeeded but no checksum returned")
-        else:
-            raise Exception(f"Shade gen failed: {shade_response.text}")
+                raise Exception("Shade gen no checksum")
         
         return f"Registered (with Shade key gen for {group_id})"
     raise Exception(f"Register failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")

@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
-import { verify } from '@noble/ed25519';
+import * as ed25519 from '@noble/ed25519';
+import { sha512 } from '@noble/hashes/sha2.js';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
 const db = new Database('./nova-keys.db');
@@ -21,6 +22,9 @@ const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString
 
 // NOVA contract ID from env
 const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-4.testnet';
+
+// Set sha512 for noble
+ed25519.hashes.sha512 = sha512;
 
 // Helpers
 function encryptKey(key: string): string {
@@ -42,63 +46,101 @@ function decryptKey(enc: string): string {
   return decrypted.toString();
 }
 
-async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number; public_key?: string }> {
+async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number}> {
   try {
     const [payloadB64, sigHex] = token.split('.');
     if (!payloadB64 || !sigHex) {
+      console.error('Token verify: Invalid format (missing . separator)');
       return { valid: false };
     }
     
-    // Decode payload to bytes (raw for ed25519 verify)
-    const payload_bytes = Buffer.from(payloadB64, 'base64');
-    if (payload_bytes.length === 0) {
+    // Decode payload to bytes/str
+    const payloadBytes = Buffer.from(payloadB64, 'base64');
+    if (payloadBytes.length === 0) {
+      console.error('Token verify: Empty payload');
       return { valid: false };
     }
     
     // Decode to str for JSON (for fields extraction)
-    const payloadStr = payload_bytes.toString('utf-8');
+    const payloadStr = payloadBytes.toString('utf-8');
+    console.log('Token verify: Payload str len', payloadStr.length);  // Debug
+    
     const payload = JSON.parse(payloadStr);
-    
-    const { group_id, user_id, nonce, timestamp, public_key } = payload;  // Added public_key
-    if (!group_id || !user_id || !nonce || !timestamp || !public_key) {  // Require PK
+    const { group_id, user_id, nonce, timestamp } = payload;
+    if (!group_id || !user_id || !nonce || !timestamp ) {
+      console.log('Token verify: Missing payload fields');
       return { valid: false };
     }
     
-    // Check timestamp freshness (e.g., < 5min old)
-    const now = Date.now();
-    if (timestamp > now + 300000 || timestamp < now - 300000) {  // 5min window
+    // Check timestamp freshness (convert ns to ms)
+    const timestampStr = timestamp.toString();
+    const tsBig = BigInt(timestampStr);
+    const nowMs = Date.now();  // ms
+    const nowNs = BigInt(nowMs) * 1000000n;  // ms → ns
+    const fiveMinNs = 300000000000n;  // 5min ns
+    if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
+      console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
       return { valid: false };
     }
+    console.log('Token verify: Timestamp ms', nowMs, 'vs payload', timestamp);
     
-    // Verify nonce via contract view (prevents replay)
+    // Verify nonce via contract
     const nonceValid = await agentView({
       methodName: 'get_nonce_validity',
       args: { group_id, user_id, nonce }
     });
     if (!nonceValid) {
+      console.error('Token verify: Nonce invalid/used');
       return { valid: false };
     }
+    console.log('Token verify: Nonce valid');
     
-    // Use payload public_key (ed25519:base58) for verify
-    if (!public_key.startsWith('ed25519:')) {
+    // Fetch ALL access keys via RPC
+    const rpcUrl = 'https://rpc.testnet.near.org';
+    const rpcRes = await axios.post(rpcUrl, {
+      jsonrpc: '2.0',
+      id: 'dontcare',
+      method: 'query',
+      params: {
+        request_type: 'view_access_key_list',
+        finality: 'final',
+        account_id: user_id
+      }
+    });
+    if (rpcRes.status !== 200) {
+      console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
       return { valid: false };
     }
-    const userPkBytes = bs58.decode(public_key.slice(8));  // Decode base58 part to 32 bytes
+    const keys = rpcRes.data.result?.keys || [];
+    if (keys.length === 0) {
+      console.error('Token verify: No access keys for', user_id);
+      return { valid: false };
+    }
+    // Use first ed25519 full-access key (filter if needed, e.g., for FunctionCall permission)
+    const keyView = keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
+    if (!keyView.public_key.startsWith('ed25519:')) {
+      console.error('Token verify: No ed25519 key found');
+      return { valid: false };
+    }
+    const userPkStr = keyView.public_key;
+    const userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
+    console.log('Token verify: Using PK', userPkStr.slice(0, 20) + '...');  // Debug
     
     // Verify ed25519 on raw payload_bytes (no hash)
     const sigBytes = Buffer.from(sigHex, 'hex');
-    const validSig = verify(sigBytes, payload_bytes, userPkBytes);
+    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes); // Raw bytes
     if (!validSig) {
+      console.error('Token verify: Sig invalid');
       return { valid: false };
     }
+    console.log('Token verify: Sig valid');
     
     return { 
       valid: true, 
       user_id, 
       group_id, 
       nonce, 
-      timestamp,
-      public_key  // Return for logging if needed
+      timestamp: Number(timestamp)
     };
   } catch (e) {
     console.error('Token verify error:', e);
