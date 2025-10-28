@@ -49,19 +49,6 @@ function decryptKey(enc: string): string {
   return decrypted.toString();
 }
 
-async function directAgentView(methodName: string, args: any) {
-  try {
-    const res = await axios.post(RPC_URL, {
-      jsonrpc: '2.0', id: 'direct', method: 'query',
-      params: { request_type: 'call_function', account_id: NOVA_CONTRACT, method_name: methodName, args_base64: Buffer.from(JSON.stringify(args)).toString('base64'), finality: 'final' }
-    });
-    return res.data.result?.result ? Buffer.from(res.data.result.result, 'base64').toString() === 'true' : false;
-  } catch (e) {
-    console.error('Direct RPC fallback failed:', e);
-    return false;
-  }
-}
-
 async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number}> {
   try {
     const [payloadB64, sigHex] = token.split('.');
@@ -70,14 +57,16 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
+    // Decode payload to bytes/str
     const payloadBytes = Buffer.from(payloadB64, 'base64');
     if (payloadBytes.length === 0) {
       console.error('Token verify: Empty payload');
       return { valid: false };
     }
     
+    // Decode to str for JSON (for fields extraction)
     const payloadStr = payloadBytes.toString('utf-8');
-    console.log('Token verify: Payload str len', payloadStr.length);
+    console.log('Token verify: Payload str len', payloadStr.length);  // Debug
     
     const payload = JSON.parse(payloadStr);
     const { group_id, user_id, nonce, timestamp } = payload;
@@ -86,37 +75,31 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Timestamp to ms
+    // Check timestamp freshness (convert ns to ms)
     const timestampStr = timestamp.toString();
     const tsBig = BigInt(timestampStr);
-    const tsMs = Number(tsBig / 1000000n);  // ns to ms
-    const nowMs = Date.now();
-    const fiveMinMs = 300000;  // 5min ms
-    if (tsMs > nowMs + fiveMinMs || tsMs < nowMs - fiveMinMs) {
-      console.error('Token verify: Timestamp invalid', { tsMs, nowMs });
+    const nowMs = Date.now();  // ms
+    const nowNs = BigInt(nowMs) * 1000000n;  // ms → ns
+    const fiveMinNs = 300000000000n;  // 5min ns
+    if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
+      console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
       return { valid: false };
     }
-    console.log('Token verify: Timestamp ms', nowMs, 'vs payload ms', tsMs);
+    console.log('Token verify: Timestamp ms', nowMs, 'vs payload', timestamp);
     
-    // Nonce via direct RPC fallback
-    let nonceValid;
-    try {
-      nonceValid = await agentView({
-        methodName: 'get_nonce_validity',
-        args: { group_id, user_id, nonce }
-      });
-    } catch (e) {
-      console.warn('Agent nonce fetch failed, using direct RPC:', e);
-      nonceValid = await directAgentView('get_nonce_validity', { group_id, user_id, nonce });
-    }
+    // Verify nonce via contract
+    const nonceValid = await agentView({
+      methodName: 'get_nonce_validity',
+      args: { group_id, user_id, nonce }
+    });
     if (!nonceValid) {
       console.error('Token verify: Nonce invalid/used');
       return { valid: false };
     }
     console.log('Token verify: Nonce valid');
     
-    // RPC keys fetch (unchanged)
-    const rpcUrl = RPC_URL;
+    // Fetch ALL access keys via RPC
+    const rpcUrl = 'https://rpc.testnet.near.org';
     const rpcRes = await axios.post(rpcUrl, {
       jsonrpc: '2.0',
       id: 'dontcare',
@@ -136,32 +119,31 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       console.error('Token verify: No access keys for', user_id);
       return { valid: false };
     }
-    
-    // Loop over all ed25519 keys, verify until success
-    let validSig = false;
-    let usedPk = '';
-    for (const keyView of keys.filter((k: any) => k.public_key.startsWith('ed25519:'))) {
-      const userPkStr = keyView.public_key;
-      const userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
-      const sigBytes = Buffer.from(sigHex, 'hex');
-      validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes);
-      if (validSig) {
-        usedPk = userPkStr.slice(0, 20) + '...';
-        break;
-      }
-    }
-    if (!validSig) {
-      console.error('Token verify: Sig invalid on all keys');
+    // Use first ed25519 full-access key (filter if needed, e.g., for FunctionCall permission)
+    const keyView = keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
+    if (!keyView.public_key.startsWith('ed25519:')) {
+      console.error('Token verify: No ed25519 key found');
       return { valid: false };
     }
-    console.log('Token verify: Sig valid using PK', usedPk);
+    const userPkStr = keyView.public_key;
+    const userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
+    console.log('Token verify: Using PK', userPkStr.slice(0, 20) + '...');  // Debug
+    
+    // Verify ed25519 on raw payload_bytes (no hash)
+    const sigBytes = Buffer.from(sigHex, 'hex');
+    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes); // Raw bytes
+    if (!validSig) {
+      console.error('Token verify: Sig invalid');
+      return { valid: false };
+    }
+    console.log('Token verify: Sig valid');
     
     return { 
       valid: true, 
       user_id, 
       group_id, 
       nonce, 
-      timestamp: tsMs
+      timestamp: Number(timestamp)
     };
   } catch (e) {
     console.error('Token verify error:', e);
@@ -233,16 +215,11 @@ keyMgmt.post('/get_key', async (c) => {
   const key = decryptKey(row.encrypted_key);
   
   // Consume nonce on-chain (anti-replay)
-  try {
-    await agentCall({
-      methodName: 'consume_nonce',
-      args: { group_id, user_id, nonce },
-      gas: 30000000000000  // Number
-    });
-  } catch (e) {
-    console.warn('Agent consume failed, using direct RPC:', e);
-    await directAgentView('consume_nonce', { group_id, user_id, nonce });  // View? Add payable consume view if needed
-  }
+  await agentCall({
+    methodName: 'consume_nonce',  // Assume contract has this; or use claim_token's used_nonces
+    args: { group_id, user_id, nonce },
+    gas: '30000000000000n'
+  });
   
   // Attest
   const info = await agentInfo();
