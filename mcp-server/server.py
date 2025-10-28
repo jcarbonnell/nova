@@ -48,26 +48,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         acc = Account(user_id, private_key, rpc)
         await acc.startup()
         
-        # Step 0: Fetch user's public key for payload (first ed25519 full access)
-        rpc_res = requests.post(rpc, json={
-            "jsonrpc": "2.0",
-            "id": "dontcare",
-            "method": "query",
-            "params": {
-                "request_type": "view_access_key",
-                "finality": "final",
-                "account_id": user_id,
-                "public_key": None  # All keys
-            }
-        }, timeout=10)
-        keys = rpc_res.json().get("result", {}).get("keys", [])
-        if not keys:
-            raise Exception(f"No access keys for {user_id}")
-        user_pk_str = next((k["public_key"] for k in keys if k["public_key"].startswith("ed25519:") and k["permission"]["FunctionCall"]), None)
-        if not user_pk_str:
-            raise Exception(f"No suitable ed25519 full access key for {user_id}")
-        
-        # Gen payload (match contract: timestamp, sha256 nonce; add public_key)
+        # Step 0: Gen payload (no pubkey—unnecessary)
         timestamp = int(time.time() * 1_000_000_000)  # ns approx
         nonce_input = f"{group_id}{user_id}{timestamp}"
         nonce = hashlib.sha256(nonce_input.encode()).hexdigest()
@@ -75,8 +56,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             "group_id": group_id,
             "user_id": user_id,
             "nonce": nonce,
-            "timestamp": timestamp,
-            "public_key": user_pk_str  # Added for targeted verify
+            "timestamp": str(timestamp)  # As str for JS BigInt precision
         }
         payload_str = json.dumps(payload_dict)
         payload_bytes = payload_str.encode('utf-8')
@@ -93,10 +73,10 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         else:
             raise Exception("Invalid privkey format")
         
-        sig_bytes = private_key_obj.sign(payload_bytes)
+        sig_bytes = private_key_obj.sign(payload_bytes)  # Raw bytes
         sig_hex = sig_bytes.hex()
 
-        print("payload_b64 type:", type(payload_b64), "starts:", payload_b64[:10] if payload_b64 else "None")
+        print(f"Generated payload_b64: {payload_b64[:50]}...")  # Debug
         
         # Step 2: Claim token on-chain (payable call as user_id)
         args_dict = {
@@ -107,14 +87,14 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         claim_result = await acc.function_call(
             contract_id=contract_id,
             method_name="claim_token",
-            args=args_dict,
-            amount=int("1000000000000000000"),
-            gas=int("100000000000000")
+            args=args_dict,  # Dict passes as JSON
+            amount=int("1000000000000000000"),  # 0.001 NEAR
+            gas=int("100000000000000")  # 100 TGas
         )
         print("Claim status:", claim_result.status)
         if "SuccessValue" in claim_result.status:
             token_b64 = claim_result.status['SuccessValue']
-            # py_near returns base64-wrapped str; decode to get raw token str (payload_b64.sig_hex)
+            # Decode base64-wrapped str to raw token (payload_b64.sig_hex)
             token_bytes = base64.b64decode(token_b64)
             token = token_bytes.decode('utf-8').strip('"')
         else:
@@ -123,7 +103,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         if not token:
             raise Exception(f"No token claimed for {group_id}/{user_id}")
         
-        print(f"Decoded token: {token[:50]}...") # Debug: show first 50 chars
+        print(f"Decoded token: {token[:50]}...")  # Debug
 
         # Step 3: Call Shade API with token
         if not SHADE_API_URL:

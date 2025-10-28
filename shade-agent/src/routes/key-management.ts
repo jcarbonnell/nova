@@ -231,17 +231,6 @@ keyMgmt.post('/rotate_key', async (c) => {
   const { group_id } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
   
-  // Verify caller is group owner (via contract view)
-  const owner = await agentView({
-    contractId: NOVA_CONTRACT,
-    methodName: 'get_group_owner',  // Assume view exists; else fetch from state
-    args: { group_id }
-  });
-  const caller = c.req.header('X-Caller') || 'unknown';  // Or from auth header; adjust
-  if (caller !== owner) {
-    return c.json({ error: 'Only group owner can rotate key' }, 403);
-  }
-  
   // Verify group exists
   const groupExists = await agentView({
     contractId: NOVA_CONTRACT,
