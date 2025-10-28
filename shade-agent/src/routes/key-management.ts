@@ -61,9 +61,9 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Decode to str for JSON (for fields extraction)
+    // Decode to str for JSON
     const payloadStr = payloadBytes.toString('utf-8');
-    console.log('Token verify: Payload str len', payloadStr.length);  // Debug
+    console.log('Token verify: Payload str len', payloadStr.length);
     
     const payload = JSON.parse(payloadStr);
     const { group_id, user_id, nonce, timestamp } = payload;
@@ -72,12 +72,12 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Check timestamp freshness (convert ns to ms)
+    // Check timestamp freshness (ns to ms)
     const timestampStr = timestamp.toString();
     const tsBig = BigInt(timestampStr);
-    const nowMs = Date.now();  // ms
-    const nowNs = BigInt(nowMs) * 1000000n;  // ms → ns
-    const fiveMinNs = 300000000000n;  // 5min ns
+    const nowMs = Date.now();
+    const nowNs = BigInt(nowMs) * 1000000n;
+    const fiveMinNs = 300000000000n;
     if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
       console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
       return { valid: false };
@@ -116,19 +116,27 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       console.error('Token verify: No access keys for', user_id);
       return { valid: false };
     }
-    // Use first ed25519 full-access key (filter if needed, e.g., for FunctionCall permission)
-    const keyView = keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
-    if (!keyView.public_key.startsWith('ed25519:')) {
-      console.error('Token verify: No ed25519 key found');
+    
+    // FIXED: Select first FULL ACCESS or FunctionCall:* key (prioritize full, then any ed25519)
+    let keyView = keys.find((k: any) => {
+      const perms = k.permission;
+      if (perms && perms.FunctionCall && (perms.FunctionCall.receiver_id === '*' || perms.FunctionCall.receiver_id === NOVA_CONTRACT)) {
+        return k.public_key.startsWith('ed25519:');
+      }
+      return false;
+    }) || keys.find((k: any) => k.public_key.startsWith('ed25519:')) || keys[0];
+    
+    if (!keyView || !keyView.public_key.startsWith('ed25519:')) {
+      console.error('Token verify: No suitable ed25519 key found (needs full/FunctionCall access)');
       return { valid: false };
     }
     const userPkStr = keyView.public_key;
     const userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
-    console.log('Token verify: Using PK', userPkStr.slice(0, 20) + '...');  // Debug
+    console.log('Token verify: Using PK', userPkStr.slice(0, 20) + '...', '(full/FC access)');  // Debug
     
-    // Verify ed25519 on raw payload_bytes (no hash)
+    // Verify ed25519 on raw payload_bytes
     const sigBytes = Buffer.from(sigHex, 'hex');
-    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes); // Raw bytes
+    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes);
     if (!validSig) {
       console.error('Token verify: Sig invalid');
       return { valid: false };
