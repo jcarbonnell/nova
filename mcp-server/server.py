@@ -42,6 +42,8 @@ def _validate_near_key(private_key: str) -> str:
 # Helper functions (callable internally)
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
     """Internal: Gen payload → sign with user priv → claim token on-chain → fetch key from Shade → verify checksum."""
+    if not user_id:
+        raise ValueError("_get_shade_key: user_id required")
     rpc = os.environ["RPC_URL"]
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
@@ -445,18 +447,23 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
         raise Exception(f"Composite upload failed: {str(e)}")
 
 @mcp.tool
-async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
-    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
-    contract_id = contract_id or os.environ.get("CONTRACT_ID", "nova-sdk-4.testnet")  # Fallback explicit
-    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Top-level: Always assign before if/try
+async def composite_retrieve(group_id: str, ipfs_hash: str, user_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
+    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}.
+    Params: user_id (account for auth/signing, defaults to env SIGNER_ACCOUNT_ID)."""
+    contract_id = contract_id or os.environ.get("CONTRACT_ID", "nova-sdk-4.testnet")
+    user_id = user_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Explicit fallback; no account_id
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")
     
+    # Guard: Ensure user_id bound (prevents NameError)
+    if not user_id:
+        raise ValueError("user_id required (provide or set SIGNER_ACCOUNT_ID env)")
+    
     try:
-        # Step 1: Fetch key (member auth)
-        key = await _get_shade_key(group_id, user_id, contract_id, private_key)  # user_id now bound
+        # Step 1: Fetch key (member auth; user_id now guaranteed)
+        key = await _get_shade_key(group_id, user_id, contract_id, private_key)
         # Step 2: Fetch from IPFS (use internal)
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (use internal)
