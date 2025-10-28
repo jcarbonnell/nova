@@ -7,6 +7,7 @@ import time
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 import base58
 import py_near
@@ -77,6 +78,20 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         
         sig_bytes = private_key_obj.sign(payload_bytes)  # Raw bytes
         sig_hex = sig_bytes.hex()
+
+        # Compute and add pubkey_b64 to payload (insert here, after sig gen but before json.dumps)
+        public_key_obj = private_key_obj.public_key()
+        pub_bytes = public_key_obj.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        )
+        pub_b64 = base64.b64encode(pub_bytes).decode('utf-8')
+        payload_dict["pubkey_b64"] = pub_b64  # Append to dict
+
+        # Re-serialize payload_bytes with pubkey included (for signing—ensures token self-contained)
+        payload_str = json.dumps(payload_dict)  # Re-dump after adding pubkey
+        payload_bytes = payload_str.encode('utf-8')
+        payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
 
         print(f"Generated payload_b64: {payload_b64[:50]}...")  # Debug
         
