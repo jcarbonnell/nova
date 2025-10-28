@@ -446,17 +446,17 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 
 @mcp.tool
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
-    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}.
-    Provide user_id/account_id/private_key as member for custom auth (user_id takes precedence)."""
-    contract_id = contract_id or os.environ["CONTRACT_ID"]  # Aligned env
-    user_id = user_id or account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Derive user_id
-    account_id = account_id or user_id # Align account_id to user_id for claim tx
+    """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
+    contract_id = contract_id or os.environ.get("CONTRACT_ID", "nova-sdk-4.testnet")  # Fallback explicit
+    user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Top-level: Always assign before if/try
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
+    
     if not ipfs_hash.startswith('Qm'):
         raise Exception(f"Invalid CID: {ipfs_hash}")
+    
     try:
         # Step 1: Fetch key (member auth)
-        key = await _get_shade_key(group_id, user_id, contract_id, private_key)  # Use user_id
+        key = await _get_shade_key(group_id, user_id, contract_id, private_key)  # user_id now bound
         # Step 2: Fetch from IPFS (use internal)
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (use internal)
