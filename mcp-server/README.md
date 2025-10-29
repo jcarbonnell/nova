@@ -1,6 +1,6 @@
 # NOVA MCP Server
 
-A Model Context Protocol (MCP) server for NOVA secure file-sharing on NEAR blockchain. Enables AI assistants like Claude to interact with encrypted, decentralized file storage through natural language, providing seamless group-based access control and IPFS persistence.
+A Model Context Protocol (MCP) server for NOVA secure file-sharing on NEAR blockchain. Enables AI assistants like Claude to interact with encrypted, decentralized file storage through natural language, providing seamless group-based access control, IPFS persistence, and TEE-secured keys via Shade Agents.
 
 ## Features
 
@@ -9,7 +9,8 @@ A Model Context Protocol (MCP) server for NOVA secure file-sharing on NEAR block
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
 - ⛓️ **NEAR Blockchain** - Immutable transaction records and access control
 - 👥 **Group Management** - Fine-grained access control with member authorization
-- 🔑 **Key Rotation** - Automatic key rotation on member revocation
+- 🔑 **TEE-Secured Keys** - Off-chain key storage in Shade Agents (Phala TEEs) with ed25519 token auth
+- 🔄 **Key Rotation** - Automatic key rotation on member revocation via Shade events
 - 🚀 **Composite Operations** - High-level workflows for upload/retrieve
 - 💬 **Conversational** - Natural language commands for all NOVA operations
 
@@ -22,6 +23,7 @@ NOVA's MCP server allows AI assistants to:
 - Retrieve and decrypt files from IPFS
 - Manage blockchain-based access control groups
 - Record and query file transactions on NEAR
+- Fetch ephemeral keys from TEE-secured Shade Agents
 
 ## Installation
 
@@ -30,8 +32,9 @@ NOVA's MCP server allows AI assistants to:
 - Python 3.10+
 - NEAR testnet account ([create one](https://testnet.mynearwallet.com/))
 - Pinata API credentials ([sign up](https://pinata.cloud))
+- Shade Agent API URL (from [Phala cloud](https://cloud.phala.network/))
 
-### Install from PyPI
+### Install from PyPI (upcoming)
 
 ```bash
 pip install nova-mcp-server
@@ -118,17 +121,17 @@ Claude: [uses auth_status tool]
 
 ## Available Tools
 
-The MCP server exposes 13 tools for AI assistants:
+The MCP server exposes 11 tools for AI assistants:
 
 ### File Operations
 
-- **`composite_upload`** - Encrypt file, upload to IPFS, record transaction
+- **`composite_upload`** - Encrypt file (using Shade key), upload to IPFS, record transaction
   ```
   Parameters: group_id, user_id, data, filename
   Returns: cid, trans_id, file_hash
   ```
 
-- **`composite_retrieve`** - Fetch from IPFS and decrypt
+- **`composite_retrieve`** - Fetch from IPFS and decrypt (using Shade key)
   ```
   Parameters: group_id, ipfs_hash
   Returns: decrypted_b64, file_hash
@@ -144,15 +147,15 @@ The MCP server exposes 13 tools for AI assistants:
 
 ### Group Management
 
-- **`register_group`** - Create new access control group
+- **`register_group`** - Create new access control group (auto-generates Shade key)
 - **`add_group_member`** - Grant member access
-- **`revoke_group_member`** - Revoke access and rotate key
+- **`revoke_group_member`** - Revoke access and rotate Shade key
 - **`auth_status`** - Check user authorization
 
 ### Key Management
 
-- **`store_group_key`** - Store encryption key on blockchain
-- **`get_group_key`** - Retrieve key for authorized users
+- **`get_shade_key`** - Retrieve ephemeral key from TEE-secured Shade Agent (token-gated)
+
 
 ### Transaction Recording
 
@@ -167,8 +170,8 @@ You: "I need to share a confidential document with my team.
      Create a group called 'project_alpha' and upload this file securely."
 
 Claude: I'll help you set up secure file sharing:
-1. Creating group 'project_alpha'...
-2. Encrypting and uploading your document...
+1. Creating group 'project_alpha' (TEE key generated)...
+2. Encrypting and uploading your document (using Shade key)...
 
 [uses register_group, then composite_upload]
 
@@ -188,7 +191,7 @@ Claude: [uses add_group_member twice, then revoke_group_member]
 
 ✅ Added carol.testnet to project_alpha
 ✅ Added dave.testnet to project_alpha
-✅ Revoked bob.testnet and rotated encryption key
+✅ Revoked bob.testnet and rotated TEE key
 
 Bob can no longer access any new files shared in this group.
 ```
@@ -198,12 +201,55 @@ Bob can no longer access any new files shared in this group.
 ```
 You: "Retrieve the file at QmABC... from project_alpha and show me its contents"
 
-Claude: [uses composite_retrieve]
+Claude: [uses composite_retrieve with Shade key]
 
 📄 Retrieved and decrypted file:
 [displays file contents]
 
 🔒 Verified file hash matches: sha256:xyz789...
+```
+
+### Example 4: High-Value Data Workflow
+
+```
+You: "I have sensitive AI training data. Create a group called 'ai_collab' and upload this dataset securely."
+
+Claude: I'll set up secure sharing for your AI dataset:
+1. Creating group 'ai_collab' (TEE key generated in Shade Agent)...
+2. Fetching ephemeral Shade key (token-signed and attested)...
+3. Encrypting dataset with TEE key and uploading to IPFS...
+
+[uses register_group, then composite_upload with get_shade_key]
+
+✅ Done! Your dataset is encrypted and stored at IPFS hash: QmHighValue...
+📝 Transaction recorded: DEF456...
+🔒 File hash: sha256:ghi789... (verified)
+
+You: "Share access with partner.eth for collaboration."
+
+Claude: [uses add_group_member]
+
+✅ Added partner.eth to 'ai_collab' group
+Partner can now retrieve via their own token (TEE-verified access).
+
+You: "Show me the dataset contents to verify."
+
+Claude: Fetching via partner token for verification...
+[uses composite_retrieve with get_shade_key]
+
+📄 Retrieved and decrypted dataset preview:
+[displays sample data rows/embeddings]
+
+✅ Access confirmed—full dataset available securely.
+
+You: "The collaboration is over; revoke partner.eth access."
+
+Claude: [uses revoke_group_member]
+
+✅ Revoked partner.eth from 'ai_collab'
+🔄 TEE key rotated in Shade Agent—old tokens invalid, future files locked to partner.
+
+Partner cannot access new uploads, and old files remain encrypted.
 ```
 
 ## Core Concepts
@@ -213,39 +259,41 @@ Claude: [uses composite_retrieve]
 Groups provide isolated access control domains. Each group has:
 - A unique identifier (`group_id`)
 - An owner (NEAR account) who manages membership
-- A shared encryption key stored on blockchain
+- A TEE-secured encryption key (generated/rotated in Shade Agent)
 - A list of authorized members
 
 ### Encryption Flow
 
-1. **Upload**: Get group key → Encrypt locally → Upload to IPFS → Record transaction
-2. **Download**: Get group key → Fetch from IPFS → Decrypt locally
+1. **Upload**: Fetch ephemeral Shade key (token-gated) → Encrypt locally → Upload to IPFS → Record transaction
+2. **Download**: Fetch ephemeral Shade key → Fetch from IPFS → Decrypt locally
 
 ### Access Control
 
 - Only group owners can add/revoke members
-- Only authorized members can retrieve group keys
-- Member revocation triggers automatic key rotation
-- All operations logged on NEAR blockchain
+- Keys retrieved via signed tokens (ed25519, nonce/timestamp-gated) from TEE
+- Member revocation triggers automatic TEE key rotation
+- All operations logged on NEAR blockchain; Shade attestations verified on-chain
 
 ## Security Considerations
 
 ⚠️ **Important Security Notes:**
 
 1. **Private Keys** - Store NEAR private keys securely; never commit to version control
-2. **Group Keys** - Encryption keys are stored on blockchain, encrypted per member
-3. **IPFS Privacy** - IPFS content is public by CID; encryption is essential
-4. **Key Rotation** - Revoked members cannot decrypt files uploaded after revocation
-5. **Local Decryption** - Files are decrypted client-side, never exposing plaintext to IPFS
+2. **TEE Keys** - Encryption keys stored encrypted in Shade TEEs—never on-chain; access via attested tokens only
+3. **IPFS Privacy** - IPFS content is public by CID; encryption + TEE gating essential
+4. **Key Rotation** - Revoked members cannot decrypt files uploaded after revocation (TEE swap)
+5. **Local Decryption** - Files are decrypted client-side; tokens expire post-use (replay-proof)
+6. **Attestation** - Shade checksums verified on-chain—ensures TEE integrity
+
 
 ## NEAR Token Deposits
 
 Some operations require NEAR token deposits for storage:
 
-- `register_group` - ~0.1 NEAR
+- `register_group` - ~0.1 NEAR (includes Shade init)
 - `add_group_member` - ~0.0005 NEAR
-- `revoke_group_member` - ~0.0005 NEAR
-- `store_group_key` - ~0.0005 NEAR
+- `revoke_group_member` - ~0.0005 NEAR  (includes Shade rotate)
+- `claim_token` (internal) - ~0.001 NEAR
 - `record_transaction` - ~0.002 NEAR
 
 Ensure your NEAR account has sufficient balance.
@@ -304,7 +352,7 @@ Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK f
 ### MCP Server Not Connecting
 
 1. Check Claude Desktop config path is correct
-2. Verify all environment variables are set
+2. Verify all environment variables are set (incl. SHADE_API_URL)
 3. Restart Claude Desktop after config changes
 4. Check logs: `~/Library/Logs/Claude/mcp-*.log` (MacOS)
 
@@ -313,6 +361,12 @@ Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK f
 1. Verify account has sufficient balance: `near state your-account.testnet`
 2. Check private key format: `ed25519:base58_encoded_key`
 3. Ensure contract ID is correct for network (testnet/mainnet)
+
+### Shade/TEE Issues
+
+1. Verify SHADE_API_URL reachable (e.g., curl {SHADE_API_URL}/api/key-management/get_key)
+2. Check checksum mismatches: Ensure update_checksum called post-gen
+3. Token errors: Validate timestamp/nonce in payload; refresh if expired
 
 ### IPFS Upload Failures
 
@@ -326,6 +380,7 @@ Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK f
 - [Model Context Protocol](https://modelcontextprotocol.io)
 - [Claude Desktop MCP Guide](https://docs.anthropic.com/claude/docs/model-context-protocol)
 - [NEAR Protocol](https://near.org)
+- [Shade Agents](https://docs.near.org/ai/introduction)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
 
@@ -333,7 +388,6 @@ Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK f
 
 - Issues: [GitHub Issues](https://github.com/jcarbonnell/nova/issues)
 - Discussions: [GitHub Discussions](https://github.com/jcarbonnell/nova/discussions)
-- MCP Support: [MCP Discord](https://discord.gg/modelcontextprotocol)
 
 ## Contributing
 
@@ -347,4 +401,4 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/blob/main/mcp-server/LICENSE) file for details.
+This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/LICENSE) file for details.

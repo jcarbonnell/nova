@@ -47,7 +47,9 @@ Choose the integration that best fits your use case:
 
 ### 🤖 MCP Server - AI Assistant Integration
 
-For AI-assisted workflows using Claude or other MCP-compatible assistants.
+For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed https://nova-mcp.fastmcp.app/mcp as a custom connector in your mcp client.
+
+**Install from PyPI (upcoming)**
 
 ```bash
 pip install nova-mcp-server
