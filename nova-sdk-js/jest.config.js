@@ -1,29 +1,16 @@
 require('dotenv').config();
 
 module.exports = {
-  preset: 'ts-jest',
   testEnvironment: 'node',
   roots: ['<rootDir>/tests'],
   testMatch: ['**/*.test.ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
-  collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/**/*.d.ts',
-  ],
   transform: {
-    '^.+\\.ts$': ['ts-jest', {
-      tsconfig: {
-        module: 'commonjs',
-        moduleResolution: 'node',
-        esModuleInterop: true,
-        allowSyntheticDefaultImports: true,
-        isolatedModules: true,
-      },
-      diagnostics: {
-        ignoreCodes: [151002]
-      }
-    }]
+    '^.+\\.(ts|tsx|js|jsx)$': 'babel-jest'  // Babel for all (TS/JS/ESM)
   },
+  transformIgnorePatterns: [
+    '/node_modules/(?!(@noble)/)'  // Ensure @noble transpiled
+  ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1'
   },

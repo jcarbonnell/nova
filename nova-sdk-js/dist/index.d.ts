@@ -14,6 +14,13 @@ export interface CompositeRetrieveResult {
     data: Buffer;
     file_hash: string;
 }
+export interface TokenPayload {
+    group_id: string;
+    user_id: string;
+    nonce: string;
+    timestamp: number;
+    signing_pk_b58?: string;
+}
 export declare class NovaError extends Error {
     cause?: Error | undefined;
     constructor(message: string, cause?: Error | undefined);
@@ -21,15 +28,23 @@ export declare class NovaError extends Error {
 export declare class NovaSdk {
     private provider;
     private account?;
+    private privateKey?;
     contractId: string;
+    shadeApiUrl?: string;
     pinataKey: string;
     pinataSecret: string;
-    constructor(rpcUrl: string, contractId: string, pinataKey: string, pinataSecret: string);
+    constructor(rpcUrl: string, contractId: string, pinataKey: string, pinataSecret: string, shadeApiUrl?: string);
     withSigner(privateKey: string, accountId: string): Promise<this>;
     getBalance(accountId: string): Promise<string>;
     isAuthorized(groupId: string, userId: string): Promise<boolean>;
     getGroupKey(groupId: string, userId: string): Promise<string>;
+    getShadeKey(groupId: string, userId: string): Promise<string>;
     getTransactionsForGroup(groupId: string, userId: string): Promise<Transaction[]>;
+    updateChecksum(groupId: string, checksum: string): Promise<string>;
+    approveShadeCodeHash(codeHash: string): Promise<string>;
+    registerShadeWorker(userId: string, attestation: Buffer): Promise<string>;
+    getNonceValidity(groupId: string, userId: string, nonce: string): Promise<boolean>;
+    requestSignature(path: string, payload: Buffer, keyType?: string): Promise<string>;
     private executeContractCall;
     registerGroup(groupId: string): Promise<string>;
     addGroupMember(groupId: string, userId: string): Promise<string>;

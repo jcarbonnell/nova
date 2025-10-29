@@ -1,71 +1,82 @@
 import { NovaSdk, NovaError, Transaction } from '../src/index';
+import * as NodeCrypto from 'crypto';
+import axios from 'axios';
+
+jest.mock('axios');
+
+const mockAxiosPost = axios.post as jest.MockedFunction<typeof axios.post>;
+mockAxiosPost.mockResolvedValue({
+  status: 200,
+  data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: '97a57412d4f963777c711137e491829a1635f9a65787ecc0e5d3d7c6c3e5d3be' }
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
 describe('NovaSdk', () => {
   const rpcUrl = 'https://rpc.testnet.near.org';
-  const contractId = 'nova-sdk-2.testnet';
+  const contractId = 'nova-sdk-4.testnet';
   const fakePinataKey = 'fake_key';
   const fakePinataSecret = 'fake_secret';
+  const shadeApiUrl = 'https://1b7616f73af7404b06274bb91394525f58f63c53-3000.dstack-prod5.phala.network';
 
   test('constructor initializes correctly', () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     expect(sdk.contractId).toBe(contractId);
     expect(sdk.pinataKey).toBe(fakePinataKey);
     expect(sdk.pinataSecret).toBe(fakePinataSecret);
+    expect(sdk.shadeApiUrl).toBe(shadeApiUrl);
   });
 
   test('withSigner accepts valid key format', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    // Valid format should not throw (even if key is dummy)
-    // Note: KeyPair.fromString is lenient and may accept various formats
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     const result = await sdk.withSigner('ed25519:ABC123dummybase58key32bytesencodedhereforrusttest', 'test.account.testnet');
     expect(result).toBe(sdk);
   });
 
   test('withSigner rejects completely invalid format', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    // Completely invalid format should throw
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     await expect(
-      sdk.withSigner('not-a-valid-key-at-all', 'test.account.testnet')
+      sdk.withSigner('not-a-valid-key', 'test.account.testnet')
     ).rejects.toThrow(NovaError);
   });
 
   test('getBalance returns yoctoNEAR string', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    const balance = await sdk.getBalance('nova-sdk-2.testnet');
-    expect(balance).toMatch(/^\d+$/);  // Should be numeric string (yoctoNEAR)
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+    const balance = await sdk.getBalance('nova-sdk-4.testnet');
+    expect(balance).toMatch(/^\d+$/);
     expect(BigInt(balance)).toBeGreaterThanOrEqual(0n);
   }, 10000);
 
   test('isAuthorized returns false for unauthorized user', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    const authorized = await sdk.isAuthorized('test_group', 'nonexistent.user.testnet');
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+    const authorized = await sdk.isAuthorized('test_group_v2', 'nonexistent.user.testnet');
     expect(typeof authorized).toBe('boolean');
     expect(authorized).toBe(false);
   }, 10000);
 
   test('getGroupKey throws for unauthorized user', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     await expect(
-      sdk.getGroupKey('test_group', 'nonexistent.user.testnet')
+      sdk.getGroupKey('test_group_v2', 'nonexistent.user.testnet')
     ).rejects.toThrow(NovaError);
   }, 10000);
 
   test('getTransactionsForGroup returns array', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    const accountId = process.env.TEST_NEAR_ACCOUNT_ID || 'nova-sdk-2.testnet';
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+    const accountId = process.env.TEST_NEAR_ACCOUNT_ID || 'nova-sdk-4.testnet';
     
     try {
-      const transactions = await sdk.getTransactionsForGroup('test_group', accountId);
+      const transactions = await sdk.getTransactionsForGroup('test_group_v2', accountId);
       expect(Array.isArray(transactions)).toBe(true);
     } catch (error) {
-      // May throw if unauthorized - that's acceptable
       expect(error).toBeInstanceOf(NovaError);
     }
   }, 10000);
 
   test('executeContractCall requires signer', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-    // Should throw because no signer attached
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     await expect(
       sdk.registerGroup('test_group_new')
     ).rejects.toThrow('No signer attached');
@@ -87,24 +98,53 @@ describe('NovaSdk', () => {
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       const signedSdk = await sdk.withSigner(privateKey!, accountId!);
       expect(signedSdk).toBe(sdk); // Should return same instance
     }, 10000);
 
-    test('getGroupKey returns base64 key for authorized user', async () => {
+    test('getGroupKey returns base64 key (new token flow)', async () => {
       if (shouldSkip) {
         console.log(skipMessage);
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-      const key = await sdk.getGroupKey('test_group', accountId!);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+      await sdk.withSigner(privateKey!, accountId!);
+  
+      const mockChecksum = '97a57412d4f963777c711137e491829a1635f9a65787ecc0e5d3d7c6c3e5d3be';
+  
+      // Mock Shade response
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: mockChecksum }
+      });
+
+      // Mock provider.query for getGroupChecksum
+      const mockQuery = jest.spyOn((sdk as any).provider, 'query');
+      mockQuery.mockResolvedValueOnce({
+        result: Buffer.from(mockChecksum).toString('base64')  // Base64 of raw hex bytes (exact decode match)
+      } as any);
+
+      // Mock claim_token return (callFunction result)
+      const mockCallFn = jest.spyOn(sdk.account!, 'callFunction');
+      mockCallFn.mockResolvedValueOnce({
+        toString: () => '"payloadB64.sigHex"'  // Mock token string (base64-decode handles)
+      } as any);
+
+      // Debug: Log before/after to trace mismatch if any
+      console.log('Test: Mock checksum for Shade/on-chain:', mockChecksum);
+
+      const key = await sdk.getGroupKey('test_group_v2', accountId!);
+      console.log('Test: Retrieved key length:', key.length);
+
       expect(typeof key).toBe('string');
       expect(key.length).toBeGreaterThan(20);
-      // Verify it's valid base64
       const testBuffer = Buffer.from(key, 'base64');
       expect(testBuffer.length).toBeGreaterThan(0);
+
+      mockQuery.mockRestore();
+      mockCallFn.mockRestore();
     }, 10000);
 
     test('isAuthorized returns true for authorized user', async () => {
@@ -113,33 +153,43 @@ describe('NovaSdk', () => {
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-      const authorized = await sdk.isAuthorized('test_group', accountId!);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+      const authorized = await sdk.isAuthorized('test_group_v2', accountId!);
       expect(typeof authorized).toBe('boolean');
-      // Note: May be false if user not actually authorized
     }, 10000);
 
     test('compositeUpload and retrieve full flow', async () => {
       if (!privateKey || !accountId || !pinataKey || !pinataSecret) {
-        console.log('Skipping: All env vars (NEAR + Pinata) required');
+        console.log('Skipping: All env vars required');
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret);
+      const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret, shadeApiUrl);
       await sdk.withSigner(privateKey, accountId);
 
-      // Upload test data
+      // Mock Shade for key fetch
+      (axios.post as jest.Mock).mockResolvedValueOnce({
+        status: 200,
+        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: 'dummy_checksum' }
+      });
+
       const testData = Buffer.from('Test data for NOVA SDK: ' + Date.now());
-      const filename = `test-${Date.now()}.txt`;
+      const filename = `test-v2-${Date.now()}.txt`;
       
-      const uploadResult = await sdk.compositeUpload('test_group', accountId, testData, filename);
+      const uploadResult = await sdk.compositeUpload('test_group_v2', accountId, testData, filename);
       
       expect(uploadResult.cid).toMatch(/^Qm[a-zA-Z0-9]{44}$/); // Valid IPFS CID
       expect(uploadResult.file_hash).toMatch(/^[a-f0-9]{64}$/); // SHA256 hex
       expect(uploadResult.trans_id).toBeTruthy();
 
+      // Mock again for retrieve
+      (axios.post as jest.Mock).mockResolvedValueOnce({
+        status: 200,
+        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: 'dummy_checksum' }
+      });
+
       // Retrieve the data
-      const retrieveResult = await sdk.compositeRetrieve('test_group', uploadResult.cid);
+      const retrieveResult = await sdk.compositeRetrieve('test_group_v2', uploadResult.cid);
       
       expect(retrieveResult.data.toString()).toBe(testData.toString());
       expect(retrieveResult.file_hash).toBe(uploadResult.file_hash);
@@ -151,7 +201,7 @@ describe('NovaSdk', () => {
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       await sdk.withSigner(privateKey!, accountId!);
 
       // Send 0.001 NEAR to self (1000000000000000000000 yoctoNEAR)
@@ -165,12 +215,12 @@ describe('NovaSdk', () => {
         return;
       }
 
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       await sdk.withSigner(privateKey!, accountId!);
 
       // Attempt to add a member (may fail if not owner or already exists)
       try {
-        const result = await sdk.addGroupMember('test_group', 'newmember.testnet');
+        const result = await sdk.addGroupMember('test_group_v2', 'newmember.testnet');
         expect(result).toBeTruthy();
       } catch (error) {
         // Expected if not group owner or member already exists
@@ -180,12 +230,11 @@ describe('NovaSdk', () => {
   });
 
   describe('Encryption/Decryption', () => {
-    test('encryptData and decryptData round trip', () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+    test('encrypt/decrypt round trip', () => {
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       
       // Generate a valid 32-byte key
-      const crypto = require('crypto');
-      const key = crypto.randomBytes(32);
+      const key = NodeCrypto.randomBytes(32);
       const keyB64 = key.toString('base64');
       
       const originalData = Buffer.from('Secret test data');
@@ -202,11 +251,10 @@ describe('NovaSdk', () => {
     });
 
     test('decryptData fails with wrong key', () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
-      const crypto = require('crypto');
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       
-      const key1 = crypto.randomBytes(32).toString('base64');
-      const key2 = crypto.randomBytes(32).toString('base64');
+      const key1 = NodeCrypto.randomBytes(32).toString('base64');
+      const key2 = NodeCrypto.randomBytes(32).toString('base64');
       
       const originalData = Buffer.from('Secret data');
       const encrypted = (sdk as any).encryptData(originalData, key1);
@@ -229,7 +277,7 @@ describe('NovaSdk', () => {
     });
 
     test('compositeRetrieve validates CID format', async () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret);
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       const privateKey = process.env.TEST_NEAR_PRIVATE_KEY;
       const accountId = process.env.TEST_NEAR_ACCOUNT_ID;
       
@@ -238,7 +286,7 @@ describe('NovaSdk', () => {
       }
       
       await expect(
-        sdk.compositeRetrieve('test_group', 'invalid_cid')
+        sdk.compositeRetrieve('test_group_v2', 'invalid_cid')
       ).rejects.toThrow('Invalid CID');
     });
   });

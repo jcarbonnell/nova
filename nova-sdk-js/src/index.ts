@@ -5,6 +5,12 @@ import { KeyPair } from '@near-js/crypto';
 import axios from 'axios';
 import * as crypto from 'crypto';
 import { Buffer } from 'buffer';
+import * as ed25519 from '@noble/ed25519';
+import { sha512 } from '@noble/hashes/sha2.js';
+import bs58 from 'bs58';
+
+// Set sha512 for noble/ed25519
+ed25519.hashes.sha512 = sha512;
 
 export interface Transaction {
   group_id: string;
@@ -34,24 +40,28 @@ export class NovaError extends Error {
 export class NovaSdk {
   private provider: JsonRpcProvider;
   private account?: Account;
+  private privateKeyStr?: string;
   public contractId: string;
   public pinataKey: string;
   public pinataSecret: string;
+  public shadeApiUrl: string;
 
-  constructor(rpcUrl: string, contractId: string, pinataKey: string, pinataSecret: string) {
+  constructor(rpcUrl: string, contractId: string, pinataKey: string, pinataSecret: string, shadeApiUrl: string) {
     this.provider = new JsonRpcProvider({ url: rpcUrl });
     this.contractId = contractId;
     this.pinataKey = pinataKey;
     this.pinataSecret = pinataSecret;
+    this.shadeApiUrl = shadeApiUrl;
   }
 
   async withSigner(privateKey: string, accountId: string): Promise<this> {
     try {
+      this.privateKeyStr = privateKey;
       const keyPair = KeyPair.fromString(privateKey as any);
       const signer = new KeyPairSigner(keyPair);
       
       this.account = new Account(accountId, this.provider, signer);
-      
+
       return this;
     } catch (e) {
       throw new NovaError('Signing error', e as Error);
@@ -86,21 +96,108 @@ export class NovaSdk {
     }
   }
 
-  async getGroupKey(groupId: string, userId: string): Promise<string> {
+  async getGroupChecksum(groupId: string): Promise<string | null> {
     try {
       const result = await this.provider.query({
         request_type: 'call_function',
         account_id: this.contractId,
-        method_name: 'get_group_key',
-        args_base64: Buffer.from(JSON.stringify({ group_id: groupId, user_id: userId })).toString('base64'),
+        method_name: 'get_group_checksum',
+        args_base64: Buffer.from(JSON.stringify({ group_id: groupId })).toString('base64'),
         finality: 'final',
       });
-      
+    
       const callResult = result as any;
-      const decoded = Buffer.from(callResult.result).toString();
-      return JSON.parse(decoded) as string;
+      const decoded = Buffer.from(callResult.result).toString().trim();  // Trim for mismatches
+      return decoded || null;
     } catch (e) {
-      throw new NovaError(`Near RPC error: ${e}`, e as Error);
+      throw new NovaError(`Checksum fetch error: ${e}`, e as Error);
+    }
+  }
+
+  async getGroupKey(groupId: string, userId: string): Promise<string> {
+    if (!this.account || !this.privateKeyStr) throw new NovaError('No signer attached');
+  
+    try {
+      // Step 1: Generate payload
+      const timestamp = BigInt(Date.now()) * 1000000n;  // ms to ns
+      const nonceInput = `${groupId}${userId}${timestamp}`;
+      const nonceHash = crypto.createHash('sha256').update(nonceInput).digest();
+      const nonce = nonceHash.toString('hex');
+    
+      // Derive ed25519 public key from private (seed[:32])
+      let seedBytes: Buffer;
+      if (this.privateKeyStr.startsWith('ed25519:')) {
+        const seedB58 = this.privateKeyStr.slice(8);
+        const seedBytesFull = Buffer.from(bs58.decode(seedB58));
+        seedBytes = Buffer.from(seedBytesFull.subarray(0, 32));
+      } else {
+        throw new NovaError('Invalid private key format');
+      }
+    
+      const publicBytes = ed25519.getPublicKey(new Uint8Array(seedBytes));
+      const signingPkB58 = bs58.encode(publicBytes);
+    
+      const payloadDict = {
+        group_id: groupId,
+        user_id: userId,
+        nonce: nonce,
+        timestamp: Number(timestamp),  // JSON can't handle BigInt
+        signing_pk_b58: signingPkB58
+      };
+    
+      const payloadStr = JSON.stringify(payloadDict);
+      const payloadBytes = Buffer.from(payloadStr);
+      const payloadB64 = payloadBytes.toString('base64');
+    
+      // Step 2: Sign raw payload bytes
+      const sigBytes = ed25519.sign(payloadBytes, seedBytes);
+      const sigHex = Buffer.from(sigBytes).toString('hex');
+    
+      // Step 3: Claim token on-chain
+      const claimResult = await this.account.callFunction({
+        contractId: this.contractId,
+        methodName: 'claim_token',
+        args: {
+          group_id: groupId,
+          payload_b64: payloadB64,
+          signature_hex: sigHex
+        },
+        gas: 100000000000000n,
+        deposit: 1000000000000000000n  // 0.001 NEAR
+      });
+    
+      if (!claimResult) throw new NovaError('Token claim failed');
+    
+      // Parse returned token (base64-decoded str)
+      const tokenB64 = claimResult.toString();  // Adjust based on actual return
+      const tokenBytes = Buffer.from(tokenB64, 'base64');
+      const token = tokenBytes.toString('utf-8').replace(/"/g, '');  // Strip quotes
+    
+      // Step 4: Fetch key from Shade API
+      if (!this.shadeApiUrl) throw new NovaError('Shade API URL not set');
+    
+      const shadeResponse = await axios.post(`${this.shadeApiUrl}/api/key-management/get_key`, {
+        group_id: groupId,
+        token: token
+      }, { timeout: 15000 });
+    
+      if (shadeResponse.status !== 200) {
+        throw new NovaError(`Shade fetch failed: ${shadeResponse.statusText}`);
+      }
+    
+      const shadeData = shadeResponse.data;
+      const key = shadeData.key;
+      const checksum = shadeData.checksum;
+    
+      // Step 5: Verify checksum on-chain (new: add here for explicit sequencing)
+      const onChainChecksum = await this.getGroupChecksum(groupId);
+      if ((onChainChecksum || '').trim() !== (checksum || '').trim()) {
+        throw new NovaError('Checksum mismatch: Shade attestation invalid');
+      }
+
+      return key;
+    } catch (e) {
+      throw new NovaError(`Shade key fetch error: ${e}`, e as Error);
     }
   }
 
@@ -132,7 +229,7 @@ export class NovaSdk {
         gas: 300000000000000n,
         deposit: BigInt(depositYocto),
       });
-      return result ? 'Success' : 'No result';
+      return result ? result.toString() : 'Success';
     } catch (e) {
       throw new NovaError(`Near RPC error: ${e}`, e as Error);
     }
@@ -148,10 +245,6 @@ export class NovaSdk {
 
   async revokeGroupMember(groupId: string, userId: string): Promise<string> {
     return this.executeContractCall('revoke_group_member', { group_id: groupId, user_id: userId }, '500000000000000000');
-  }
-
-  async storeGroupKey(groupId: string, keyB64: string): Promise<string> {
-    return this.executeContractCall('store_group_key', { group_id: groupId, key: keyB64 }, '500000000000000000');
   }
 
   async recordTransaction(groupId: string, userId: string, fileHash: string, ipfsHash: string): Promise<string> {
