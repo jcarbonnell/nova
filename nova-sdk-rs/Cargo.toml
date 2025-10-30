@@ -6,7 +6,7 @@ description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on
 license = "MIT"
 repository = "https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs"
 categories = ["cryptography", "network-programming", "science"]
-keywords = ["near-protocol", "ipfs", "cryptography", "file-sharing", "access-control", "tee", "shade-agent"]
+keywords = ["near-protocol", "ipfs", "cryptography", "file-sharing", "access-control"]
 
 [dependencies]
 near-jsonrpc-client = "0.18.0"
