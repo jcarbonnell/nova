@@ -5,14 +5,19 @@ use std::env;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load from env
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
-    let contract_id = env::var("CONTRACT_ID").unwrap_or_else(|_| "nova-sdk-2.testnet".to_string());
+    let contract_id = env::var("CONTRACT_ID").unwrap_or_else(|_| "nova-sdk-4.testnet".to_string());  // Updated to v2
     let private_key = env::var("TEST_NEAR_PRIVATE_KEY").expect("TEST_NEAR_PRIVATE_KEY required");
     let account_id = env::var("TEST_NEAR_ACCOUNT_ID").expect("TEST_NEAR_ACCOUNT_ID required");
     let new_member = "test.member.testnet";  // Replace with a real test account
 
-    // Initialize SDK (owner account)
-    let sdk = NovaSdk::new(&rpc_url, &contract_id, "dummy", "dummy")  // No IPFS for this example
-        .with_signer(&private_key, &account_id)?;
+    // Initialize SDK (owner account) - v2 requires shade_api_url (dummy for non-Shade ops)
+    let sdk = NovaSdk::new(
+        &rpc_url, 
+        &contract_id, 
+        "dummy",  // pinata_key (unused here)
+        "dummy",  // pinata_secret (unused here)
+        "https://fake-shade.phala.network"  // shade_api_url (dummy; ignored in group ops)
+    ).with_signer(&private_key, &account_id)?;
 
     let group_id = "demo_group";
 

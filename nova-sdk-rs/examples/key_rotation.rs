@@ -1,39 +1,68 @@
 use nova_sdk_rs::NovaSdk;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load from env
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://rpc.testnet.near.org".to_string());
-    let contract_id = env::var("CONTRACT_ID").unwrap_or_else(|_| "nova-sdk-2.testnet".to_string());
+    let contract_id = env::var("CONTRACT_ID").unwrap_or_else(|_| "nova-sdk-4.testnet".to_string());
+    let shade_api_url = env::var("SHADE_API_URL").unwrap_or_else(|_| "https://fake-shade.phala.network".to_string());
     let private_key = env::var("TEST_NEAR_PRIVATE_KEY").expect("TEST_NEAR_PRIVATE_KEY required");
     let account_id = env::var("TEST_NEAR_ACCOUNT_ID").expect("TEST_NEAR_ACCOUNT_ID required");
 
-    // Initialize SDK
-    let sdk = NovaSdk::new(&rpc_url, &contract_id, "dummy", "dummy")
-        .with_signer(&private_key, &account_id)?;
+    // Initialize SDK (v2: add shade_api_url)
+    let sdk = NovaSdk::new(
+        &rpc_url,
+        &contract_id,
+        "dummy",  // pinata_key (dummy for demo)
+        "dummy",  // pinata_secret
+        &shade_api_url
+    )
+    .with_signer(&private_key, &account_id)?;
 
     let group_id = "rotation_test";
 
-    // Store initial key (generate 32-byte random)
-    use rand::RngCore;
-    let mut key_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
-    let key_b64 = STANDARD.encode(key_bytes);
-    sdk.store_group_key(group_id, &key_b64).await?;
-    println!("✅ Initial key stored for group '{}': {}", group_id, &key_b64[..20]);  // Truncated for display
+    // Register group if not exists (triggers Shade key gen off-chain)
+    if let Err(e) = sdk.register_group(group_id).await {
+        if e.to_string().contains("Group exists") {
+            println!("Group '{}' already exists; skipping registration.", group_id);
+        } else {
+            println!("Group registration failed (expected for demo): {}", e);
+        }
+    } else {
+        println!("✅ Group '{}' registered; Shade key generated off-chain.", group_id);
+    }
 
-    // Fetch initial key (as authorized owner)
+    // Fetch initial key (as authorized owner; v2 flow: token claim + Shade fetch)
     let initial_key = sdk.get_group_key(group_id, &account_id).await?;
-    println!("🔑 Initial key retrieved: {}", &initial_key[..20]);
-    assert_eq!(initial_key, key_b64, "Key mismatch on store/fetch!");
+    println!("🔑 Initial key retrieved: {}", &initial_key[..20]);  // Truncated for display
 
-    // Simulate revocation (triggers rotation in contract)
-    let revoked_member = "revoked.testnet";  // Dummy; assumes add_member done prior
-    sdk.revoke_group_member(group_id, revoked_member).await?;
-    println!("✅ Revocation triggered key rotation for group '{}'.", group_id);
+    // Add a dummy member (for revocation demo)
+    let dummy_member = "dummy_member.testnet";
+    if let Err(e) = sdk.add_group_member(group_id, dummy_member).await {
+        if e.to_string().contains("already a member") {
+            println!("Dummy member already added; skipping.");
+        } else {
+            println!("Add member failed (expected if auth issue): {}", e);
+        }
+    } else {
+        println!("✅ Dummy member added to group '{}'.", group_id);
+    }
+
+    // Simulate revocation (triggers Shade key rotation off-chain)
+    let result = sdk.revoke_group_member(group_id, dummy_member).await;
+    match result {
+        Ok(_) => {
+            println!("✅ Revocation triggered key rotation for group '{}'.", group_id);
+        }
+        Err(e) => {
+            if e.to_string().contains("User not a member") || e.to_string().contains("not a member") {
+                println!("Dummy member not present; skipping revocation (no rotation).");
+            } else {
+                println!("Revocation failed (expected for demo): {}", e);
+            }
+        }
+    }
 
     // Fetch new key
     let rotated_key = sdk.get_group_key(group_id, &account_id).await?;

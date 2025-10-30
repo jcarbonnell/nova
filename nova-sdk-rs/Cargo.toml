@@ -1,12 +1,12 @@
 [package]
 name = "nova-sdk-rs"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on NEAR Protocol with IPFS integration."
-license = "MIT OR Apache-2.0"
+description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on NEAR Protocol with Shade/TEE hybridization and IPFS integration."
+license = "MIT"
 repository = "https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs"
 categories = ["cryptography", "network-programming", "science"]
-keywords = ["near-protocol", "ipfs", "cryptography", "file-sharing", "access-control"]
+keywords = ["near-protocol", "ipfs", "cryptography", "file-sharing", "access-control", "tee", "shade-agent"]
 
 [dependencies]
 near-jsonrpc-client = "0.18.0"
@@ -23,6 +23,9 @@ sha2 = "0.10"
 reqwest = { version = "0.12", features = ["multipart", "json"] }
 rand = "0.8"
 tokio = { version = "1.47.1", features = ["full"] }
+ed25519-dalek = "1.0.1"
+bs58 = "0.4"
+hex = "0.4.3"
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["full"] }

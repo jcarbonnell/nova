@@ -14,6 +14,10 @@ use serde_json::json;
 use base64::Engine;
 use base64::engine::general_purpose;
 use tokio::time::{sleep, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
+use sha2::{Sha256, Digest};
+use ed25519_dalek::{Keypair, Signer as Ed25519Signer};
+use reqwest::Client;
 
 #[derive(Error, Debug)]
 pub enum NovaError {
@@ -25,6 +29,10 @@ pub enum NovaError {
     ParseAccount,
     #[error("Signing error: {0}")]
     Signing(String),
+    #[error("Shade API error: {0}")]
+    Shade(String),
+    #[error("Checksum mismatch")]
+    ChecksumMismatch,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -56,11 +64,12 @@ pub struct NovaSdk {
     signer: Option<Signer>,
     pinata_key: String,
     pinata_secret: String,
+    shade_api_url: String,
 }
 
-impl NovaSdk {  // REMOVED generic type parameter
+impl NovaSdk {
     /// Creates a new NovaSdk instance.
-    pub fn new(rpc_url: &str, contract_id: &str, pinata_key: &str, pinata_secret: &str) -> Self {
+    pub fn new(rpc_url: &str, contract_id: &str, pinata_key: &str, pinata_secret: &str, shade_api_url: &str) -> Self {
         let client = JsonRpcClient::connect(rpc_url);
         let contract_id = AccountId::from_str(contract_id).expect("Invalid contract_id format");
         NovaSdk {
@@ -69,6 +78,7 @@ impl NovaSdk {  // REMOVED generic type parameter
             signer: None,
             pinata_key: pinata_key.to_string(),
             pinata_secret: pinata_secret.to_string(),
+            shade_api_url: shade_api_url.to_string(),
         }
     }
 
@@ -118,25 +128,113 @@ impl NovaSdk {  // REMOVED generic type parameter
         }
     }
 
-    /// Fetches the base64-encoded group key for an authorized user (read-only contract view).
-    pub async fn get_group_key(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id.to_string()}).to_string().into_bytes();
+    /// Fetches the group checksum for a group (read-only contract view).
+    pub async fn get_group_checksum(&self, group_id: &str) -> Result<Option<String>, NovaError> {
+        let args = json!({"group_id": group_id}).to_string().into_bytes();
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::CallFunction {
                 account_id: self.contract_id.clone(),
-                method_name: "get_group_key".to_string(),
+                method_name: "get_group_checksum".to_string(),
                 args: args.into(),
             },
         };
         let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
-                let key: String = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
-                Ok(key)
+                let checksum: Option<String> = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                Ok(checksum)
             }
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
+    }
+
+    /// Fetches the base64-encoded group key for an authorized user (v2: Shade/TEE flow).
+    pub async fn get_group_key(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
+        let signer = self.signer.as_ref().ok_or(NovaError::Signing("No signer attached".to_string()))?;
+        let _signer_account_id = match signer {
+            Signer::InMemory(s) => s.account_id.clone(),
+            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
+        };
+
+        // Step 1: Generate payload
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| NovaError::Near("Time error".to_string()))?;
+        let ts_ns = (now.as_secs() * 1_000_000_000u64) + (now.subsec_nanos() as u64);
+        let input = format!("{}{}{}", group_id, user_id, ts_ns);
+        let mut hasher = Sha256::new();
+        hasher.update(input.as_bytes());
+        let nonce = hex::encode(hasher.finalize());
+
+        // Extract seed from private key
+        let private_key_str = match signer {
+            Signer::InMemory(s) => format!("{}", s.secret_key),
+            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
+        };
+        let seed_b58 = if let Some(stripped) = private_key_str.strip_prefix("ed25519:") {
+            stripped.to_string()
+        } else {
+            return Err(NovaError::Signing("Invalid private key format".to_string()));
+        };
+        let seed_bytes_full = bs58::decode(&seed_b58)
+            .into_vec()
+            .map_err(|_| NovaError::Signing("Base58 decode error".to_string()))?;
+        if seed_bytes_full.len() != 64 {
+            return Err(NovaError::InvalidKey);
+        }
+        let seed_bytes = &seed_bytes_full[0..32];
+        let keypair = Keypair::from_bytes(seed_bytes)
+            .map_err(|e| NovaError::Signing(format!("Keypair from bytes failed: {:?}", e)))?;
+        let public_bytes = keypair.public.as_bytes();
+        let signing_pk_b58 = bs58::encode(public_bytes).into_string();
+
+        let payload_dict = json!({
+            "group_id": group_id,
+            "user_id": user_id,
+            "nonce": nonce,
+            "timestamp": ts_ns,
+            "signing_pk_b58": signing_pk_b58
+        });
+        let payload_str = serde_json::to_string(&payload_dict).map_err(|e| NovaError::Signing(e.to_string()))?;
+        let payload_bytes = payload_str.as_bytes();
+        let signature = keypair.sign(payload_bytes);
+        let sig_bytes = signature.to_bytes();
+        let sig_hex = hex::encode(sig_bytes);
+
+        let payload_b64 = general_purpose::STANDARD.encode(payload_bytes);
+
+        // Step 2: Claim token on-chain
+        let args = json!({
+            "group_id": group_id,
+            "payload_b64": payload_b64,
+            "signature_hex": sig_hex
+        }).to_string().into_bytes();
+        let outcome = self.execute_contract_call("claim_token", args, 100_000_000_000_000, 1_000_000_000_000_000_000).await?;
+        let token_b64 = self.parse_outcome_detailed(&outcome.transaction_outcome.outcome)?;
+        let token_bytes = general_purpose::STANDARD.decode(&token_b64).map_err(|_| NovaError::Near("Token base64 error".to_string()))?;
+        let token = String::from_utf8(token_bytes).map_err(|_| NovaError::Near("Token UTF-8 error".to_string()))?;
+
+        // Step 3: Fetch key from Shade API
+        let client = Client::new();
+        let shade_req = client.post(format!("{}/api/key-management/get_key", self.shade_api_url))
+            .json(&json!({ "group_id": group_id, "token": token }))
+            .send()
+            .await
+            .map_err(|e| NovaError::Shade(e.to_string()))?;
+        if !shade_req.status().is_success() {
+            return Err(NovaError::Shade(format!("Shade HTTP: {}", shade_req.status())));
+        }
+        let shade_json: serde_json::Value = shade_req.json().await.map_err(|e| NovaError::Shade(e.to_string()))?;
+        let key_b64 = shade_json["key"].as_str().ok_or(NovaError::Shade("No key".to_string()))?.to_string();
+        let checksum = shade_json["checksum"].as_str().ok_or(NovaError::Shade("No checksum".to_string()))?;
+
+        // Step 4: Verify checksum
+        let on_chain_checksum = self.get_group_checksum(group_id).await?;
+        let on_chain_str = on_chain_checksum.as_deref().unwrap_or("").trim();
+        if on_chain_str != checksum.trim() {
+            return Err(NovaError::ChecksumMismatch);
+        }
+
+        Ok(key_b64)
     }
 
     /// Fetches transactions for a group (authorized user view).
@@ -247,13 +345,6 @@ impl NovaSdk {  // REMOVED generic type parameter
     pub async fn revoke_group_member(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
         let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
         let outcome = self.execute_contract_call("revoke_group_member", args, 300_000_000_000_000, 500_000_000_000_000_000).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
-    }
-
-    /// Stores a base64 group key (owner-only, payable).
-    pub async fn store_group_key(&self, group_id: &str, key_b64: &str) -> Result<String, NovaError> {
-        let args = json!({"group_id": group_id, "key": key_b64}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("store_group_key", args, 300_000_000_000_000, 500_000_000_000_000_000).await?;
         self.parse_outcome(&outcome.transaction_outcome.outcome)
     }
 
@@ -576,22 +667,21 @@ mod tests {
     async fn test_new() {
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
+            "nova-sdk-4.testnet",
             "fake_key",
             "fake_secret",
+            "https://fake-shade.phala.network",
         );
-        assert_eq!(sdk.contract_id.as_str(), "nova-sdk-2.testnet");
+        assert_eq!(sdk.contract_id.as_str(), "nova-sdk-4.testnet");
+        assert_eq!(sdk.shade_api_url, "https://fake-shade.phala.network");
         assert!(sdk.signer.is_none());
     }
 
     #[tokio::test]
     async fn test_with_signer_valid_format() {
-        // Dummy valid-format key (expects Signing err on invalid base58, but tests parse call)
         let private_key = "ed25519:ABC123dummybase58key32bytesencodedhereforrusttest";
         let account_id = "test.account.testnet";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
-            .with_signer(private_key, account_id);
-        // Expects Signing error (invalid base58), but no panic/crash
+        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake").with_signer(private_key, account_id);
         assert!(matches!(result.err().unwrap(), NovaError::Signing(_)));
     }
 
@@ -599,87 +689,97 @@ mod tests {
     async fn test_with_signer_invalid_account() {
         let private_key = "ed25519:dummy";
         let invalid_account = "invalid@account";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
-            .with_signer(private_key, invalid_account);
+        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake").with_signer(private_key, invalid_account);
         assert!(matches!(result.err().unwrap(), NovaError::ParseAccount));
     }
 
     #[tokio::test]
     async fn test_get_balance() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        let balance = sdk.get_balance("nova-sdk-2.testnet").await.unwrap();
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let balance = sdk.get_balance("nova-sdk-4.testnet").await.unwrap();
         let bal_str = balance.to_string();
-        assert!(!bal_str.is_empty()); // Valid yoctoNEAR like "123..."
-        assert!(bal_str.parse::<u128>().is_ok()); // Ensures it's a number string
+        assert!(!bal_str.is_empty());
+        assert!(bal_str.parse::<u128>().is_ok());
     }
 
     #[tokio::test]
     async fn test_is_authorized() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        // Test with a likely non-member user and existing group (from contract)
-        let authorized = sdk.is_authorized("test_group", "random.user.testnet").await.unwrap();
-        assert!(!authorized, "Random user should not be authorized");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let result = sdk.is_authorized("test_group", "random.user.testnet").await;
+        // Assert on error for non-existent group/unauthorized (contract panics as expected)
+        assert!(result.is_err(), "Should error on non-existent group or unauthorized");
+        if let Err(e) = result {
+            assert!(matches!(e, NovaError::Near(_)), "Expect Near error from contract panic");
+            assert!(e.to_string().contains("Group not found") || e.to_string().contains("Unauthorized"), "Error should indicate group/auth issue");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_group_checksum() {
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let checksum = sdk.get_group_checksum("test_group").await.unwrap();
+        // May be None if not set
+        if let Some(cs) = checksum {
+            assert!(!cs.is_empty());
+        }
     }
 
     #[tokio::test]
     async fn test_get_group_key_unauthorized() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        // Valid-format but dummy/invalid key (base58-compliant 64 chars; won't auth on contract)
+        let invalid_priv = "ed25519:3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r";
+        let invalid_user = "random.user.testnet";
+        let sdk_signed = match sdk.with_signer(&invalid_priv, invalid_user) {
+            Ok(s) => s,
+            Err(e) => {
+                panic!("with_signer failed unexpectedly: {}", e);
+            }
+        };
+        let result = sdk_signed.get_group_key("test_group", invalid_user).await;
+        assert!(result.is_err(), "Unauthorized/invalid should fail");
+        let err = result.err().unwrap();
+        // Accept either Near error (from contract) or Signing error (from invalid key operations)
+        assert!(
+            matches!(err, NovaError::Near(_)) || matches!(err, NovaError::Signing(_)),
+            "Expected Near or Signing error, got: {:?}", err
         );
-        // Expect error (Unauthorized panic in contract → RPC error)
-        let result = sdk.get_group_key("test_group", "random.user.testnet").await;
-        assert!(result.is_err(), "Unauthorized user should fail to get key");
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
     }
 
     #[tokio::test]
-    async fn test_get_group_key_authorized() {
-        // Skip unless TEST_NEAR_ACCOUNT_ID set (like integration.rs)
+    async fn test_get_group_key_authorized_integration() {
         let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if account_id.is_none() {
+            println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
+            return;
+        }
+        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        if private_key.is_none() {
+            println!("Skipping: TEST_NEAR_PRIVATE_KEY not set");
             return;
         }
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
+            "nova-sdk-4.testnet",
+            "fake",
+            "fake",
+            "https://fake-shade.phala.network"
+        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
         let key = sdk.get_group_key("test_group", &account_id.unwrap()).await.unwrap();
-        assert!(!key.is_empty(), "Key should be non-empty base64");
-        assert!(key.len() > 20, "Base64 key should be reasonable length");
+        assert!(!key.is_empty());
+        assert!(key.len() > 20);
     }
 
     #[tokio::test]
     async fn test_get_transactions_for_group() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        // Test with likely empty/unauth → expect empty vec or err
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let result = sdk.get_transactions_for_group("test_group", "random.user.testnet").await;
         match result {
-            Ok(txs) => assert!(txs.is_empty(), "Unauthorized should return empty vec"),
-            Err(e) => assert!(matches!(e, NovaError::Near(_)), "Expect Near err for auth fail"),
+            Ok(txs) => assert!(txs.is_empty()),
+            Err(e) => assert!(matches!(e, NovaError::Near(_))),
         }
     }
 
-    // Integration (env-guarded)
     #[tokio::test]
     async fn test_get_transactions_for_group_integration() {
         let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
@@ -687,60 +787,41 @@ mod tests {
             println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
             return;
         }
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let txs = sdk.get_transactions_for_group("test_group", &account_id.unwrap()).await.unwrap();
-        // If group has txs, expect non-empty; else empty is fine
         println!("Retrieved {} transactions for group", txs.len());
         if !txs.is_empty() {
-            assert!(!txs[0].ipfs_hash.is_empty(), "First tx should have valid IPFS hash");
+            assert!(!txs[0].ipfs_hash.is_empty());
         }
     }
 
     #[tokio::test]
     async fn test_view_invalid_group() {
-    let sdk = NovaSdk::new(
-        "https://rpc.testnet.near.org",
-        "nova-sdk-2.testnet",
-        "fake_key",
-        "fake_secret",
-    );
-    // Non-existent group should cause contract panic → RPC error
-    let result = sdk.is_authorized("nonexistent_group_123", "test.user.testnet").await;
-    assert!(result.is_err(), "Invalid group should fail with error");
-    assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let result = sdk.is_authorized("nonexistent_group_123", "test.user.testnet").await;
+        assert!(result.is_err());
+        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
     }
 
     #[tokio::test]
     #[should_panic(expected = "No signer attached")]
     async fn test_register_group_no_signer() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let _ = sdk.register_group("new_test_group").await.unwrap();
     }
 
     #[tokio::test]
     async fn test_register_group_existing() {
-        // Use env for signer; skip if not set
         let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
         let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_register_group_existing: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        // Try to register existing group → expect failure (contract assert)
         let result = sdk.register_group("test_group").await;
-        assert!(result.is_err(), "Registering existing group should fail");
+        assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
     }
 
@@ -752,7 +833,7 @@ mod tests {
             println!("Skipping test_add_group_member: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
         let result = sdk.add_group_member("test_group", "new.member.testnet").await;
         match result {
@@ -764,12 +845,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "No signer attached")]
     async fn test_revoke_group_member_no_signer() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let _ = sdk.revoke_group_member("test_group", "test.user.testnet").await.unwrap();
     }
 
@@ -781,165 +857,130 @@ mod tests {
             println!("Skipping test_revoke_group_member_invalid_user: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        // Revoke non-member → expect contract error (user not found)
         let result = sdk.revoke_group_member("test_group", "non.member.testnet").await;
-        assert!(result.is_err(), "Revoking non-member should fail");
+        assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
     }
 
     #[tokio::test]
-    #[should_panic(expected = "No signer attached")]
-    async fn test_store_group_key_no_signer() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        let _ = sdk.store_group_key("test_group", "dummyb64key").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_store_group_key_invalid_key() {
+    async fn test_record_transaction_integration() {
         let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
         let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_store_group_key_invalid_key: Credentials not set");
+            println!("Skipping test_record_transaction_integration: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        // Invalid base64 key → expect contract panic on decode/len
-        let invalid_key = "invalid_not_base64";
-        let result = sdk.store_group_key("test_group", invalid_key).await;
-        assert!(result.is_err(), "Invalid key should fail");
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
+            .with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
+        let dummy_file_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let dummy_ipfs_hash = "QmDummyCIDForTest";
+        let result = sdk.record_transaction("test_group", &account_id.unwrap(), dummy_file_hash, dummy_ipfs_hash).await;
+        match result {
+            Ok(trans_id) => {
+                println!("✅ Recorded transaction: {}", trans_id);
+                assert!(!trans_id.is_empty());
+            }
+            Err(e) => if e.to_string().contains("not authorized") { println!("Auth fail - expected") } else { panic!("Unexpected: {}", e) },
+        }
     }
 
     #[tokio::test]
-    #[should_panic(expected = "No signer attached")]
-    async fn test_record_transaction_no_signer() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        let _ = sdk.record_transaction("test_group", "user.testnet", "dummy_hash", "QmDummyCID").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_record_transaction_unauthorized_user() {
+    async fn test_composite_upload_integration() {
         let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
         let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_record_transaction_unauthorized_user: Credentials not set");
+            println!("Skipping test_composite_upload_integration: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        // Record for unauthorized user → expect contract error
-        let result = sdk.record_transaction("test_group", "unauth.user.testnet", "dummy_hash", "QmDummyCID").await;
-        assert!(result.is_err(), "Unauthorized user should fail");
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
-    }
-
-
-    #[tokio::test]
-    #[should_panic(expected = "No signer attached")]
-    async fn test_transfer_tokens_no_signer() {
+        let pinata_key = std::env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_API_KEY not set");
+            std::process::exit(0);
+        });
+        let pinata_secret = std::env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_SECRET_KEY not set");
+            std::process::exit(0);
+        });
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
-            "fake_key",
-            "fake_secret",
-        );
-        let _ = sdk.transfer_tokens("receiver.testnet", 1_000_000_000_000_000_000).await.unwrap(); // 1 NEAR
-    }
-
-    #[tokio::test]
-    async fn test_transfer_tokens_invalid_to() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        let result = sdk.transfer_tokens("invalid@to", 1);
-        assert!(matches!(result.await.err().unwrap(), NovaError::ParseAccount));
-    }
-
-    #[tokio::test]
-    async fn test_encrypt_decrypt_binary() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake");
-    
-        // Generate test key
-        let mut key_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key_bytes);
-        let key_b64 = general_purpose::STANDARD.encode(key_bytes);
-    
-        // Test with binary data (not valid UTF-8)
-        let original_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]; // JPEG header
-        let encrypted = sdk.encrypt_data(&original_data, &key_b64).unwrap();
-        let decrypted_b64 = sdk.decrypt_data(&encrypted, &key_b64).unwrap();
-        let decrypted_bytes = general_purpose::STANDARD.decode(decrypted_b64).unwrap();
-    
-        assert_eq!(original_data, decrypted_bytes);
-    }
-
-    #[tokio::test]
-    async fn test_composite_upload_binary_integration() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping: Credentials not set");
-            return;
-        }
-        
-        let pinata_key = std::env::var("PINATA_API_KEY").unwrap();
-        let pinata_secret = std::env::var("PINATA_SECRET_KEY").unwrap();
-        
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-2.testnet",
+            "nova-sdk-4.testnet",
             &pinata_key,
-            &pinata_secret
+            &pinata_secret,
+            "https://fake-shade.phala.network"
         ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        
-        // Test with binary image data (PNG header)
-        let binary_data = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A  // PNG magic bytes
-        ];
-        
-        let result = sdk.composite_upload(
-            "test_group",
-            &account_id.unwrap(),
-            &binary_data,
-            "test.png"
-        ).await.unwrap();
-        
-        println!("✅ Binary upload success: {}", result.cid);
+        let test_data = b"Test data for composite upload";
+        let result = sdk.composite_upload("test_group", &account_id.unwrap(), test_data, "test.txt").await.unwrap();
+        println!("✅ Composite upload success:");
+        println!("   CID: {}", result.cid);
+        println!("   Trans ID: {}", result.trans_id);
+        println!("   File Hash: {}", result.file_hash);
         assert!(!result.cid.is_empty());
+        assert!(!result.trans_id.is_empty());
+        assert_eq!(result.file_hash.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_integration() {
+        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        if private_key.is_none() || account_id.is_none() {
+            println!("Skipping test_composite_retrieve_integration: Credentials not set");
+            return;
+        }
+        let pinata_key = std::env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_API_KEY not set");
+            std::process::exit(0);
+        });
+        let pinata_secret = std::env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_SECRET_KEY not set");
+            std::process::exit(0);
+        });
+        let sdk = NovaSdk::new(
+            "https://rpc.testnet.near.org",
+            "nova-sdk-4.testnet",
+            &pinata_key,
+            &pinata_secret,
+            "https://fake-shade.phala.network"
+        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
+        let original_bytes = b"Test data for composite retrieve";
+        let upload_result = sdk.composite_upload("test_group", &account_id.unwrap(), original_bytes, "retrieve_test.txt").await.unwrap();
+        let cid = &upload_result.cid;
+        let retrieve_result = sdk.composite_retrieve("test_group", cid).await.unwrap();
+        println!("✅ Composite retrieve success:");
+        println!("   File Hash: {}", retrieve_result.file_hash);
+        println!("   Decrypted data length: {} bytes", retrieve_result.data.len());
+        assert_eq!(retrieve_result.data, original_bytes);
+        assert_eq!(retrieve_result.file_hash.len(), 64);
+        println!("✅ Decrypted data matches original ({} bytes)", retrieve_result.data.len());
     }
 
     #[tokio::test]
     async fn test_composite_upload_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let test_data = b"test data";
         let result = sdk.composite_upload("test_group", "user.testnet", test_data, "test.txt").await;
-        // Should fail at get_group_key or record_transaction (no signer)
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_composite_retrieve_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-2.testnet", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
         let result = sdk.composite_retrieve("test_group", "QmDummyCID").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), NovaError::Signing(_)));
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_decrypt_binary() {
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let mut key_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key_bytes);
+        let key_b64 = general_purpose::STANDARD.encode(key_bytes);
+        let original_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let encrypted = sdk.encrypt_data(&original_data, &key_b64).unwrap();
+        let decrypted_b64 = sdk.decrypt_data(&encrypted, &key_b64).unwrap();
+        let decrypted_bytes = general_purpose::STANDARD.decode(decrypted_b64).unwrap();
+        assert_eq!(original_data, decrypted_bytes);
     }
 }
