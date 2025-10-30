@@ -1,15 +1,17 @@
 # NOVA SDK for Rust
 
-A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. Provides encrypted, decentralized file storage using IPFS and NEAR smart contracts with group-based access control.
+A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. NOVA v2 hybridizes IPFS storage with Shade Agents and TEEs (via Phala) for verifiable privacy, using ephemeral nonce-based tokens for key access. Files are encrypted client-side and stored off-chain, with on-chain metadata ensuring auditable, group-based controls.
 
 ## Features
 
 - 🔐 **AES-256-CBC Encryption** - Client-side encryption for data privacy
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
 - ⛓️ **NEAR Blockchain** - Immutable transaction records and access control
-- 👥 **Group Management** - Fine-grained access control with member authorization
-- 🔑 **Key Rotation** - Automatic key rotation on member revocation
-- 🚀 **Composite Operations** - Simplified high-level workflows
+- 🛡️ **TEE-Verified Keys** - Off-chain keys stored encrypted in Shade Agents (Phala TEEs); no on-chain exposure
+- 🔑 **Ephemeral Token Auth** - Ed25519-signed payloads with nonces/timestamps for replay-proof, time-bound key access
+- 👥 **Group Management** - Fine-grained access control with event-driven key generation/rotation
+- 🔄 **Key Rotation** - Automatic TEE-side rotation on revocation, with on-chain checksum verification
+- 🚀 **Composite Operations** - End-to-end workflows: Encrypt → Upload → Authenticate → Retrieve
 
 ## Installation
 
@@ -17,7 +19,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "0.1.0"
+nova-sdk-rs = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -25,43 +27,43 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use nova_sdk_rs::{NovaSdk, CompositeUploadResult};
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK
+    // Initialize SDK (v2 requires Shade API URL for TEE key fetches)
+    let shade_url = env::var("SHADE_API_URL").unwrap_or("https://your-shade.phala.network".to_string());
     let sdk = NovaSdk::new(
         "https://rpc.testnet.near.org",
-        "nova-contract.testnet",
+        "nova-v2-contract.testnet",  // v2 contract
         "your_pinata_api_key",
-        "your_pinata_secret_key"
+        "your_pinata_secret_key",
+        &shade_url,  // TEE endpoint
     ).with_signer(
         "ed25519:your_private_key",
         "your-account.testnet"
     )?;
 
-    // Upload encrypted file
-    let result = sdk.composite_upload(
-        "project_alpha",           // group_id
-        "alice.testnet",           // user_id
-        "Confidential data",       // data
-        "report.txt"               // filename
+    // Upload encrypted file (authenticates via token to TEE for key)
+    let result: CompositeUploadResult = sdk.composite_upload(
+        "secure_project_v2",
+        "alice.testnet",
+        b"Confidential AI dataset",
+        "dataset.bin"
     ).await?;
 
     println!("✅ Uploaded to IPFS: {}", result.cid);
     println!("📝 Transaction ID: {}", result.trans_id);
     println!("🔒 File Hash: {}", result.file_hash);
 
-    // Retrieve and decrypt file
+    // Retrieve and decrypt (fetches ephemeral key from TEE)
     let retrieved = sdk.composite_retrieve(
-        "project_alpha",
+        "secure_project_v2",
         &result.cid
     ).await?;
 
-    let decrypted = base64::engine::general_purpose::STANDARD
-        .decode(&retrieved.decrypted_b64)?;
-    let content = String::from_utf8(decrypted)?;
-    
-    println!("📄 Content: {}", content);
+    let decrypted = &retrieved.data;  // Vec<u8> for binary
+    println!("📄 Retrieved {} bytes; hash matches: {}", decrypted.len(), retrieved.file_hash);
 
     Ok(())
 }
@@ -71,13 +73,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Groups
 
-Groups provide isolated access control domains. Each group has:
+Groups manage shared access to encrypted files. Each group has:
 - A unique identifier (`group_id`)
 - An owner who manages membership
-- A shared encryption key
+- A shared encryption key stored off-chain in Shade Agent/TEE (never stored publicly).
 - A list of authorized members
 
-### Access Control
+### Access Control (Ephemeral Tokens)
+
+NOVA uses signed tokens for key access:
+- Generate payload (group_id/user_id/nonce/timestamp/signing_pk_b58).
+- Sign with ed25519 (from account keypair).
+- Claim on-chain (claim_token): Verifies sig/membership/nonce (5min window), returns token.
+- Present to Shade: TEE decrypts key, verifies checksum, responds transiently.
+
 
 ```rust
 // Register new group (owner only)
@@ -89,6 +98,9 @@ sdk.add_group_member("secure_vault", "bob.testnet").await?;
 // Check authorization
 let authorized = sdk.is_authorized("secure_vault", "bob.testnet").await?;
 
+// Fetch key from TEE
+let key_b64 = sdk.get_group_key("secure_v2", "bob.testnet").await?;
+
 // Revoke member (automatically rotates key)
 sdk.revoke_group_member("secure_vault", "bob.testnet").await?;
 ```
@@ -99,11 +111,11 @@ All data is encrypted client-side using AES-256-CBC:
 - 256-bit symmetric keys
 - Random IV per encryption
 - PKCS7 padding
-- Keys stored encrypted on blockchain
+- SHA256 hashing for integrity
 
 ### Transaction Recording
 
-Every file operation creates an immutable blockchain record:
+Records file metadata (CID/hash) on-chain; now callable by any group member (v2 enhancement).
 
 ```rust
 let trans_id = sdk.record_transaction(
@@ -121,36 +133,36 @@ let txs = sdk.get_transactions_for_group("my_group", "alice.testnet").await?;
 
 ### Initialization
 
-- `NovaSdk::new()` - Create SDK instance
-- `with_signer()` - Attach NEAR account credentials
+- `NovaSdk::new(rpc_url, contract_id, pinata_key, pinata_secret, shade_api_url)` - Create SDK instance
+- `with_signer(private_key, account_id)` - Attach NEAR signer (ed25519 support for tokens)
 
 ### Group Management
 
-- `register_group()` - Create new group
-- `add_group_member()` - Grant access to user
-- `revoke_group_member()` - Revoke access and rotate key
-- `is_authorized()` - Check user authorization
+- `register_group(group_id)` - Create new group (triggers TEE key gen via events).
+- `add_group_member(group_id, user_id)` - Grant access to user.
+- `revoke_group_member(group_id, user_id)` - Revoke access and auto-rotate key in TEE.
+- `is_authorized(group_id, user_id)` - Check user authorization.
 
-### Key Management
+### Key Management (TEE-Ephemeral)
 
-- `store_group_key()` - Store encryption key
-- `get_group_key()` - Retrieve key (authorized users only)
+- `store_group_key(group_id, user_id)` - Fetches via token flow (signs payload → claim → Shade decrypt + checksum verify).
+- `get_group_key(group_id)` - View on-chain TEE attestation (for manual verification).
 
 ### File Operations
 
-- `composite_upload()` - Encrypt, upload to IPFS, record transaction
-- `composite_retrieve()` - Fetch from IPFS, decrypt
-- `record_transaction()` - Record file metadata on blockchain
+- `composite_upload(group_id, user_id, data: &[u8], filename)` - Encrypt, upload to IPFS, record transaction (uses TEE key).
+- `composite_retrieve(group_id, cid)` - Fetch from IPFS, decrypt (uses TEE key).
+- `record_transaction()` - Log metadata (group-member callable).
 - `get_transactions_for_group()` - Query transaction history
 
 ### Utilities
 
-- `get_balance()` - Check NEAR account balance
-- `transfer_tokens()` - Transfer NEAR tokens
+- `get_balance(account_id)` - Check NEAR account balance
+- `transfer_tokens(to_account, amount_yocto)` - Transfer NEAR tokens
 
 ## Environment Setup
 
-For testing and development, set these environment variables:
+For testing and development, set these environment variables in a `.env` file:
 
 ```bash
 # Required for integration tests
@@ -158,15 +170,7 @@ TEST_NEAR_ACCOUNT_ID=your-account.testnet
 TEST_NEAR_PRIVATE_KEY=ed25519:your_private_key
 PINATA_API_KEY=your_pinata_key
 PINATA_SECRET_KEY=your_pinata_secret
-```
-
-Create a `.env` file:
-
-```bash
-TEST_NEAR_ACCOUNT_ID=alice.testnet
-TEST_NEAR_PRIVATE_KEY=ed25519:...
-PINATA_API_KEY=...
-PINATA_SECRET_KEY=...
+SHADE_API_URL=https://your-shade.phala.network
 ```
 
 ## Testing
@@ -192,6 +196,8 @@ use nova_sdk_rs::NovaError;
 match sdk.get_group_key("my_group", "user.testnet").await {
     Ok(key) => println!("Key: {}", key),
     Err(NovaError::Near(msg)) => eprintln!("RPC error: {}", msg),
+    Err(NovaError::Shade(msg)) => eprintln!("TEE: {}", msg),
+    Err(NovaError::ChecksumMismatch) => eprintln!("TEE attestation failed"),
     Err(NovaError::InvalidKey) => eprintln!("Invalid encryption key"),
     Err(NovaError::ParseAccount) => eprintln!("Invalid account ID"),
     Err(NovaError::Signing(msg)) => eprintln!("Signing failed: {}", msg),
@@ -202,17 +208,20 @@ match sdk.get_group_key("my_group", "user.testnet").await {
 
 ⚠️ **Important Security Notes:**
 
-1. **Private Keys** - Never commit private keys to version control
-2. **Key Storage** - Store encryption keys securely
-3. **IPFS Privacy** - IPFS content is public; encryption is essential
-4. **Access Control** - Verify user authorization before operations
-5. **Key Rotation** - Revoked members cannot decrypt new content
+1. **No On-Chain Keys** - Keys encrypted in TEEs (Phala Shade); only checksums public—RPC scans reveal nothing decryptable.
+2. **Ephemeral Tokens** - Ed25519-signed (nonce/timestamp); 5min expiry, replay-proof (used_nonces map).
+3. **TEE Verification** - Shade workers attested (code hash); multi-instance sync via shared TEE_SECRET.
+4. **Layered Auth** - On-chain membership + token sig + TEE decrypt/checksum—defense against key theft.
+5. **Private Keys** - Never commit; use for signing only (ed25519 seed extraction secure).
+6. **IPFS**: Public CIDs; rely on encryption—avoid unencrypted uploads.
+
+⚠️ General: Validate checksums in prod; monitor Shade attestations.
 
 ## Examples
 
 See the [examples](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs/examples) directory for complete working examples:
 
-- `simple_upload.rs` - Basic file upload/download
+- `simple_upload.rs` - Basic file upload
 - `group_management.rs` - Managing groups and members
 - `key_rotation.rs` - Handling member revocation
 
@@ -228,7 +237,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/blob/main/nova-sdk-rs/LICENSE) file for details.
+This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/LICENSE) file for details.
 
 ## Resources
 
@@ -236,6 +245,8 @@ This project is licensed under the MIT License - see [LICENSE](https://github.co
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
+- [Shade Agent](https://docs.near.org/ai/introduction)
+- [Phala TEEs](https://phala.com/)
 
 ## Support
 
