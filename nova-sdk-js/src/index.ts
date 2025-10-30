@@ -108,7 +108,7 @@ export class NovaSdk {
     
       const callResult = result as any;
       const decoded = Buffer.from(callResult.result).toString().trim();  // Trim for mismatches
-      return decoded || null;
+      return decoded ? JSON.parse(decoded) : null;
     } catch (e) {
       throw new NovaError(`Checksum fetch error: ${e}`, e as Error);
     }

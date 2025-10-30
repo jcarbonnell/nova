@@ -123,7 +123,7 @@ describe('NovaSdk', () => {
       // Mock provider.query for getGroupChecksum
       const mockQuery = jest.spyOn((sdk as any).provider, 'query');
       mockQuery.mockResolvedValueOnce({
-        result: Buffer.from(mockChecksum).toString('base64')  // Base64 of raw hex bytes (exact decode match)
+        result: Array.from(Buffer.from(JSON.stringify(mockChecksum)))  // Base64 of raw hex bytes (exact decode match)
       } as any);
 
       // Mock claim_token return (callFunction result)
@@ -207,7 +207,7 @@ describe('NovaSdk', () => {
       // Send 0.001 NEAR to self (1000000000000000000000 yoctoNEAR)
       const result = await sdk.transferTokens(accountId!, '1000000000000000000000');
       expect(result).toBe('Success');
-    }, 15000);
+    }, 30000);
 
     test('addGroupMember adds member to group', async () => {
       if (shouldSkip) {

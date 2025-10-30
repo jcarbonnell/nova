@@ -1,15 +1,17 @@
 # NOVA SDK for JavaScript
 
-A JavaScript/TypeScript SDK for interacting with the NOVA secure file-sharing on the NEAR blockchain. Provides encrypted, decentralized file storage using IPFS and NEAR smart contracts with group-based access control.
+A JavaScript/TypeScript SDK for interacting with the NOVA secure file-sharing on the NEAR blockchain. NOVA hybridizes on-chain group management with off-chain TEE-secured keys via Shade Agents, using nonce-based ed25519-signed tokens for ephemeral, verifiable access. This ensures keys never touch public state, making it ideal for high-value data like AI datasets.
+
 
 ## Features
 
 - 🔐 **AES-256-CBC Encryption** - Client-side encryption for data privacy
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
-- ⛓️ **NEAR Blockchain** - Immutable transaction records and access control
-- 👥 **Group Management** - Fine-grained access control with member authorization
-- 🔑 **Key Rotation** - Automatic key rotation on member revocation
-- 🚀 **Composite Operations** - Simplified high-level workflows
+- ⛓️ **NEAR Blockchain** - Immutable transaction records and group access control
+- 🛡️ **TEE/Shade Integration** - Keys generated/stored/rotated in verifiable Trusted Execution Environments (Phala); no on-chain exposure
+- 🔑 **Nonce-Based Tokens** - Ephemeral ed25519-signed access tokens with replay protection and 5-minute expiry
+- 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
+- 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 - 📦 **TypeScript Support** - Full type definitions included
 
 ## Installation
@@ -27,9 +29,10 @@ async function main() {
   // Initialize SDK
   const sdk = new NovaSdk(
     'https://rpc.testnet.near.org',
-    'nova-contract.testnet',
+    'nova-sdk-4.testnet',
     'your_pinata_api_key',
-    'your_pinata_secret_key'
+    'your_pinata_secret_key',
+    'https://your-shade-agent.phala.network'
   );
 
   // Attach signer
@@ -71,10 +74,18 @@ main().catch(console.error);
 Groups provide isolated access control domains. Each group has:
 - A unique identifier (`group_id`)
 - An owner who manages membership
-- A shared encryption key
-- A list of authorized members
+- TEE-derived encryption keys (generated in Shade Agent on registration)
+- Immutable transaction logs
 
-### Access Control
+Registration triggers Shade key gen; revocation rotates keys off-chain.
+
+### Access Control & Key Management
+
+NOVA v2 keeps keys private in TEEs (Phala Shade Agents):
+- **No On-Chain Keys**: Only checksums (hashes) stored for verification.
+- **Token Flow**: To access a key, generate a signed payload (group/user/nonce/timestamp + PK), claim a token on-chain (claim_token verifies sig/membership/nonce/ts), then fetch from Shade (verifies token + auth, decrypts transiently).
+- **Security**: Tokens expire in 5min, nonces prevent replay; ed25519 sigs use user PK (derived from priv seed).
+
 
 ```typescript
 // Register new group (owner only)
@@ -86,31 +97,38 @@ await sdk.addGroupMember('secure_vault', 'bob.testnet');
 // Check authorization
 const authorized = await sdk.isAuthorized('secure_vault', 'bob.testnet');
 
+// Verify group TEE checksum
+const checksum = await sdk.getGroupChecksum('secure_vault');
+
 // Revoke member (automatically rotates key)
 await sdk.revokeGroupMember('secure_vault', 'bob.testnet');
+
+// Implicit in composites: getGroupKey auto-handles token + Shade fetch
+const key = await sdk.getGroupKey('secure_vault', 'bob.testnet');  // Ephemeral only
 ```
 
 ### Encryption
 
 All data is encrypted client-side using AES-256-CBC:
-- 256-bit symmetric keys
-- Random IV per encryption
+- 256-bit keys from TEE
+- Random IV per op
 - PKCS7 padding
-- Keys stored encrypted on blockchain
+- SHA256 hashing for integrity
+
 
 ### Transaction Recording
 
-Every file operation creates an immutable blockchain record:
+Records file metadata on-chain (now callable by group members):
 
 ```typescript
 const transId = await sdk.recordTransaction(
   'my_group',
   'alice.testnet',
-  'file_hash_sha256',
+  'sha256_hex_hash',
   'QmIPFSHash'
 );
 
-// Query group transactions
+// Query history
 const txs = await sdk.getTransactionsForGroup('my_group', 'alice.testnet');
 ```
 
@@ -123,7 +141,8 @@ const sdk = new NovaSdk(
   rpcUrl: string,
   contractId: string,
   pinataKey: string,
-  pinataSecret: string
+  pinataSecret: string,
+  shadeApiUrl: string
 );
 
 // Attach signer for write operations
@@ -133,33 +152,33 @@ await sdk.withSigner(privateKey: string, accountId: string);
 ### Group Management
 
 ```typescript
-// Create new group (requires deposit)
+// Create new group (triggers TEE key gen; requires deposit)
 await sdk.registerGroup(groupId: string): Promise<string>
 
 // Grant access to user
 await sdk.addGroupMember(groupId: string, userId: string): Promise<string>
 
-// Revoke access and rotate key
+// Revoke access (triggers TEE key rotation)
 await sdk.revokeGroupMember(groupId: string, userId: string): Promise<string>
 
 // Check user authorization
 await sdk.isAuthorized(groupId: string, userId: string): Promise<boolean>
+
+// Get TEE checksum
+await sdk.getGroupChecksum(groupId: string): Promise<string | null>
 ```
 
 ### Key Management
 
 ```typescript
-// Store encryption key (owner only)
-await sdk.storeGroupKey(groupId: string, keyB64: string): Promise<string>
-
-// Retrieve key (authorized users only)
+// Fetch ephemeral key via token + Shade (authorized users only)
 await sdk.getGroupKey(groupId: string, userId: string): Promise<string>
 ```
 
 ### File Operations
 
 ```typescript
-// Encrypt, upload to IPFS, record transaction
+// Full: Token → TEE key → Encrypt → IPFS → Record
 await sdk.compositeUpload(
   groupId: string,
   userId: string,
@@ -167,13 +186,13 @@ await sdk.compositeUpload(
   filename: string
 ): Promise<CompositeUploadResult>
 
-// Fetch from IPFS and decrypt
+// Full: Token → TEE key → IPFS → Decrypt
 await sdk.compositeRetrieve(
   groupId: string,
   ipfsHash: string
 ): Promise<CompositeRetrieveResult>
 
-// Record file metadata on blockchain
+// Record file metadata on-chain (group members)
 await sdk.recordTransaction(
   groupId: string,
   userId: string,
@@ -226,7 +245,7 @@ class NovaError extends Error {
 
 ## Environment Setup
 
-For testing and development, set these environment variables:
+For testing and development, set these variables in a `.env` file:
 
 ```bash
 # Required for integration tests
@@ -234,16 +253,9 @@ TEST_NEAR_ACCOUNT_ID=your-account.testnet
 TEST_NEAR_PRIVATE_KEY=ed25519:your_private_key
 PINATA_API_KEY=your_pinata_key
 PINATA_SECRET_KEY=your_pinata_secret
+SHADE_API_URL=your-shade-agent.phala.network
 ```
 
-Create a `.env` file:
-
-```bash
-TEST_NEAR_ACCOUNT_ID=alice.testnet
-TEST_NEAR_PRIVATE_KEY=ed25519:...
-PINATA_API_KEY=...
-PINATA_SECRET_KEY=...
-```
 
 ## Testing
 
@@ -267,59 +279,62 @@ import { NovaError } from 'nova-sdk-js';
 
 try {
   const key = await sdk.getGroupKey('my_group', 'user.testnet');
-  console.log('Key:', key);
 } catch (error) {
   if (error instanceof NovaError) {
     console.error('NOVA error:', error.message);
-    if (error.cause) {
-      console.error('Caused by:', error.cause);
-    }
-  } else {
-    console.error('Unexpected error:', error);
+    if (error.cause) console.error('Caused by:', error.cause);
   }
 }
 ```
 
+Common: Unauthorized (not member), Token expired (retry), Checksum mismatch (TEE invalid).
+
+
 ## Security Considerations
 
-⚠️ **Important Security Notes:**
+⚠️ **NOVA v2 Security Highlights:**
 
-1. **Private Keys** - Never commit private keys to version control
-2. **Key Storage** - Store encryption keys securely
-3. **IPFS Privacy** - IPFS content is public; encryption is essential
-4. **Access Control** - Verify user authorization before operations
-5. **Key Rotation** - Revoked members cannot decrypt new content
-6. **Buffer Handling** - Use Buffer for binary data to avoid encoding issues
+1. **TEE Privacy** - Keys in encrypted Shade DB; attested checksums on-chain—no exposure.
+2. **Tokens**: Ed25519-signed, nonce-protected, 5min expiry—ephemeral only. Prevent indexing exploits.
+3. **No On-Chain Keys**: Metadata/CIDs public, but decryption impossible without TEE breach.
+4. **Privkeys**: Never commit; use env vars.
+5. **IPFS**: Encrypt always—content public.
+6. **Attacks**: Replay/sig forgery blocked; multi-worker sync via code hash.
 
-## NEAR Token Deposits
+## NEAR Deposits
 
 Some operations require NEAR token deposits:
 
 - `registerGroup()` - 0.1 NEAR
 - `addGroupMember()` - 0.0005 NEAR
 - `revokeGroupMember()` - 0.0005 NEAR
-- `storeGroupKey()` - 0.0005 NEAR
+- `claim_token` (internal) - 0.001 NEAR
 - `recordTransaction()` - 0.002 NEAR
 
 Ensure your account has sufficient balance before calling these methods.
 
 ## Examples
 
-### Basic File Upload
+### Secure AI Dataset Sharing
 
 ```typescript
-const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret);
-await sdk.withSigner(privateKey, accountId);
+const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret, shadeUrl);
+await sdk.withSigner(privKey, accountId);
 
-const fileData = Buffer.from('My secret document');
-const result = await sdk.compositeUpload(
-  'my_group',
-  'user.testnet',
-  fileData,
-  'secret.txt'
-);
+// Register (triggers TEE key)
+await sdk.registerGroup('ai_team');
 
-console.log('Uploaded:', result.cid);
+// Add collaborator
+await sdk.addGroupMember('ai_team', 'bob.testnet');
+
+// Upload dataset (token-fetched key)
+const dataset = Buffer.from(JSON.stringify({ samples: [...] }));
+const result = await sdk.compositeUpload('ai_team', accountId, dataset, 'training.json');
+
+// Bob retrieves (his token)
+const bobSdk = new NovaSdk(...).withSigner(bobPriv, 'bob.testnet');
+const bobData = await bobSdk.compositeRetrieve('ai_team', result.cid);
+console.log('Decrypted:', bobData.data.toString());
 ```
 
 ### Group Management
@@ -380,7 +395,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/blob/main/nova-sdk-js/LICENSE) file for details.
+This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/LICENSE) file for details.
 
 ## Resources
 
@@ -388,6 +403,7 @@ This project is licensed under the MIT License - see [LICENSE](https://github.co
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
+- [Phala TEE](https://phala.com/)
 - [NEAR JavaScript API](https://docs.near.org/tools/near-api-js/quick-reference)
 
 ## Support
