@@ -14,7 +14,9 @@ async function main() {
   const accountIdA = process.env.SIGNER_ACCOUNT_ID;
   const privateKeyB = process.env.PARTICIPANT_KEY;
   const accountIdB = process.env.PARTICIPANT_ACCOUNT;
-
+  const shadeApiUrl = process.env.SHADE_API_URL;
+  
+  if (!shadeApiUrl) throw new Error('Missing SHADE_API_URL');
   if (!rpc || !contract || !pinataKey || !pinataSecret || !privateKeyA || !accountIdA || !privateKeyB || !accountIdB) {
     throw new Error('Missing env vars: RPC_URL, CONTRACT_ID, IPFS_API_KEY, IPFS_API_SECRET, NEAR_PRIVATE_KEY, SIGNER_ACCOUNT_ID, PARTICIPANT_KEY, PARTICIPANT_ACCOUNT');
   }
@@ -23,11 +25,11 @@ async function main() {
   console.log('Secondary Account ID (Hospital B):', accountIdB);
 
   // Init NOVA SDK for Hospital A
-  const sdkA = new NovaSdk(rpc, contract, pinataKey, pinataSecret);
+  const sdkA = new NovaSdk(rpc, contract, pinataKey, pinataSecret, shadeApiUrl);
   await sdkA.withSigner(privateKeyA, accountIdA);
   
   // Init NOVA SDK for Hospital B
-  const sdkB = new NovaSdk(rpc, contract, pinataKey, pinataSecret);
+  const sdkB = new NovaSdk(rpc, contract, pinataKey, pinataSecret, shadeApiUrl);
   await sdkB.withSigner(privateKeyB, accountIdB);
 
   // Step 0: Define group ID

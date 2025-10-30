@@ -207,7 +207,7 @@ time.sleep(30)
 # Step 4: Hospital A retrieves B's data, processes it, and uploads final output
 retrieve_a_args = {
     'group_id': group_id,
-    'ipfs_hash': output_upload_b['cid']
+    'ipfs_hash': output_upload_b["cid"]
 }
 retrieve_a = call_mcp_tool('composite_retrieve', retrieve_a_args, SIGNER_ACCOUNT_ID, NEAR_PRIVATE_KEY)
 if 'decrypted_b64' not in retrieve_a:

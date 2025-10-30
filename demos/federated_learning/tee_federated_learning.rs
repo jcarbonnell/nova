@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let account_id_a = std::env::var("SIGNER_ACCOUNT_ID")?;
     let private_key_b = std::env::var("PARTICIPANT_KEY")?;
     let account_id_b = std::env::var("PARTICIPANT_ACCOUNT")?;
+    let shade_api_url = std::env::var("SHADE_API_URL")?;
 
     println!("Primary Account ID (Hospital A): {}", account_id_a);
     println!("Secondary Account ID (Hospital B): {}", account_id_b);
@@ -26,6 +27,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &contract,
         &pinata_key,
         &pinata_secret,
+        &shade_api_url
     )
     .with_signer(&private_key_a, &account_id_a)?;
     
@@ -35,6 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &contract,
         &pinata_key,
         &pinata_secret,
+        &shade_api_url
     )
     .with_signer(&private_key_b, &account_id_b)?;
     

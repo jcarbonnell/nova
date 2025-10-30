@@ -2,6 +2,11 @@
 
 Phala's TEEs ensure confidential training, but lack persistent storage. NOVA complements TEEs by providing secure vaults for datasets pre/post-TEE, with revokable group membership. This enables verifiable, multi-party workflows: upload shared data, TEE fine-tunes, store models back—auditable via on-chain metadata.
 
+- Uses off-chain TEE keys (Shade/Phala); no on-chain exposure.
+- `getGroupKey` now auto-handles token claim/checksum verify.
+- Update .env: CONTRACT_ID=nova-sdk-4.testnet, SHADE_API_URL=...
+- Run: Ensure group 'tee_demo_healthcare' exists in v2 contract.
+
 ## Use Case
 In healthcare (e.g., Phala's success story: https://phala.com/success-stories/healthcare-research), hospitals share encrypted records for federated learning without exposure. 
 
