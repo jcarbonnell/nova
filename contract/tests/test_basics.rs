@@ -46,13 +46,15 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     // Real Shade agent contract ID
     let shade_contract_id = "ac-sandbox.nova-shade-agent.testnet";
 
-    // Initialize NOVA contract with real Shade agent
+    // Initialize NOVA contract with real Shade agent and fee recipient
     let init_outcome = owner_account
         .call(contract.id(), "new")
         .args_json(json!({
             "owner": owner_account.id().to_string(),
-            "shade_contract_id": shade_contract_id
+            "shade_contract_id": shade_contract_id,
+            "fee_recipient": "nova-sdk-4.testnet"
         }))
+        .gas(Gas::from_tgas(300))
         .transact()
         .await?;
     init_outcome.into_result()?;
@@ -64,6 +66,8 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     let approve_outcome = owner_account
         .call(contract.id(), "approve_shade_code_hash")
         .args_json(json!({"code_hash": shade_codehash}))
+        .deposit(NearToken::from_yoctonear(1_000_000_000_000_000_000))  // 0.001 NEAR > 0.0001 fee
+        .gas(Gas::from_tgas(50))
         .transact()
         .await?;
     approve_outcome.into_result()?;
@@ -79,6 +83,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "worker_id": shade_contract_id,
             "attestation": attestation
         }))
+        .gas(Gas::from_tgas(50))
         .transact()
         .await?;
     register_worker_outcome.into_result()?;
@@ -89,7 +94,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     let register_outcome = owner_account
         .call(contract.id(), "register_group")
         .args_json(json!({"group_id": "test_group_nova"}))
-        .deposit(NearToken::from_yoctonear(10_000_000_000_000))
+        .deposit(NearToken::from_yoctonear(100_000_000_000_000_000_000_000))  // 0.1 NEAR > 0.05 fee
         .gas(Gas::from_tgas(300))
         .transact()
         .await?;
@@ -122,7 +127,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "group_id": "test_group_nova",
             "user_id": member_account.id().to_string()
         }))
-        .deposit(NearToken::from_yoctonear(1_000_000_000_000))
+        .deposit(NearToken::from_yoctonear(10_000_000_000_000_000_000))  // 0.01 NEAR > 0.001 fee
         .gas(Gas::from_tgas(200))
         .transact()
         .await?;
@@ -211,7 +216,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "file_hash": "file_hash_test",
             "ipfs_hash": "ipfs_hash_test"
         }))
-        .deposit(NearToken::from_yoctonear(1_000_000_000_000))
+        .deposit(NearToken::from_yoctonear(10_000_000_000_000_000_000))  // 0.01 > 0.002 fee
         .gas(Gas::from_tgas(300))
         .transact()
         .await?;
@@ -270,7 +275,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
             "group_id": "test_group_nova",
             "user_id": member_account.id().to_string()
         }))
-        .deposit(NearToken::from_yoctonear(1_000_000_000_000))
+        .deposit(NearToken::from_yoctonear(10_000_000_000_000_000_000))  // 0.01 > 0.001 fee
         .gas(Gas::from_tgas(200))
         .transact()
         .await?;

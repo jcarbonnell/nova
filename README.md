@@ -211,9 +211,10 @@ Comprehensive documentation is available on GitBook:
 
 ## Future Roadmap
 
-### Potential SDK Enhancements
+### Potential Enhancements
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
 - **Dataset Monetization**: Add pricing at file upload so file owners can monetize their datasets.
+- **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
 
 ## Contributing
 
