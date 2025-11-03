@@ -5,10 +5,8 @@ use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use near_sdk::serde_json;
-use near_sdk::serde_json::json;
 use hex;
 use near_sdk::base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use sha2::{Sha256, Digest};
 
 // Define the contract structure
 #[near(contract_state)]
