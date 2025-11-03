@@ -31,6 +31,8 @@ export declare class NovaSdk {
     getBalance(accountId: string): Promise<string>;
     isAuthorized(groupId: string, userId: string): Promise<boolean>;
     getGroupChecksum(groupId: string): Promise<string | null>;
+    getGroupOwner(groupId: string): Promise<string | null>;
+    updateChecksum(groupId: string, checksum: string): Promise<string>;
     getGroupKey(groupId: string, userId: string): Promise<string>;
     getTransactionsForGroup(groupId: string, userId: string): Promise<Transaction[]>;
     private executeContractCall;

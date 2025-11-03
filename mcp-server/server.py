@@ -322,7 +322,7 @@ def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
 # Tools for NOVA contract interaction (requires valid auth)
 @mcp.tool
 async def register_group(group_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:
-    """Registers new group on NOVA contract (owner only). Provide account_id/private_key as owner if not using default."""
+    """Registers new group on NOVA contract. Provide account_id/private_key as owner if not using default."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
     account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
@@ -330,7 +330,7 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
     if await _group_contains_key(group_id, contract_id):
         raise Exception(f"Group {group_id} exists")
     near = Account(account_id, private_key, rpc)
-    await near.startup()  # ADD THIS: Initialize account
+    await near.startup()
     result = await near.function_call(
         contract_id=contract_id,
         method_name="register_group",
@@ -368,7 +368,7 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
                 raise Exception("Shade gen no checksum")
         
         return f"Registered (with Shade key gen for {group_id})"
-    raise Exception(f"Register failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
+    raise Exception(f"Register failed: {result.status}. Ensure sufficient gas/deposit and unique group_id.")
 
 @mcp.tool
 async def add_group_member(group_id: str, member_id: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> str:

@@ -471,3 +471,70 @@ async fn test_composite_retrieve_integration() {
         Err(e) => panic!("Composite retrieve failed: {}", e),
     }
 }
+
+#[tokio::test]
+async fn test_update_checksum_integration() {
+    let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+    let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+    if account_id.is_none() || private_key.is_none() {
+        println!("Skipping test_update_checksum_integration: Credentials not set");
+        return;
+    }
+    let sdk = NovaSdk::new(
+        "https://rpc.testnet.near.org",
+        "nova-sdk-4.testnet",
+        "fake", "fake", "https://fake-shade.phala.network"
+    )
+    .with_signer(&private_key.unwrap(), &account_id.unwrap())
+    .unwrap();
+
+    let group_id = "test_update_checksum_group";
+    let test_checksum = "dummy_hex_checksum_32bytes_1234567890abcdef1234567890abcdef";  // 32-char hex for realism
+
+    // Pre-req: Register group (as caller → owner)
+    let register_result = sdk.register_group(group_id).await;
+    if let Err(e) = &register_result {
+        if !e.to_string().contains("Group exists") {  // Allow if already exists
+            panic!("Registration failed: {}", e);
+        }
+    }
+
+    // Call update_checksum
+    let result = sdk.update_checksum(group_id, test_checksum).await.unwrap();
+    assert_eq!(result, "Success", "Should return success");
+
+    // Verify: Fetch and check
+    let updated_checksum = sdk.get_group_checksum(group_id).await.unwrap();
+    assert_eq!(updated_checksum, Some(test_checksum.to_string()), "Checksum should match");
+
+    println!("✅ update_checksum success: {} updated to {}", group_id, test_checksum);
+}
+
+#[tokio::test]
+async fn test_update_checksum_non_owner() {
+    let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+    let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+    if private_key.is_none() || account_id.is_none() {
+        println!("Skipping test_update_checksum_non_owner: Credentials not set");
+        return;
+    }
+
+    let sdk = NovaSdk::new(
+        "https://rpc.testnet.near.org",
+        "nova-sdk-4.testnet",
+        "fake", "fake", "https://fake-shade.phala.network"
+    )
+    .with_signer(&private_key.unwrap(), &account_id.unwrap())
+    .unwrap();
+
+    let group_id = "test_group";  // Existing group owned by deployer (assume test account isn't owner)
+    let test_checksum = "dummy_hex_checksum";
+
+    let result = sdk.update_checksum(group_id, test_checksum).await;
+    assert!(result.is_err(), "Non-owner should fail");
+    let err = result.err().unwrap();
+    assert!(matches!(err, NovaError::Near(_)), "Expect Near error from contract panic");
+    assert!(err.to_string().contains("Only group owner can update checksum"), "Error should indicate auth failure");
+
+    println!("✅ update_checksum non-owner failure confirmed");
+}

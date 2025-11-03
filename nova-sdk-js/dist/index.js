@@ -105,7 +105,7 @@ class NovaSdk {
                 finality: 'final',
             });
             const callResult = result;
-            const decoded = buffer_1.Buffer.from(callResult.result).toString();
+            const decoded = buffer_1.Buffer.from(callResult.result).toString().trim();
             return JSON.parse(decoded);
         }
         catch (e) {
@@ -122,11 +122,45 @@ class NovaSdk {
                 finality: 'final',
             });
             const callResult = result;
-            const decoded = buffer_1.Buffer.from(callResult.result).toString().trim(); // Trim for mismatches
+            const decoded = buffer_1.Buffer.from(callResult.result).toString().trim();
             return decoded ? JSON.parse(decoded) : null;
         }
         catch (e) {
             throw new NovaError(`Checksum fetch error: ${e}`, e);
+        }
+    }
+    async getGroupOwner(groupId) {
+        try {
+            const result = await this.provider.query({
+                request_type: 'call_function',
+                account_id: this.contractId,
+                method_name: 'get_group_owner',
+                args_base64: buffer_1.Buffer.from(JSON.stringify({ group_id: groupId })).toString('base64'),
+                finality: 'final',
+            });
+            const callResult = result;
+            const decoded = buffer_1.Buffer.from(callResult.result).toString().trim();
+            return decoded ? JSON.parse(decoded) : null; // Returns owner AccountId string
+        }
+        catch (e) {
+            throw new NovaError(`Owner fetch error: ${e}`, e);
+        }
+    }
+    async updateChecksum(groupId, checksum) {
+        if (!this.account)
+            throw new NovaError('No signer attached (must be group owner)');
+        try {
+            const result = await this.account.callFunction({
+                contractId: this.contractId,
+                methodName: 'update_checksum',
+                args: { group_id: groupId, checksum },
+                gas: 50000000000000n, // 50 TGas
+                deposit: 10000000000000000000n, // 0.00001 NEAR
+            });
+            return result ? result.toString() : 'Success (group owner only)';
+        }
+        catch (e) {
+            throw new NovaError(`Checksum update error: ${e} (ensure caller is group owner)`, e);
         }
     }
     async getGroupKey(groupId, userId) {
@@ -179,8 +213,10 @@ class NovaSdk {
                 throw new NovaError('Token claim failed');
             // Parse returned token (base64-decoded str)
             const tokenB64 = claimResult.toString(); // Adjust based on actual return
+            if (!tokenB64)
+                throw new NovaError('Empty token from claim');
             const tokenBytes = buffer_1.Buffer.from(tokenB64, 'base64');
-            const token = tokenBytes.toString('utf-8').replace(/"/g, ''); // Strip quotes
+            const token = tokenBytes.toString('utf-8').replace(/"/g, '').trim(); // Strip quotes
             // Step 4: Fetch key from Shade API
             if (!this.shadeApiUrl)
                 throw new NovaError('Shade API URL not set');
@@ -240,12 +276,15 @@ class NovaSdk {
         }
     }
     async registerGroup(groupId) {
+        // Caller (signer) becomes group owner automatically
         return this.executeContractCall('register_group', { group_id: groupId }, '100000000000000000000000');
     }
     async addGroupMember(groupId, userId) {
+        // Must be signed as group owner
         return this.executeContractCall('add_group_member', { group_id: groupId, user_id: userId }, '500000000000000000');
     }
     async revokeGroupMember(groupId, userId) {
+        // Must be signed as group owner
         return this.executeContractCall('revoke_group_member', { group_id: groupId, user_id: userId }, '500000000000000000');
     }
     async recordTransaction(groupId, userId, fileHash, ipfsHash) {
@@ -269,6 +308,7 @@ class NovaSdk {
         }
     }
     async compositeUpload(groupId, userId, data, filename) {
+        // Any authorized user (including group owner) can record
         const keyB64 = await this.getGroupKey(groupId, userId);
         const encryptedB64 = this.encryptData(data, keyB64);
         const cid = await this.ipfsUpload(encryptedB64, filename);

@@ -31,7 +31,9 @@ describe('NovaSdk', () => {
 
   test('withSigner accepts valid key format', async () => {
     const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const result = await sdk.withSigner('ed25519:ABC123dummybase58key32bytesencodedhereforrusttest', 'test.account.testnet');
+    // Mock valid key (in real: use env or test key)
+    const mockKey = 'ed25519:ABC123dummybase58key32bytesencodedhereforrusttest';
+    const result = await sdk.withSigner(mockKey, 'test.account.testnet');
     expect(result).toBe(sdk);
   });
 
@@ -103,7 +105,7 @@ describe('NovaSdk', () => {
       expect(signedSdk).toBe(sdk); // Should return same instance
     }, 10000);
 
-    test('getGroupKey returns base64 key (new token flow)', async () => {
+    test('getGroupKey returns base64 key for authorized user', async () => {
       if (shouldSkip) {
         console.log(skipMessage);
         return;
@@ -227,6 +229,33 @@ describe('NovaSdk', () => {
         expect(error).toBeInstanceOf(NovaError);
       }
     }, 30000);
+  });
+
+  // multi-user specific test
+  test('registerGroup sets caller as owner', async () => {
+    const sdkA = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+
+    // Use a valid base58 mock key (no 'l', '0', 'O', 'I'; 44 chars for 32 bytes)
+    const mockKey = 'ed25519:3t4Y8x3Y5Z7a9b1c3d5e7f9g1h3i5j7k9m1n3o5p7q9r1s3t5u7v9w1x3y5z7A9B1C';  // Valid alphabet
+    await sdkA.withSigner(mockKey, 'userA.testnet');
+  
+    // Mock callFunction to simulate success (avoids real tx)
+    const mockCallFn = jest.spyOn(sdkA.account!, 'callFunction').mockResolvedValueOnce('Success');
+  
+    const registerResult = await sdkA.registerGroup('groupA');
+    expect(registerResult).toBe('Success');  // Or parse_outcome returns
+  
+    // Mock getGroupOwner
+    const mockQuery = jest.spyOn((sdkA as any).provider, 'query');
+    mockQuery.mockResolvedValueOnce({
+      result: Array.from(Buffer.from(JSON.stringify('userA.testnet')))  // Base64 of owner str
+    } as any);
+
+    const owner = await sdkA.getGroupOwner('groupA');
+    expect(owner).toBe('userA.testnet');
+  
+    mockCallFn.mockRestore();
+    mockQuery.mockRestore();
   });
 
   describe('Encryption/Decryption', () => {

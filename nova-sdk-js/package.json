@@ -1,7 +1,7 @@
 {
   "name": "nova-sdk-js",
-  "version": "0.2.0",
-  "description": "JavaScript SDK for NOVA v2: Secure file sharing on NEAR with Shade/TEE hybridization.",
+  "version": "0.2.1",
+  "description": "JavaScript SDK for multi-user NOVA v2: Secure file sharing on NEAR with Shade/TEE hybridization.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
