@@ -212,7 +212,6 @@ Comprehensive documentation is available on GitBook:
 ## Future Roadmap
 
 ### Potential SDK Enhancements
-- **Pay-per-Action Model**: Add fees to `#[payable]` methods, setup fees to `nova-sdk.near`
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
 - **Dataset Monetization**: Add pricing at file upload so file owners can monetize their datasets.
 
