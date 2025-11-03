@@ -1,4 +1,4 @@
-// NOVA contract v0.2.2 - hybridization with Shade/TEEs + ed25519 token signing
+// NOVA contract v0.2.3 - multi-user w/ Shade/TEEs + ed25519 token signing
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -76,7 +76,6 @@ impl Contract {
     pub fn register_group(&mut self, group_id: String) {
         assert!(!self.groups.contains_key(&group_id), "Group exists");
         let caller = env::predecessor_account_id();
-        assert_eq!(caller, self.owner, "Only owner can register");
         let group = Group { owner: caller.clone(), shade_checksum: None };
         self.groups.insert(group_id.clone(), group);
         let mut members = StoreVec::new(group_id.as_bytes());
@@ -92,6 +91,17 @@ impl Contract {
 
     pub fn group_contains_key(&self, group_id: String) -> bool {
         self.groups.contains_key(&group_id)
+    }
+
+    pub fn get_group_owner(&self, group_id: String) -> AccountId {
+        self.groups.get(&group_id).map_or_else(|| env::panic_str("Group not found"), |g| g.owner.clone())
+    }
+
+    pub fn get_group_members(&self, group_id: String, user_id: AccountId) -> Vec<AccountId> {
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+        assert!(self.is_authorized(group_id.clone(), user_id.clone()) || user_id == self.owner, "Unauthorized");
+        let members = self.group_members.get(&group_id).expect("Group members not found");
+        members.iter().cloned().collect::<Vec<AccountId>>()  // Clone and collect from iter (O(n) gas, safe for small groups)
     }
 
     #[payable]
@@ -164,14 +174,11 @@ impl Contract {
             .collect()
     }
 
-    pub fn get_group_checksum(&self, group_id: String) -> Option<String> {
-        self.groups.get(&group_id).and_then(|g| g.shade_checksum.clone())
-    }
-
     #[payable]
     pub fn update_checksum(&mut self, group_id: String, checksum: String) {
         let caller = env::predecessor_account_id();
-        assert_eq!(caller, self.owner, "Owner only");
+        let group = self.groups.get(&group_id).expect("Group not found");
+        assert_eq!(caller, group.owner, "Only group owner can update checksum");
         if let Some(group) = self.groups.get_mut(&group_id) {  // get_mut for mutable ref
             // Optional: Validate hex (32 bytes)
             hex::decode(&checksum).expect("Invalid hex checksum");
@@ -180,6 +187,10 @@ impl Contract {
         } else {
             env::panic_str("Group not found");
         }
+    }
+
+    pub fn get_group_checksum(&self, group_id: String) -> Option<String> {
+        self.groups.get(&group_id).and_then(|g| g.shade_checksum.clone())
     }
 
     #[payable]
@@ -321,17 +332,23 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only owner can register")]
-    fn register_group_fails_non_owner() {
+    fn register_group_works_for_any_caller() {
         let owner: AccountId = "owner.testnet".parse().unwrap();
         let non_owner: AccountId = "not_owner.testnet".parse().unwrap();
         let shade_id: AccountId = "shade.testnet".parse().unwrap();
         let mut context = get_context(owner.clone());
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id);
-        context = get_context(non_owner);
+        context = get_context(non_owner.clone());
         testing_env!(context.build());
         contract.register_group("test_group".to_string());
+    
+        // Verify group was created with non_owner as owner
+        assert!(contract.groups.contains_key(&"test_group".to_string()));
+        assert_eq!(contract.get_group_owner("test_group".to_string()), non_owner);
+    
+        // Verify non_owner is a member
+        assert!(contract.is_authorized("test_group".to_string(), non_owner.clone()));
     }
 
     #[test]
@@ -493,6 +510,35 @@ mod tests {
         let mut contract = Contract::new(owner.clone(), shade_id);
         contract.register_group("test_group".to_string());
         contract.get_transactions_for_group("test_group".to_string(), non_member);
+    }
+
+    #[test]
+    fn get_group_members_works() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let member: AccountId = "member.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id);
+        contract.register_group("test_group".to_string());
+        contract.add_group_member("test_group".to_string(), member.clone());
+        let members = contract.get_group_members("test_group".to_string(), owner.clone());
+        assert_eq!(members.len(), 2);  // owner + member
+        assert!(members.contains(&owner));
+        assert!(members.contains(&member));
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn get_group_members_fails_unauthorized() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let non_member: AccountId = "non_member.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let context = get_context(owner.clone());
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner, shade_id);
+        contract.register_group("test_group".to_string());
+        contract.get_group_members("test_group".to_string(), non_member);
     }
 
     #[test]

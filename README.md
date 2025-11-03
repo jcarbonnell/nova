@@ -213,12 +213,8 @@ Comprehensive documentation is available on GitBook:
 
 ### Potential SDK Enhancements
 - **Pay-per-Action Model**: Add fees to `#[payable]` methods, setup fees to `nova-sdk.near`
-- **Transaction Listing**: Extend `get_transactions_for_group` calls to authorized agents/members (currently owner-only).
-- **Member Discovery**: Extend `group_members` view to agents/members (currently owner-only).
 - **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
 - **Dataset Monetization**: Add pricing at file upload so file owners can monetize their datasets.
-- **Publish Rights Control**: So far all members can upload, but a contract update could add per-member publish rights. (e.g.grant_publish_rights(group_id: String, user_id: AccountId, can_publish: bool)).
-- **Group creation access**: Update to allow anyone to create groups (remove owner assert in register_group), with per-group owner for management.
 
 ## Contributing
 
