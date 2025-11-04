@@ -44,6 +44,7 @@ def _validate_near_key(private_key: str) -> str:
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_key: str = None) -> str:
     """Internal: Gen payload → sign with user priv → claim token on-chain → fetch key from Shade → verify checksum."""
     rpc = os.environ["RPC_URL"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     try:
         acc = Account(user_id, private_key, rpc)
@@ -109,6 +110,11 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
         print(f"Generated payload_b64: {payload_b64[:50]}...")  # Debug
         
         # Step 2: Claim token on-chain (payable call as user_id)
+        # Estimate fee + gas margin
+        est_fee = await _estimate_fee(contract_id, "claim_token")
+        gas_margin = 100_000_000_000_000  # 100 TGas equiv
+        total_attach = est_fee + gas_margin
+        
         args_dict = {
             "group_id": group_id,
             "payload_b64": payload_b64,
@@ -118,7 +124,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             contract_id=contract_id,
             method_name="claim_token",
             args=args_dict,  # Dict passes as JSON
-            amount=int("1000000000000000000"),  # 0.001 NEAR
+            amount=total_attach,  # 0.001 NEAR
             gas=int("100000000000000")  # 100 TGas
         )
         print("Claim status:", claim_result.status)
@@ -134,6 +140,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
             raise Exception(f"No token claimed for {group_id}/{user_id}")
         
         print(f"Decoded token: {token[:50]}...")  # Debug
+        print(f"Claim fee: {est_fee / 1e24:.4f} NEAR (auth overhead)")
 
         # Step 3: Call Shade API with token
         if not SHADE_API_URL:
@@ -165,6 +172,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, private_
 async def _group_contains_key(group_id: str, contract_id: str) -> bool:
     """Internal: Check if group exists (view)."""
     rpc = os.environ["RPC_URL"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
     private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy
     acc = Account("dummy", private_key, rpc)  # Dummy for view
     await acc.startup()
@@ -178,6 +186,7 @@ async def _group_contains_key(group_id: str, contract_id: str) -> bool:
 async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     """Internal: Check authorization (view)."""
     rpc = os.environ["RPC_URL"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
     private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy
     acc = Account(user_id, private_key, rpc)
     await acc.startup()
@@ -273,20 +282,73 @@ async def _ipfs_retrieve(cid: str) -> str:
 async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, ipfs_hash: str, contract_id: str, account_id: str, private_key: str) -> str:
     """Internal: Records (async)."""
     rpc = os.environ["RPC_URL"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
     private_key = _validate_near_key(private_key)
+
+    # Estimate fee + gas margin
+    est_fee = await _estimate_fee(contract_id, "record_transaction")
+    gas_margin = 100_000_000_000_000  # 100 TGas equiv
+    total_attach = est_fee + gas_margin
+
     near = Account(account_id, private_key, rpc)
     await near.startup()  # Initialize account for async calls (added)
     result = await near.function_call(
         contract_id=contract_id,
         method_name="record_transaction",
         args={"group_id": group_id, "user_id": user_id, "file_hash": file_hash, "ipfs_hash": ipfs_hash},
-        amount=int("2000000000000000000000")  # 0.002 NEAR yocto
+        amount=total_attach,
+        gas=int("100000000000000")  # 100 TGas
     )
     if "SuccessValue" in result.status:
         trans_id = result.status['SuccessValue']  # Direct str/hex
-        print(f"Recorded tx: {trans_id}")  # Log for debug (kept from failing)
+        print(f"Recorded tx: {trans_id} (fee: {est_fee / 1e24:.4f} NEAR)")  # Log for debug (kept from failing)
+        
+        # Log breakdown (static for now; dynamic via oracle later)
+        ipfs_est = 0.005  # Placeholder USD equiv
+        phala_est = 0.003
+        nova_fee = est_fee / 1e24
+        print(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
+        
         return trans_id
     raise Exception(f"Record failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
+
+async def _estimate_fee(contract_id: str, action: str) -> int:
+    """Queries contract for fee yoctoNEAR."""
+    rpc = os.environ["RPC_URL"]
+    contract_id = contract_id or os.environ["CONTRACT_ID"]
+    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for view
+    acc = Account("dummy", private_key, rpc)
+    await acc.startup()
+    result = await acc.view_function(
+        contract_id=contract_id,
+        method_name="estimate_fee",
+        args={"action": action}
+    )
+    return int(result.result)
+
+async def _get_dynamic_fee(contract_id: str, action: str, file_size_gb: float = 0.0) -> int:
+    """Placeholder for dynamic fee calc (e.g., USD-equiv + IPFS/GB via Chainlink oracle).
+    
+    TODO: Integrate Chainlink CCIP on NEAR:
+    - Deploy oracle contract (e.g., for NEAR/USD feed).
+    - Call as view: await acc.view_function(oracle_contract, 'get_feed', {'feed': 'NEAR/USD'})
+    - Calc: near_usd = feed_value; ipfs_cost_usd = 0.15 * file_size_gb  # Real Pinata 2025 rate
+    - Return int(near_usd * base_rate + ipfs_cost_usd * near_usd_price) * 1e24  # To yoctoNEAR
+    
+    For now: Returns 0 (use static fees).
+    """
+    # Placeholder: Always 0 until oracle deployed
+    # Example real impl (uncomment/adapt):
+    # oracle_contract = os.environ.get("ORACLE_CONTRACT", "chainlink-oracle.testnet")
+    # near_acc = Account("dummy", "", rpc)  # Dummy for view
+    # await near_acc.startup()
+    # feed_result = await near_acc.view_function(oracle_contract, "get_feed", {"feed": "NEAR/USD"})
+    # near_usd = float(feed_result.result)
+    # ipfs_usd = 0.15 * file_size_gb  # Real-time Pinata overage
+    # dynamic_usd = near_usd * 0.01 + ipfs_usd  # E.g., 0.01 USD base + storage
+    # return int(dynamic_usd * near_usd * 1e24)  # Convert to yoctoNEAR
+    
+    return 0  # Stub: No dynamic adjustment
 
 # Tools for direct external use (non-restricted)
 @mcp.tool
@@ -329,13 +391,20 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
     rpc = os.environ["RPC_URL"]
     if await _group_contains_key(group_id, contract_id):
         raise Exception(f"Group {group_id} exists")
+    
+    # Estimate fee + gas margin
+    est_fee = await _estimate_fee(contract_id, "register_group")
+    # est_dynamic = await _get_dynamic_fee(contract_id, "register_group")
+    gas_margin = 300_000_000_000_000  # 300 TGas equiv
+    total_attach = est_fee + gas_margin
+
     near = Account(account_id, private_key, rpc)
     await near.startup()
     result = await near.function_call(
         contract_id=contract_id,
         method_name="register_group",
         args={"group_id": group_id},
-        amount=int("100000000000000000000000"),  # 0.01 NEAR yocto
+        amount=total_attach,
         gas=int("300000000000000")  # 300 TGas
     )
     if "SuccessValue" in result.status:
@@ -353,11 +422,13 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
             checksum = shade_data.get("checksum")
             if checksum:
                 # Update on-chain checksum
+                checksum_est = await _estimate_fee(contract_id, "update_checksum")
+                checksum_total = checksum_est + 50_000_000_000_000  # Gas margin
                 update_result = await near.function_call(
                     contract_id=contract_id,
                     method_name="update_checksum",
                     args={"group_id": group_id, "checksum": checksum},
-                    amount=int("10000000000000000000"),  # 0.00001 NEAR
+                    amount=checksum_total,
                     gas=int("50000000000000")  # 50 TGas
                 )
                 if "SuccessValue" in update_result.status:
@@ -366,6 +437,12 @@ async def register_group(group_id: str, account_id: str = None, private_key: str
                     raise Exception(f"Checksum update failed: {update_result.status}")
             else:
                 raise Exception("Shade gen no checksum")
+        
+        # Log breakdown (static for now; dynamic via oracle later)
+        ipfs_est = 0.005  # Placeholder USD equiv
+        phala_est = 0.003
+        nova_fee = est_fee / 1e24
+        print(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
         
         return f"Registered (with Shade key gen for {group_id})"
     raise Exception(f"Register failed: {result.status}. Ensure sufficient gas/deposit and unique group_id.")
@@ -381,13 +458,20 @@ async def add_group_member(group_id: str, member_id: str, account_id: str = None
         raise Exception(f"Group {group_id} not found")
     if await _is_authorized(group_id, member_id, contract_id):
         raise Exception(f"User {member_id} already a member")
+    
+    # Estimate fee + gas margin
+    est_fee = await _estimate_fee(contract_id, "add_group_member")
+    gas_margin = 300_000_000_000_000  # 300 TGas equiv
+    total_attach = est_fee + gas_margin
+
     near = Account(account_id, private_key, rpc)
     await near.startup()  # ADD THIS
     result = await near.function_call(
         contract_id=contract_id,
         method_name="add_group_member",
         args={"group_id": group_id, "user_id": member_id},
-        amount=int("500000000000000000000")  # 0.0005 NEAR yocto
+        amount=total_attach,
+        gas=int("300000000000000")
     )
     if "SuccessValue" in result.status:
         print(f"Added {member_id} to {group_id}")
@@ -405,13 +489,20 @@ async def revoke_group_member(group_id: str, member_id: str, account_id: str = N
         raise Exception(f"Group {group_id} not found")
     if not await _is_authorized(group_id, member_id, contract_id):
         raise Exception(f"User {member_id} not a member")
+    
+    # Estimate fee + gas margin
+    est_fee = await _estimate_fee(contract_id, "revoke_group_member")
+    gas_margin = 300_000_000_000_000  # 300 TGas equiv
+    total_attach = est_fee + gas_margin
+
     near = Account(account_id, private_key, rpc)
     await near.startup()  # Initialize account for async calls
     result = await near.function_call(
         contract_id=contract_id,
         method_name="revoke_group_member",
         args={"group_id": group_id, "user_id": member_id},
-        amount=int("500000000000000000000")  # 0.0005 NEAR yocto
+        amount=total_attach,
+        gas=int("300000000000000")
     )
     if "SuccessValue" in result.status:
         print(f"Revoked {member_id} from {group_id}, key rotated")
@@ -430,6 +521,12 @@ async def revoke_group_member(group_id: str, member_id: str, account_id: str = N
                 raise Exception("Shade rotate succeeded but no success flag")
         else:
             raise Exception(f"Shade rotate failed: {shade_response.text}")
+        
+        # Log breakdown (static for now; dynamic via oracle later)
+        ipfs_est = 0.005  # Placeholder USD equiv
+        phala_est = 0.003
+        nova_fee = est_fee / 1e24
+        print(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
         
         return "Revoked (with Shade key rotate)"
     raise Exception(f"Revoke failed (check owner auth): {result.status}. Authentication required: Provide your account_id and private_key as the smart contract owner. Or deploy your own contract via `near deploy` and pass `contract_id`.")
@@ -458,6 +555,18 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
     contract_id = contract_id or os.environ["CONTRACT_ID"]
     account_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
+    
+    # Est fees for claim + record
+    claim_fee = await _estimate_fee(contract_id, "claim_token")
+    # claim_dynamic = await _get_dynamic_fee(contract_id, "claim_token")
+    
+    record_fee = await _estimate_fee(contract_id, "record_transaction")
+    # record_dynamic = await _get_dynamic_fee(contract_id, "record_transaction", file_size_gb=1.0)
+
+    total_fee = claim_fee + record_fee
+    gas_margin = 400_000_000_000_000  # 400 TGas for chain
+    total_attach = total_fee + gas_margin
+    
     try:
         # Step 1: Fetch key (uses _get_shade_key, which has startup)
         key = await _get_shade_key(group_id, user_id, contract_id, private_key)
@@ -469,8 +578,8 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
         file_hash = hashlib.sha256(base64.b64decode(data)).hexdigest()
         # Step 5: Blockchain record (uses _record_near_transaction, which needs startup—ensure it's added there if not)
         trans_id = await _record_near_transaction(group_id, user_id, file_hash, cid, contract_id, account_id, private_key)
-        print(f"Composite success: CID={cid}, Trans={trans_id}")
-        return {"cid": cid, "trans_id": trans_id, "file_hash": file_hash}
+        print(f"Composite success: CID={cid}, Trans={trans_id}, (total fee: {total_fee / 1e24:.4f} NEAR)")
+        return {"cid": cid, "trans_id": trans_id, "file_hash": file_hash, "fee_breakdown": {"claim": claim_fee / 1e24, "record": record_fee / 1e24, "total": total_fee / 1e24}}
     except Exception as e:
         raise Exception(f"Composite upload failed: {str(e)}")
 
@@ -484,7 +593,9 @@ async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = No
         raise Exception(f"Invalid CID: {ipfs_hash}")
     try:
         # Step 1: Fetch key (member auth)
+        est_claim_fee = await _estimate_fee(contract_id, "claim_token")
         key = await _get_shade_key(group_id, user_id, contract_id, private_key)  # Use user_id
+        print(f"Retrieve fee: {est_claim_fee / 1e24:.4f} NEAR (key access)")
         # Step 2: Fetch from IPFS (use internal)
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (use internal)
@@ -493,7 +604,7 @@ async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = No
         decrypted_data = base64.b64decode(decrypted_b64)
         file_hash = hashlib.sha256(decrypted_data).hexdigest()
         print(f"Composite retrieve success: {len(decrypted_data)} bytes, hash={file_hash}")
-        return {"decrypted_b64": decrypted_b64, "file_hash": file_hash}
+        return {"decrypted_b64": decrypted_b64, "file_hash": file_hash, "fee_breakdown": {"claim": est_claim_fee / 1e24}}
     except Exception as e:
         raise Exception(f"Composite retrieve failed: {str(e)}")
 
