@@ -586,7 +586,7 @@ async def composite_upload(group_id: str, user_id: str, data: str, filename: str
 @mcp.tool
 async def composite_retrieve(group_id: str, ipfs_hash: str, account_id: str = None, private_key: str = None, contract_id: str = None) -> dict:
     """Full retrieve: get_key (member) → fetch IPFS → decrypt. Returns {'decrypted_b64': str, 'file_hash': str (for verification)}."""
-    contract_id = contract_id or os.environ["NOVA_CONTRACT_ID"]  # Aligned env
+    contract_id = contract_id or os.environ["CONTRACT_ID"]  # Aligned env
     user_id = account_id or os.environ.get("SIGNER_ACCOUNT_ID", "nova-sdk-4.testnet")  # Derive user_id
     private_key = _validate_near_key(private_key or os.environ.get("NEAR_PRIVATE_KEY", ""))
     if not ipfs_hash.startswith('Qm'):

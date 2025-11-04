@@ -21,7 +21,7 @@ db.exec(`
 const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
 
 // NOVA contract ID from env
-const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-4.testnet';
+const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-5.testnet';
 
 // Set sha512 for noble
 ed25519.hashes.sha512 = sha512;

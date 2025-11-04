@@ -115,8 +115,8 @@ The CLI on Linux may prompt for your sudo password. It builds, pushes Docker ima
 Monitor deployment/logs in the Phala Dashboard. Update APP_CODEHASH in .env if needed (CLI auto-generates).
 
 **Post-Deployment**:
-- Approve code hash on NOVA contract: near call nova-sdk-4.testnet approve_shade_code_hash '{"code_hash": "your-app-code-hash"}' --accountId nova-sdk-4.testnet.
-- Register worker: near call nova-sdk-4.testnet register_shade_worker '{"worker_id": "your-shade-account.testnet", "attestation": "base64-attestation-from-cli"}' --accountId nova-sdk-4.testnet.
+- Approve code hash on NOVA contract: near call nova-sdk-5.testnet approve_shade_code_hash '{"code_hash": "your-app-code-hash"}' --accountId nova-sdk-5.testnet.
+- Register worker: near call nova-sdk-5.testnet register_shade_worker '{"worker_id": "your-shade-account.testnet", "attestation": "base64-attestation-from-cli"}' --accountId nova-sdk-5.testnet.
 
 ---
 
@@ -131,7 +131,7 @@ All routes under /api/key-management; require JSON POST with auth (e.g., from NO
 - Generate Key (Triggered post-group creation):
 ```bash
 POST http://localhost:3000/api/key-management/generate_key
-Body: {"group_id": "test_group", "owner": "nova-sdk-4.testnet"}
+Body: {"group_id": "test_group", "owner": "nova-sdk-5.testnet"}
 ```
 Response: {"key": "base64-random-key", "checksum": "hex-tee-attestation"} (Update checksum on NOVA via update_checksum).
 - Get Key (For authorized users with token):
