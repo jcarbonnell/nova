@@ -1,4 +1,4 @@
-import { NovaSdk, NovaError, Transaction } from '../src/index';
+import { NovaSdk, NovaError, Transaction, FeeBreakdown } from '../src/index';
 import * as NodeCrypto from 'crypto';
 import axios from 'axios';
 
@@ -12,11 +12,16 @@ mockAxiosPost.mockResolvedValue({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(console, 'log').mockImplementation(() => {}); // Mock logs to avoid noise
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 describe('NovaSdk', () => {
   const rpcUrl = 'https://rpc.testnet.near.org';
-  const contractId = 'nova-sdk-4.testnet';
+  const contractId = 'nova-sdk-5.testnet';
   const fakePinataKey = 'fake_key';
   const fakePinataSecret = 'fake_secret';
   const shadeApiUrl = 'https://1b7616f73af7404b06274bb91394525f58f63c53-3000.dstack-prod5.phala.network';
@@ -46,31 +51,47 @@ describe('NovaSdk', () => {
 
   test('getBalance returns yoctoNEAR string', async () => {
     const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const balance = await sdk.getBalance('nova-sdk-4.testnet');
+    const balance = await sdk.getBalance('nova-sdk-5.testnet');
     expect(balance).toMatch(/^\d+$/);
     expect(BigInt(balance)).toBeGreaterThanOrEqual(0n);
   }, 10000);
 
   test('isAuthorized returns false for unauthorized user', async () => {
     const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const authorized = await sdk.isAuthorized('test_group_v2', 'nonexistent.user.testnet');
+    const authorized = await sdk.isAuthorized('test-group-1', 'nonexistent.user.testnet');
     expect(typeof authorized).toBe('boolean');
     expect(authorized).toBe(false);
   }, 10000);
 
+  test('estimateFee returns bigint for known action', async () => {
+    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+    // Mock provider.query to return a sample fee (e.g., 0.001 NEAR = 10^21 yocto)
+    const mockProvider = (sdk as any).provider;
+    const spyQuery = jest.spyOn(mockProvider, 'query');
+    spyQuery.mockResolvedValueOnce({
+      result: '1000000000000000000000' // 10^21 yocto
+    } as any);
+
+    const fee = await sdk.estimateFee('claim_token');
+    expect(fee).toBe(1000000000000000000000n);
+    expect(typeof fee).toBe('bigint');
+
+    spyQuery.mockRestore();
+  });
+
   test('getGroupKey throws for unauthorized user', async () => {
     const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
     await expect(
-      sdk.getGroupKey('test_group_v2', 'nonexistent.user.testnet')
+      sdk.getGroupKey('test-group-1', 'nonexistent.user.testnet')
     ).rejects.toThrow(NovaError);
   }, 10000);
 
   test('getTransactionsForGroup returns array', async () => {
     const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const accountId = process.env.TEST_NEAR_ACCOUNT_ID || 'nova-sdk-4.testnet';
+    const accountId = process.env.TEST_NEAR_ACCOUNT_ID || 'nova-sdk-5.testnet';
     
     try {
-      const transactions = await sdk.getTransactionsForGroup('test_group_v2', accountId);
+      const transactions = await sdk.getTransactionsForGroup('test-group-1', accountId);
       expect(Array.isArray(transactions)).toBe(true);
     } catch (error) {
       expect(error).toBeInstanceOf(NovaError);
@@ -105,6 +126,17 @@ describe('NovaSdk', () => {
       expect(signedSdk).toBe(sdk); // Should return same instance
     }, 10000);
 
+    test('estimateFee returns expected value in integration', async () => {
+      if (shouldSkip) {
+        console.log(skipMessage);
+        return;
+      }
+
+      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
+      const fee = await sdk.estimateFee('claim_token');
+      expect(fee).toBeGreaterThan(0n); // Should be >0 for real contract
+    }, 10000);
+
     test('getGroupKey returns base64 key for authorized user', async () => {
       if (shouldSkip) {
         console.log(skipMessage);
@@ -113,37 +145,44 @@ describe('NovaSdk', () => {
 
       const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       await sdk.withSigner(privateKey!, accountId!);
-  
+
       const mockChecksum = '97a57412d4f963777c711137e491829a1635f9a65787ecc0e5d3d7c6c3e5d3be';
-  
+
       // Mock Shade response
       mockAxiosPost.mockResolvedValueOnce({
         status: 200,
         data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: mockChecksum }
       });
 
-      // Mock provider.query for getGroupChecksum
+      // Mock provider.query for estimate_fee in getGroupKey
       const mockQuery = jest.spyOn((sdk as any).provider, 'query');
       mockQuery.mockResolvedValueOnce({
-        result: Array.from(Buffer.from(JSON.stringify(mockChecksum)))  // Base64 of raw hex bytes (exact decode match)
+        result: '1000000000000000000000' // 0.001 NEAR for estimate_fee
       } as any);
 
-      // Mock claim_token return (callFunction result)
+      // Mock getGroupChecksum: set result to the JSON string directly so decoded = '"hexstr"', parse = 'hexstr'
+      mockQuery.mockResolvedValueOnce({
+        result: JSON.stringify(mockChecksum) // '"hexstr"'
+      } as any);
+
+      // Mock callFunction for claim_token: toString returns base64 of plain token str
       const mockCallFn = jest.spyOn(sdk.account!, 'callFunction');
+      const plainToken = 'payloadB64.sigHex';
       mockCallFn.mockResolvedValueOnce({
-        toString: () => '"payloadB64.sigHex"'  // Mock token string (base64-decode handles)
+        toString: () => Buffer.from(plainToken, 'utf8').toString('base64') // base64 of token str
       } as any);
 
-      // Debug: Log before/after to trace mismatch if any
-      console.log('Test: Mock checksum for Shade/on-chain:', mockChecksum);
-
-      const key = await sdk.getGroupKey('test_group_v2', accountId!);
-      console.log('Test: Retrieved key length:', key.length);
+      const key = await sdk.getGroupKey('test-group-1', accountId!);
+      console.log('Retrieved key length:', key.length);
 
       expect(typeof key).toBe('string');
       expect(key.length).toBeGreaterThan(20);
       const testBuffer = Buffer.from(key, 'base64');
       expect(testBuffer.length).toBeGreaterThan(0);
+
+      // Verify fee log was called (since console.log mocked)
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Key access fee:'));
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Cost breakdown:'));
 
       mockQuery.mockRestore();
       mockCallFn.mockRestore();
@@ -156,7 +195,7 @@ describe('NovaSdk', () => {
       }
 
       const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      const authorized = await sdk.isAuthorized('test_group_v2', accountId!);
+      const authorized = await sdk.isAuthorized('test-group-1', accountId!);
       expect(typeof authorized).toBe('boolean');
     }, 10000);
 
@@ -178,11 +217,18 @@ describe('NovaSdk', () => {
       const testData = Buffer.from('Test data for NOVA SDK: ' + Date.now());
       const filename = `test-v2-${Date.now()}.txt`;
       
-      const uploadResult = await sdk.compositeUpload('test_group_v2', accountId, testData, filename);
+      const uploadResult = await sdk.compositeUpload('test-group-1', accountId, testData, filename);
       
       expect(uploadResult.cid).toMatch(/^Qm[a-zA-Z0-9]{44}$/); // Valid IPFS CID
       expect(uploadResult.file_hash).toMatch(/^[a-f0-9]{64}$/); // SHA256 hex
       expect(uploadResult.trans_id).toBeTruthy();
+
+      // Verify fee_breakdown
+      expect(uploadResult.fee_breakdown).toBeDefined();
+      expect(typeof uploadResult.fee_breakdown.claim).toBe('number');
+      expect(typeof uploadResult.fee_breakdown.record).toBe('number');
+      expect(typeof uploadResult.fee_breakdown.total).toBe('number');
+      expect(uploadResult.fee_breakdown.total).toBeGreaterThanOrEqual(0);
 
       // Mock again for retrieve
       (axios.post as jest.Mock).mockResolvedValueOnce({
@@ -191,10 +237,22 @@ describe('NovaSdk', () => {
       });
 
       // Retrieve the data
-      const retrieveResult = await sdk.compositeRetrieve('test_group_v2', uploadResult.cid);
+      const retrieveResult = await sdk.compositeRetrieve('test-group-1', uploadResult.cid);
       
       expect(retrieveResult.data.toString()).toBe(testData.toString());
       expect(retrieveResult.file_hash).toBe(uploadResult.file_hash);
+
+      // Verify fee_breakdown for retrieve
+      expect(retrieveResult.fee_breakdown).toBeDefined();
+      expect(typeof retrieveResult.fee_breakdown.claim).toBe('number');
+      expect(retrieveResult.fee_breakdown.record).toBeUndefined();
+      expect(typeof retrieveResult.fee_breakdown.total).toBe('number');
+      expect(retrieveResult.fee_breakdown.total).toBeGreaterThanOrEqual(0);
+
+      // Verify logs for fees
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Composite upload fee:'));
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Cost breakdown:'));
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Composite retrieve fee:'));
     }, 30000);
 
     test('transferTokens sends NEAR tokens', async () => {
@@ -220,15 +278,28 @@ describe('NovaSdk', () => {
       const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
       await sdk.withSigner(privateKey!, accountId!);
 
+      // Mock estimate_fee for add_group_member
+      const mockQuery = jest.spyOn((sdk as any).provider, 'query');
+      mockQuery.mockResolvedValueOnce({
+        result: '1000000000000000000000' // 0.001 NEAR
+      } as any);
+
+      // Mock callFunction to simulate error (e.g., not owner) for expected failure
+      const mockCallFn = jest.spyOn(sdk.account!, 'callFunction');
+      mockCallFn.mockRejectedValueOnce(new Error('Only group owner can add')); // Simulate contract error
+
       // Attempt to add a member (may fail if not owner or already exists)
       try {
-        const result = await sdk.addGroupMember('test_group_v2', 'newmember.testnet');
+        const result = await sdk.addGroupMember('test-group-1', 'newmember.testnet');
         expect(result).toBeTruthy();
       } catch (error) {
         // Expected if not group owner or member already exists
         expect(error).toBeInstanceOf(NovaError);
       }
-    }, 30000);
+
+      mockQuery.mockRestore();
+      mockCallFn.mockRestore();
+    }, 5000);
   });
 
   // multi-user specific test
@@ -239,16 +310,24 @@ describe('NovaSdk', () => {
     const mockKey = 'ed25519:3t4Y8x3Y5Z7a9b1c3d5e7f9g1h3i5j7k9m1n3o5p7q9r1s3t5u7v9w1x3y5z7A9B1C';  // Valid alphabet
     await sdkA.withSigner(mockKey, 'userA.testnet');
   
+    // Mock estimate_fee
+    const mockQuery = jest.spyOn((sdkA as any).provider, 'query');
+    mockQuery.mockResolvedValueOnce({
+      result: '50000000000000000000000' // 0.05 NEAR for register
+    } as any);
+
     // Mock callFunction to simulate success (avoids real tx)
-    const mockCallFn = jest.spyOn(sdkA.account!, 'callFunction').mockResolvedValueOnce('Success');
-  
+    const mockCallFn = jest.spyOn(sdkA.account!, 'callFunction');
+    mockCallFn.mockResolvedValueOnce({
+      toString: () => 'Success'
+    } as any);
+
     const registerResult = await sdkA.registerGroup('groupA');
     expect(registerResult).toBe('Success');  // Or parse_outcome returns
   
-    // Mock getGroupOwner
-    const mockQuery = jest.spyOn((sdkA as any).provider, 'query');
+    // Mock getGroupOwner (JSON str for parse)
     mockQuery.mockResolvedValueOnce({
-      result: Array.from(Buffer.from(JSON.stringify('userA.testnet')))  // Base64 of owner str
+      result: '"userA.testnet"' // JSON str
     } as any);
 
     const owner = await sdkA.getGroupOwner('groupA');
@@ -315,7 +394,7 @@ describe('NovaSdk', () => {
       }
       
       await expect(
-        sdk.compositeRetrieve('test_group_v2', 'invalid_cid')
+        sdk.compositeRetrieve('test-group-1', 'invalid_cid')
       ).rejects.toThrow('Invalid CID');
     });
   });

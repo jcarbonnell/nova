@@ -149,13 +149,16 @@ class NovaSdk {
     async updateChecksum(groupId, checksum) {
         if (!this.account)
             throw new NovaError('No signer attached (must be group owner)');
+        const fee = await this.estimateFee('update_checksum');
+        const gasMargin = 50n * 10n ** 12n; // 50 TGas
+        const totalDeposit = fee + gasMargin;
         try {
             const result = await this.account.callFunction({
                 contractId: this.contractId,
                 methodName: 'update_checksum',
                 args: { group_id: groupId, checksum },
-                gas: 50000000000000n, // 50 TGas
-                deposit: 10000000000000000000n, // 0.00001 NEAR
+                gas: 50n * 10n ** 12n, // 50 TGas
+                deposit: totalDeposit,
             });
             return result ? result.toString() : 'Success (group owner only)';
         }
@@ -163,10 +166,30 @@ class NovaSdk {
             throw new NovaError(`Checksum update error: ${e} (ensure caller is group owner)`, e);
         }
     }
+    async estimateFee(action) {
+        try {
+            const result = await this.provider.query({
+                request_type: 'call_function',
+                account_id: this.contractId,
+                method_name: 'estimate_fee',
+                args_base64: buffer_1.Buffer.from(JSON.stringify({ action })).toString('base64'),
+                finality: 'final',
+            });
+            const callResult = result;
+            const decoded = buffer_1.Buffer.from(callResult.result).toString().trim();
+            return BigInt(decoded);
+        }
+        catch (e) {
+            throw new NovaError(`Fee estimate error: ${e}`, e);
+        }
+    }
     async getGroupKey(groupId, userId) {
         if (!this.account || !this.privateKeyStr)
             throw new NovaError('No signer attached');
         try {
+            const fee = await this.estimateFee('claim_token');
+            const gasMargin = 100n * 10n ** 12n; // 100 TGas
+            const totalDeposit = fee + gasMargin;
             // Step 1: Generate payload
             const timestamp = BigInt(Date.now()) * 1000000n; // ms to ns
             const nonceInput = `${groupId}${userId}${timestamp}`;
@@ -207,7 +230,7 @@ class NovaSdk {
                     signature_hex: sigHex
                 },
                 gas: 100000000000000n,
-                deposit: 1000000000000000000n // 0.001 NEAR
+                deposit: totalDeposit,
             });
             if (!claimResult)
                 throw new NovaError('Token claim failed');
@@ -235,6 +258,10 @@ class NovaSdk {
             if ((onChainChecksum || '').trim() !== (checksum || '').trim()) {
                 throw new NovaError('Checksum mismatch: Shade attestation invalid');
             }
+            // Log breakdown
+            const feeNear = Number(fee) / 1e24;
+            console.log(`Key access fee: ${feeNear} NEAR (auth overhead)`);
+            console.log(`Cost breakdown: ${feeNear} NEAR total (est 0.005 IPFS + 0.003 Phala + ${feeNear - 0.008} NOVA)`);
             return key;
         }
         catch (e) {
@@ -258,16 +285,19 @@ class NovaSdk {
             throw new NovaError(`Near RPC error: ${e}`, e);
         }
     }
-    async executeContractCall(methodName, args, depositYocto) {
+    async executeContractCall(methodName, args, action) {
         if (!this.account)
             throw new NovaError('No signer attached');
+        const fee = await this.estimateFee(action);
+        const gasMargin = 300n * 10n ** 12n; // 300 TGas
+        const totalDeposit = fee + gasMargin;
         try {
             const result = await this.account.callFunction({
                 contractId: this.contractId,
                 methodName,
                 args,
                 gas: 300000000000000n,
-                deposit: BigInt(depositYocto),
+                deposit: totalDeposit,
             });
             return result ? result.toString() : 'Success';
         }
@@ -277,15 +307,15 @@ class NovaSdk {
     }
     async registerGroup(groupId) {
         // Caller (signer) becomes group owner automatically
-        return this.executeContractCall('register_group', { group_id: groupId }, '100000000000000000000000');
+        return this.executeContractCall('register_group', { group_id: groupId }, 'register_group');
     }
     async addGroupMember(groupId, userId) {
         // Must be signed as group owner
-        return this.executeContractCall('add_group_member', { group_id: groupId, user_id: userId }, '500000000000000000');
+        return this.executeContractCall('add_group_member', { group_id: groupId, user_id: userId }, 'add_group_member');
     }
     async revokeGroupMember(groupId, userId) {
         // Must be signed as group owner
-        return this.executeContractCall('revoke_group_member', { group_id: groupId, user_id: userId }, '500000000000000000');
+        return this.executeContractCall('revoke_group_member', { group_id: groupId, user_id: userId }, 'revoke_group_member');
     }
     async recordTransaction(groupId, userId, fileHash, ipfsHash) {
         const result = await this.executeContractCall('record_transaction', {
@@ -293,7 +323,7 @@ class NovaSdk {
             user_id: userId,
             file_hash: fileHash,
             ipfs_hash: ipfsHash,
-        }, '2000000000000000000000');
+        }, 'record_transaction');
         return result;
     }
     async transferTokens(toAccount, amountYocto) {
@@ -309,23 +339,41 @@ class NovaSdk {
     }
     async compositeUpload(groupId, userId, data, filename) {
         // Any authorized user (including group owner) can record
-        const keyB64 = await this.getGroupKey(groupId, userId);
+        const claimFee = await this.estimateFee('claim_token');
+        const recordFee = await this.estimateFee('record_transaction');
+        const totalFee = claimFee + recordFee;
+        const gasMargin = 400000000000000n; // 400 TGas for chain
+        const totalDeposit = totalFee + gasMargin; // Used in getGroupKey/record
+        const keyB64 = await this.getGroupKey(groupId, userId); // Handles claim fee internally
         const encryptedB64 = this.encryptData(data, keyB64);
         const cid = await this.ipfsUpload(encryptedB64, filename);
         const fileHash = this.computeHash(data).toString('hex');
-        const transId = await this.recordTransaction(groupId, userId, fileHash, cid);
-        return { cid, trans_id: transId, file_hash: fileHash };
+        const transId = await this.recordTransaction(groupId, userId, fileHash, cid); // Handles record fee
+        const feeBreakdown = {
+            claim: Number(claimFee) / 1e24,
+            record: Number(recordFee) / 1e24,
+            total: Number(totalFee) / 1e24
+        };
+        console.log(`Composite upload fee: ${feeBreakdown.total} NEAR total`);
+        console.log(`Cost breakdown: ${feeBreakdown.total} NEAR (est 0.005 IPFS + 0.003 Phala + ${feeBreakdown.total - 0.008} NOVA)`);
+        return { cid, trans_id: transId, file_hash: fileHash, fee_breakdown: feeBreakdown };
     }
     async compositeRetrieve(groupId, ipfsHash) {
         if (!ipfsHash.startsWith('Qm'))
             throw new NovaError(`Invalid CID: ${ipfsHash}`);
         const userId = this.account.accountId;
-        const keyB64 = await this.getGroupKey(groupId, userId);
+        const claimFee = await this.estimateFee('claim_token');
+        const keyB64 = await this.getGroupKey(groupId, userId); // Handles claim fee
         const encryptedB64 = await this.ipfsRetrieve(ipfsHash);
         const decryptedB64 = this.decryptData(encryptedB64, keyB64);
         const data = buffer_1.Buffer.from(decryptedB64, 'base64');
         const fileHash = this.computeHash(data).toString('hex');
-        return { data, file_hash: fileHash };
+        const feeBreakdown = {
+            claim: Number(claimFee) / 1e24,
+            total: Number(claimFee) / 1e24
+        };
+        console.log(`Composite retrieve fee: ${feeBreakdown.total} NEAR (key access)`);
+        return { data, file_hash: fileHash, fee_breakdown: feeBreakdown };
     }
     encryptData(data, keyB64) {
         const key = buffer_1.Buffer.from(keyB64, 'base64');

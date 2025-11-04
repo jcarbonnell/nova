@@ -1,8 +1,8 @@
 [package]
 name = "nova-sdk-rs"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
-description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on NEAR Protocol with Shade/TEE hybridization and IPFS integration."
+description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on NEAR Protocol with Shade/TEE + fees model."
 license = "MIT"
 repository = "https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs"
 categories = ["cryptography", "network-programming", "science"]

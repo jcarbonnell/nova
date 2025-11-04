@@ -1,3 +1,4 @@
+// nova-sdk-rs v0.3.0 - Supports fees model with estimate and breakdowns
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
@@ -45,16 +46,25 @@ pub struct Transaction {
 
 /// Result structs for composites
 #[derive(Debug)]
+pub struct FeeBreakdown {
+    pub claim: f64,
+    pub record: Option<f64>,
+    pub total: f64,
+}
+
+#[derive(Debug)]
 pub struct CompositeUploadResult {
     pub cid: String,
     pub trans_id: String,
     pub file_hash: String,
+    pub fee_breakdown: FeeBreakdown,
 }
 
 #[derive(Debug)]
 pub struct CompositeRetrieveResult {
     pub data: Vec<u8>,
     pub file_hash: String,
+    pub fee_breakdown: FeeBreakdown,
 }
 
 #[derive(Debug)]
@@ -151,9 +161,33 @@ impl NovaSdk {
 
     /// Updates the Shade checksum for a group (group owner-only, payable).
     pub async fn update_checksum(&self, group_id: &str, checksum: &str) -> Result<String, NovaError> {
+        let fee = self.estimate_fee("update_checksum").await?;
+        let gas = 50_000_000_000_000u64; // 50 TGas
+        let attached_deposit = fee + gas as u128;
         let args = json!({"group_id": group_id, "checksum": checksum}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("update_checksum", args, 50_000_000_000_000, 10_000_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("update_checksum", args, "update_checksum", 50_000_000_000_000, attached_deposit).await?;
         self.parse_outcome(&outcome.transaction_outcome.outcome)
+    }
+
+    /// Estimates fee for an action (yoctoNEAR, read-only view).
+    pub async fn estimate_fee(&self, action: &str) -> Result<u128, NovaError> {
+        let args = json!({"action": action}).to_string().into_bytes();
+        let request = methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::Final),
+            request: QueryRequest::CallFunction {
+                account_id: self.contract_id.clone(),
+                method_name: "estimate_fee".to_string(),
+                args: args.into(),
+            },
+        };
+        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        match response.kind {
+            JsonRpcQueryResponseKind::CallResult(result) => {
+                let fee: u128 = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                Ok(fee)
+            }
+            _ => Err(NovaError::Near("Invalid response kind".to_string())),
+        }
     }
 
     /// Fetches the base64-encoded group key for an authorized user (v2: Shade/TEE flow).
@@ -163,6 +197,10 @@ impl NovaSdk {
             Signer::InMemory(s) => s.account_id.clone(),
             _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
         };
+
+        let fee = self.estimate_fee("claim_token").await?;
+        let gas = 100_000_000_000_000u64; // 100 TGas
+        let _attached_deposit = fee + gas as u128;
 
         // Step 1: Generate payload
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| NovaError::Near("Time error".to_string()))?;
@@ -215,7 +253,7 @@ impl NovaSdk {
             "payload_b64": payload_b64,
             "signature_hex": sig_hex
         }).to_string().into_bytes();
-        let outcome = self.execute_contract_call("claim_token", args, 100_000_000_000_000, 1_000_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("claim_token", args, "claim_token", 100_000_000_000_000, 1_000_000_000_000_000_000).await?;
         let token_b64 = self.parse_outcome_detailed(&outcome.transaction_outcome.outcome)?;
         let token_bytes = general_purpose::STANDARD.decode(&token_b64).map_err(|_| NovaError::Near("Token base64 error".to_string()))?;
         let token = String::from_utf8(token_bytes).map_err(|_| NovaError::Near("Token UTF-8 error".to_string()))?;
@@ -240,6 +278,11 @@ impl NovaSdk {
         if on_chain_str != checksum.trim() {
             return Err(NovaError::ChecksumMismatch);
         }
+
+        // Log breakdown
+        let fee_near = fee as f64 / 1e24;
+        println!("Key access fee: {} NEAR (auth overhead)", fee_near);
+        println!("Cost breakdown: {} NEAR total (est 0.005 IPFS + 0.003 Phala + {:.4} NOVA)", fee_near, fee_near - 0.008);
 
         Ok(key_b64)
     }
@@ -271,9 +314,14 @@ impl NovaSdk {
         &self,
         method_name: &str,
         args: Vec<u8>,
-        gas: u64,
-        attached_deposit: u128,
+        action: &str,
+        _gas: u64,
+        _attached_deposit: u128
     ) -> Result<FinalExecutionOutcomeView, NovaError> {
+        let fee = self.estimate_fee(action).await?;
+        let gas = 300_000_000_000_000u64; // 300 TGas
+        let attached_deposit = fee + gas as u128;
+
         let signer = self.signer.as_ref().ok_or(NovaError::Signing("No signer attached".to_string()))?;
 
         let signer_account_id = match signer {
@@ -338,28 +386,28 @@ impl NovaSdk {
     pub async fn register_group(&self, group_id: &str) -> Result<String, NovaError> {
         // Registers as caller (self-owned)
         let args = json!({"group_id": group_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("register_group", args, 300_000_000_000_000, 100_000_000_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("register_group", args, "register_group", 300_000_000_000_000, 100_000_000_000_000_000_000_000).await?;
         self.parse_outcome(&outcome.transaction_outcome.outcome)
     }
 
     /// Adds a member to a group (owner-only, payable).
     pub async fn add_group_member(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
         let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("add_group_member", args, 300_000_000_000_000, 500_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("add_group_member", args, "add_group_member", 300_000_000_000_000, 500_000_000_000_000_000).await?;
         self.parse_outcome(&outcome.transaction_outcome.outcome)
     }
 
     /// Revokes a member from a group (owner-only, payable, rotates key).
     pub async fn revoke_group_member(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
         let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("revoke_group_member", args, 300_000_000_000_000, 500_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("revoke_group_member", args, "revoke_group_member", 300_000_000_000_000, 500_000_000_000_000_000).await?;
         self.parse_outcome(&outcome.transaction_outcome.outcome)
     }
 
     /// Records a file transaction (owner-only, payable, returns trans_id).
     pub async fn record_transaction(&self, group_id: &str, user_id: &str, file_hash: &str, ipfs_hash: &str) -> Result<String, NovaError> {
         let args = json!({"group_id": group_id, "user_id": user_id, "file_hash": file_hash, "ipfs_hash": ipfs_hash}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("record_transaction", args, 300_000_000_000_000, 2_000_000_000_000_000_000).await?;
+        let outcome = self.execute_contract_call("record_transaction", args, "record_transaction", 300_000_000_000_000, 2_000_000_000_000_000_000).await?;
         match self.parse_outcome_detailed(&outcome.transaction_outcome.outcome) {
             Ok(value) => Ok(value),
             Err(_) => self.parse_outcome(&outcome.transaction_outcome.outcome),
@@ -458,6 +506,13 @@ impl NovaSdk {
         data: &[u8],
         filename: &str,
     ) -> Result<CompositeUploadResult, NovaError> {
+        // Estimate fees
+        let claim_fee = self.estimate_fee("claim_token").await?;
+        let record_fee = self.estimate_fee("record_transaction").await?;
+        let total_fee = claim_fee + record_fee;
+        let gas = 400_000_000_000_000u64; // 400 TGas
+        let _attached_deposit = total_fee + gas as u128;
+
         // Step 1: Fetch group key
         let key_b64 = self.get_group_key(group_id, user_id).await?;
         
@@ -473,10 +528,20 @@ impl NovaSdk {
         // Step 5: Record transaction on blockchain
         let trans_id = self.record_transaction(group_id, user_id, &file_hash, &cid).await?;
         
+        let fee_breakdown = FeeBreakdown {
+            claim: claim_fee as f64 / 1e24,
+            record: Some(record_fee as f64 / 1e24),
+            total: total_fee as f64 / 1e24,
+        };
+
+        println!("Composite upload fee: {} NEAR total", fee_breakdown.total);
+        println!("Cost breakdown: {} NEAR (est 0.005 IPFS + 0.003 Phala + {:.4} NOVA)", fee_breakdown.total, fee_breakdown.total - 0.008);
+
         Ok(CompositeUploadResult {
             cid,
             trans_id,
             file_hash,
+            fee_breakdown,
         })
     }
 
@@ -490,6 +555,11 @@ impl NovaSdk {
         if !ipfs_hash.starts_with("Qm") {
             return Err(NovaError::Near(format!("Invalid CID: {}", ipfs_hash)));
         }
+
+        // Estimate fee
+        let claim_fee = self.estimate_fee("claim_token").await?;
+        let gas = 100_000_000_000_000u64; // 100 TGas
+        let _attached_deposit = claim_fee + gas as u128;
         
         // Step 1: Get user_id from signer
         let user_id = match &self.signer {
@@ -512,9 +582,18 @@ impl NovaSdk {
             .map_err(|_| NovaError::InvalidKey)?;
         let file_hash = hex_encode(&sha256_hash(&decrypted_bytes));
         
+        let fee_breakdown = FeeBreakdown {
+            claim: claim_fee as f64 / 1e24,
+            record: None,
+            total: claim_fee as f64 / 1e24,
+        };
+
+        println!("Composite retrieve fee: {} NEAR (key access)", fee_breakdown.total);
+
         Ok(CompositeRetrieveResult {
             data: decrypted_bytes,
             file_hash,
+            fee_breakdown,
         })
     }
 
@@ -670,17 +749,18 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use rand::RngCore;
+    use std::env;
 
     #[tokio::test]
     async fn test_new() {
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",
+            "nova-sdk-5.testnet",
             "fake_key",
             "fake_secret",
             "https://fake-shade.phala.network",
         );
-        assert_eq!(sdk.contract_id.as_str(), "nova-sdk-4.testnet");
+        assert_eq!(sdk.contract_id.as_str(), "nova-sdk-5.testnet");
         assert_eq!(sdk.shade_api_url, "https://fake-shade.phala.network");
         assert!(sdk.signer.is_none());
     }
@@ -689,7 +769,7 @@ mod tests {
     async fn test_with_signer_valid_format() {
         let private_key = "ed25519:ABC123dummybase58key32bytesencodedhereforrusttest";
         let account_id = "test.account.testnet";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake").with_signer(private_key, account_id);
+        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake").with_signer(private_key, account_id);
         assert!(matches!(result.err().unwrap(), NovaError::Signing(_)));
     }
 
@@ -697,14 +777,14 @@ mod tests {
     async fn test_with_signer_invalid_account() {
         let private_key = "ed25519:dummy";
         let invalid_account = "invalid@account";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake").with_signer(private_key, invalid_account);
+        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake").with_signer(private_key, invalid_account);
         assert!(matches!(result.err().unwrap(), NovaError::ParseAccount));
     }
 
     #[tokio::test]
     async fn test_get_balance() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
-        let balance = sdk.get_balance("nova-sdk-4.testnet").await.unwrap();
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
+        let balance = sdk.get_balance("nova-sdk-5.testnet").await.unwrap();
         let bal_str = balance.to_string();
         assert!(!bal_str.is_empty());
         assert!(bal_str.parse::<u128>().is_ok());
@@ -712,7 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_authorized() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let result = sdk.is_authorized("test_group", "random.user.testnet").await;
         // Assert on error for non-existent group/unauthorized (contract panics as expected)
         assert!(result.is_err(), "Should error on non-existent group or unauthorized");
@@ -724,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_group_checksum() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let checksum = sdk.get_group_checksum("test_group").await.unwrap();
         // May be None if not set
         if let Some(cs) = checksum {
@@ -734,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_group_key_unauthorized() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         // Valid-format but dummy/invalid key (base58-compliant 64 chars; won't auth on contract)
         let invalid_priv = "ed25519:3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r";
         let invalid_user = "random.user.testnet";
@@ -756,23 +836,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_group_key_authorized_integration() {
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if account_id.is_none() {
             println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
             return;
         }
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
         if private_key.is_none() {
             println!("Skipping: TEST_NEAR_PRIVATE_KEY not set");
             return;
         }
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",
-            "fake",
-            "fake",
-            "https://fake-shade.phala.network"
-        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
+            .with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
         let key = sdk.get_group_key("test_group", &account_id.unwrap()).await.unwrap();
         assert!(!key.is_empty());
         assert!(key.len() > 20);
@@ -780,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_transactions_for_group() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let result = sdk.get_transactions_for_group("test_group", "random.user.testnet").await;
         match result {
             Ok(txs) => assert!(txs.is_empty()),
@@ -790,12 +865,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_transactions_for_group_integration() {
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if account_id.is_none() {
             println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let txs = sdk.get_transactions_for_group("test_group", &account_id.unwrap()).await.unwrap();
         println!("Retrieved {} transactions for group", txs.len());
         if !txs.is_empty() {
@@ -805,7 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_view_invalid_group() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let result = sdk.is_authorized("nonexistent_group_123", "test.user.testnet").await;
         assert!(result.is_err());
         assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
@@ -814,19 +889,19 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "No signer attached")]
     async fn test_register_group_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let _ = sdk.register_group("new_test_group").await.unwrap();
     }
 
     #[tokio::test]
     async fn test_register_group_existing() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_register_group_existing: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
         let result = sdk.register_group("test_group").await;
         assert!(result.is_err());
@@ -835,13 +910,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_group_member() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_add_group_member: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
         let result = sdk.add_group_member("test_group", "new.member.testnet").await;
         match result {
@@ -853,19 +928,19 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "No signer attached")]
     async fn test_revoke_group_member_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let _ = sdk.revoke_group_member("test_group", "test.user.testnet").await.unwrap();
     }
 
     #[tokio::test]
     async fn test_revoke_group_member_invalid_user() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_revoke_group_member_invalid_user: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
         let result = sdk.revoke_group_member("test_group", "non.member.testnet").await;
         assert!(result.is_err());
@@ -874,13 +949,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_transaction_integration() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_record_transaction_integration: Credentials not set");
             return;
         }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake")
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
             .with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
         let dummy_file_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let dummy_ipfs_hash = "QmDummyCIDForTest";
@@ -896,23 +971,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_upload_integration() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_composite_upload_integration: Credentials not set");
             return;
         }
-        let pinata_key = std::env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
             println!("Skipping: PINATA_API_KEY not set");
             std::process::exit(0);
         });
-        let pinata_secret = std::env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
             println!("Skipping: PINATA_SECRET_KEY not set");
             std::process::exit(0);
         });
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",
+            "nova-sdk-5.testnet",
             &pinata_key,
             &pinata_secret,
             "https://fake-shade.phala.network"
@@ -923,30 +998,33 @@ mod tests {
         println!("   CID: {}", result.cid);
         println!("   Trans ID: {}", result.trans_id);
         println!("   File Hash: {}", result.file_hash);
+        println!("   Fee Breakdown: claim={} NEAR, record={} NEAR, total={} NEAR", 
+                 result.fee_breakdown.claim, result.fee_breakdown.record.unwrap_or(0.0), result.fee_breakdown.total);
         assert!(!result.cid.is_empty());
         assert!(!result.trans_id.is_empty());
         assert_eq!(result.file_hash.len(), 64);
+        assert!(result.fee_breakdown.total > 0.0, "Total fee should be positive");
     }
 
     #[tokio::test]
     async fn test_composite_retrieve_integration() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_composite_retrieve_integration: Credentials not set");
             return;
         }
-        let pinata_key = std::env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
             println!("Skipping: PINATA_API_KEY not set");
             std::process::exit(0);
         });
-        let pinata_secret = std::env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
             println!("Skipping: PINATA_SECRET_KEY not set");
             std::process::exit(0);
         });
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",
+            "nova-sdk-5.testnet",
             &pinata_key,
             &pinata_secret,
             "https://fake-shade.phala.network"
@@ -958,14 +1036,17 @@ mod tests {
         println!("✅ Composite retrieve success:");
         println!("   File Hash: {}", retrieve_result.file_hash);
         println!("   Decrypted data length: {} bytes", retrieve_result.data.len());
+        println!("   Fee Breakdown: claim={} NEAR, total={} NEAR", 
+                 retrieve_result.fee_breakdown.claim, retrieve_result.fee_breakdown.total);
         assert_eq!(retrieve_result.data, original_bytes);
         assert_eq!(retrieve_result.file_hash.len(), 64);
+        assert!(retrieve_result.fee_breakdown.total > 0.0, "Total fee should be positive");
         println!("✅ Decrypted data matches original ({} bytes)", retrieve_result.data.len());
     }
 
     #[tokio::test]
     async fn test_composite_upload_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let test_data = b"test data";
         let result = sdk.composite_upload("test_group", "user.testnet", test_data, "test.txt").await;
         assert!(result.is_err());
@@ -973,7 +1054,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_retrieve_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let result = sdk.composite_retrieve("test_group", "QmDummyCID").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), NovaError::Signing(_)));
@@ -981,7 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_encrypt_decrypt_binary() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-4.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
         let mut key_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key_bytes);
         let key_b64 = general_purpose::STANDARD.encode(key_bytes);
@@ -994,15 +1075,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_checksum_integration() {
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
         if account_id.is_none() || private_key.is_none() {
             println!("Skipping test_update_checksum_integration: Credentials not set");
             return;
         }
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",  // Your deployed multi-user contract
+            "nova-sdk-5.testnet",  // Your deployed multi-user contract
             "fake", "fake", "https://fake-shade.phala.network"
         )
         .with_signer(&private_key.unwrap(), &account_id.unwrap())
@@ -1032,8 +1113,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_checksum_non_owner() {
-        let private_key = std::env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = std::env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
         if private_key.is_none() || account_id.is_none() {
             println!("Skipping test_update_checksum_non_owner: Credentials not set");
             return;
@@ -1042,7 +1123,7 @@ mod tests {
         // Create SDK with a "non-owner" (use a dummy account if available; here assume test account isn't owner of existing group)
         let sdk = NovaSdk::new(
             "https://rpc.testnet.near.org",
-            "nova-sdk-4.testnet",
+            "nova-sdk-5.testnet",
             "fake", "fake", "https://fake-shade.phala.network"
         )
         .with_signer(&private_key.unwrap(), &account_id.unwrap())  // Assume this account isn't owner of 'test_group'
@@ -1058,5 +1139,86 @@ mod tests {
         assert!(err.to_string().contains("Only group owner can update checksum"), "Error should indicate auth failure");
 
         println!("✅ update_checksum non-owner failure confirmed");
+    }
+
+    #[tokio::test]
+    async fn test_estimate_fee() {
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
+        let fee = sdk.estimate_fee("claim_token").await.unwrap();
+        assert!(fee > 0, "Fee should be positive (default 0.001 NEAR = 1e21 yocto)");
+        assert!(fee == 1_000_000_000_000_000_000u128, "Should match default claim_token fee");
+    }
+
+    #[tokio::test]
+    async fn test_estimate_fee_unknown_action() {
+        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
+        let fee = sdk.estimate_fee("nonexistent_action").await.unwrap();
+        assert_eq!(fee, 0, "Unknown action should return 0");
+    }
+
+    #[tokio::test]
+    async fn test_composite_upload_fee_breakdown() {
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        if private_key.is_none() || account_id.is_none() {
+            println!("Skipping test_composite_upload_fee_breakdown: Credentials not set");
+            return;
+        }
+        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_API_KEY not set");
+            std::process::exit(0);
+        });
+        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_SECRET_KEY not set");
+            std::process::exit(0);
+        });
+        let sdk = NovaSdk::new(
+            "https://rpc.testnet.near.org",
+            "nova-sdk-5.testnet",
+            &pinata_key,
+            &pinata_secret,
+            "https://fake-shade.phala.network"
+        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
+        let test_data = b"Test data for fee breakdown";
+        let result = sdk.composite_upload("test_group", &account_id.unwrap(), test_data, "fee_test.txt").await.unwrap();
+        let breakdown = &result.fee_breakdown;
+        assert!(breakdown.claim > 0.0, "Claim fee should be positive");
+        assert!(breakdown.record.unwrap_or(0.0) > 0.0, "Record fee should be positive");
+        assert_eq!(breakdown.total, breakdown.claim + breakdown.record.unwrap_or(0.0), "Total should sum claim + record");
+        println!("✅ Fee breakdown: claim={} NEAR, record={} NEAR, total={} NEAR", 
+                 breakdown.claim, breakdown.record.unwrap_or(0.0), breakdown.total);
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_fee_breakdown() {
+        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
+        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
+        if private_key.is_none() || account_id.is_none() {
+            println!("Skipping test_composite_retrieve_fee_breakdown: Credentials not set");
+            return;
+        }
+        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_API_KEY not set");
+            std::process::exit(0);
+        });
+        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
+            println!("Skipping: PINATA_SECRET_KEY not set");
+            std::process::exit(0);
+        });
+        let sdk = NovaSdk::new(
+            "https://rpc.testnet.near.org",
+            "nova-sdk-5.testnet",
+            &pinata_key,
+            &pinata_secret,
+            "https://fake-shade.phala.network"
+        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
+        let original_bytes = b"Test data for retrieve fee breakdown";
+        let upload_result = sdk.composite_upload("test_group", &account_id.unwrap(), original_bytes, "fee_retrieve_test.txt").await.unwrap();
+        let cid = &upload_result.cid;
+        let retrieve_result = sdk.composite_retrieve("test_group", cid).await.unwrap();
+        let breakdown = &retrieve_result.fee_breakdown;
+        assert!(breakdown.claim > 0.0, "Claim fee should be positive");
+        assert!(breakdown.total == breakdown.claim, "Total should equal claim for retrieve");
+        println!("✅ Retrieve fee breakdown: claim={} NEAR, total={} NEAR", breakdown.claim, breakdown.total);
     }
 }

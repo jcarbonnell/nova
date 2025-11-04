@@ -5,14 +5,21 @@ export interface Transaction {
     file_hash: string;
     ipfs_hash: string;
 }
+export interface FeeBreakdown {
+    claim: number;
+    record?: number;
+    total: number;
+}
 export interface CompositeUploadResult {
     cid: string;
     trans_id: string;
     file_hash: string;
+    fee_breakdown: FeeBreakdown;
 }
 export interface CompositeRetrieveResult {
     data: Buffer;
     file_hash: string;
+    fee_breakdown: FeeBreakdown;
 }
 export declare class NovaError extends Error {
     cause?: Error | undefined;
@@ -33,6 +40,7 @@ export declare class NovaSdk {
     getGroupChecksum(groupId: string): Promise<string | null>;
     getGroupOwner(groupId: string): Promise<string | null>;
     updateChecksum(groupId: string, checksum: string): Promise<string>;
+    estimateFee(action: string): Promise<bigint>;
     getGroupKey(groupId: string, userId: string): Promise<string>;
     getTransactionsForGroup(groupId: string, userId: string): Promise<Transaction[]>;
     private executeContractCall;
