@@ -10,6 +10,7 @@ use near_sdk::NearToken;
 use hex;
 use near_sdk::base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use sha2::{Sha256, Digest};
+use std::str::FromStr;
 
 // Define the contract structure
 #[near(contract_state)]
@@ -100,9 +101,10 @@ impl Contract {
     
     // Owner-only method to update fee per action
     #[payable]
-    pub fn set_fee(&mut self, action: String, fee_yocto: u128) {
+    pub fn set_fee(&mut self, action: String, fee_yocto: String) {
         let caller = env::predecessor_account_id();
         assert_eq!(caller, self.owner, "Only owner can set fees");
+        let fee_yocto = u128::from_str(&fee_yocto).expect("Invalid u128 fee");
         self.fees.insert(action.clone(), fee_yocto);
         log!("Fee set for {}: {} yoctoNEAR", action, fee_yocto);
     }
@@ -969,7 +971,6 @@ mod tests {
         contract.request_signature("invalid_path".to_string(), vec![0u8; 32], "Ecdsa".to_string());
     }
 
-    // NEW: Tests for fee management
     #[test]
     fn set_fee_works() {
         let owner: AccountId = "owner.testnet".parse().unwrap();
@@ -980,7 +981,7 @@ mod tests {
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
         let new_fee = 100_000_000_000_000_000_000u128;  // 0.1 NEAR
-        contract.set_fee("register_group".to_string(), new_fee);
+        contract.set_fee("register_group".to_string(), new_fee.to_string());
         assert_eq!(contract.estimate_fee("register_group".to_string()), new_fee);
     }
 
@@ -996,7 +997,7 @@ mod tests {
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
         context = get_context(non_owner, 0);
         testing_env!(context.build());
-        contract.set_fee("register_group".to_string(), 1_000_000_000_000_000_000u128);
+        contract.set_fee("register_group".to_string(), "1000000000000000000".to_string());
     }
 
     #[test]
