@@ -21,7 +21,7 @@ from cryptography.hazmat.backends import default_backend
 import base58
 import py_near
 from py_near.account import Account
-from py_near.exceptions import CallFailedError
+from py_near.exceptions import ExecutionError
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth.providers.auth0 import Auth0Provider
@@ -255,7 +255,7 @@ async def get_user_signer(near_account_id: str, session_token: str) -> Account:
                     # Validate response (mimic py_near)
                     status = result.get("status", {})
                     if "SuccessValue" not in status:
-                        raise CallFailedError(f"Relayer failed: {result.get('error', 'Unknown')}")
+                        raise ExecutionError(f"Relayer failed: {result.get('error', 'Unknown')}")
                     
                     logger.info(f"Relayer tx success for {self.account_id} (attempt {attempt + 1})")
                     return {"status": status}  # py_near format
@@ -266,15 +266,15 @@ async def get_user_signer(near_account_id: str, session_token: str) -> Account:
                         logger.warning(f"Relayer retry {attempt + 1}/{max_retries} (status: {e.response.status_code}); wait {wait}ms")
                         await asyncio.sleep(wait / 1000)
                         continue
-                    raise CallFailedError(f"Relayer HTTP error: {e.response.status_code} - {e.response.text[:100]}")
+                    raise ExecutionError(f"Relayer HTTP error: {e.response.status_code} - {e.response.text[:100]}")
                 except httpx.TimeoutException:
                     if attempt < max_retries - 1:
                         logger.warning(f"Relayer timeout; retry {attempt + 1}/{max_retries}")
                         await asyncio.sleep(2 ** attempt)
                         continue
-                    raise CallFailedError("Relayer timeout after retries")
+                    raise ExecutionError("Relayer timeout after retries")
                 except Exception as e:
-                    raise CallFailedError(f"Relayer unexpected error: {str(e)}")
+                    raise ExecutionError(f"Relayer unexpected error: {str(e)}")
 
     # Base Account for views (unchanged)
     return RelayerAccount(near_account_id, RPC_URL)
