@@ -4,6 +4,6 @@ py_near_primitives==0.2.4
 pynacl==1.6.0
 base58==2.1.1
 loguru==0.7.3
-httpx==0.28.1
-uvicorn==0.30.1
+httpx>=0.28.1
+uvicorn>=0.38.0
 cryptography==43.0.1
