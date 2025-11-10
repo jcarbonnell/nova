@@ -1,4 +1,5 @@
 fastmcp==2.13.0.2
+fastapi==0.121.1
 py_near==1.1.59
 py_near_primitives==0.2.4
 pynacl==1.6.0
