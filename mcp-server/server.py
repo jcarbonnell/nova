@@ -30,14 +30,22 @@ import uvicorn
 # Load .env variables
 load_dotenv()
 SHADE_API_URL = os.environ.get("SHADE_API_URL", "")
-AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "your-domain.auth0.com")  # From Auth0 dashboard
+AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
+if not AUTH0_DOMAIN:
+    raise ValueError("AUTH0_DOMAIN env var required")
 AUTH0_AUDIENCE = os.environ.get("AUTH0_AUDIENCE", "https://nova-mcp.fastmcp.app")
-AUTH0_ISSUER = f"https://{AUTH0_DOMAIN}/"
+AUTH0_ISSUER = os.environ.get("AUTH0_ISSUER", "")
+AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID")
+AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET")
+if not (AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET):
+    raise ValueError("AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET env vars required")
 CONTRACT_ID = os.environ.get("CONTRACT_ID", "nova-sdk-5.testnet")
 RPC_URL = os.environ.get("RPC_URL", "https://rpc.testnet.near.org")
 PINATA_GATEWAY = os.environ.get("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.environ.get("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.environ.get("IPFS_API_SECRET", "")
+if not (IPFS_API_KEY and IPFS_API_SECRET):
+    raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required")
 RELAYER_URL = os.environ.get("RELAYER_URL", "https://relayer.testnet.near.org")
 
 # Logging setup
@@ -106,9 +114,9 @@ def get_user_session(session_token: str) -> Optional[Dict[str, Any]]:
 
 # Auth0 Provider setup
 auth_provider = Auth0Provider(
-    domain=AUTH0_DOMAIN,
-    client_id=os.environ["AUTH0_CLIENT_ID"],
-    client_secret=os.environ["AUTH0_CLIENT_SECRET"],
+    config_url=f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration",
+    client_id=AUTH0_CLIENT_ID,
+    client_secret=AUTH0_CLIENT_SECRET,
     audience=AUTH0_AUDIENCE,
     base_url="https://nova-mcp.fastmcp.app",
     allowed_redirects=["http://localhost:*", "https://nova-sdk.com:*"]
@@ -130,8 +138,8 @@ async def auth_callback(request: Request):
             f"https://{AUTH0_DOMAIN}/oauth/token",
             data={
                 "grant_type": "authorization_code",
-                "client_id": os.environ["AUTH0_CLIENT_ID"],
-                "client_secret": os.environ["AUTH0_CLIENT_SECRET"],
+                "client_id": AUTH0_CLIENT_ID,
+                "client_secret": AUTH0_CLIENT_SECRET,
                 "code": code,
                 "redirect_uri": "https://nova-sdk.com/callback"
             }
