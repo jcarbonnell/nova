@@ -34,7 +34,7 @@ AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
 if not AUTH0_DOMAIN:
     raise ValueError("AUTH0_DOMAIN env var required")
 AUTH0_AUDIENCE = os.environ.get("AUTH0_AUDIENCE", "https://nova-mcp.fastmcp.app")
-AUTH0_ISSUER = os.environ.get("AUTH0_ISSUER", "")
+AUTH0_ISSUER = os.environ.get("AUTH0_ISSUER", "") or f"https://{AUTH0_DOMAIN}/"
 AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET")
 if not (AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET):
@@ -118,8 +118,7 @@ auth_provider = Auth0Provider(
     client_id=AUTH0_CLIENT_ID,
     client_secret=AUTH0_CLIENT_SECRET,
     audience=AUTH0_AUDIENCE,
-    base_url="https://nova-mcp.fastmcp.app",
-    allowed_redirects=["http://localhost:*", "https://nova-sdk.com:*"]
+    base_url="https://nova-mcp.fastmcp.app"
 )
 
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
