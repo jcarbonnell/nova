@@ -130,7 +130,7 @@ auth_provider = RemoteAuthProvider(
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # FastAPI for callback 
-app = mcp.http_app
+app = mcp.http_app()
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
@@ -1140,4 +1140,4 @@ async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract
         return False
 
 if __name__ == "__main__":
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
