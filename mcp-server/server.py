@@ -124,7 +124,7 @@ auth_provider = Auth0Provider(
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # FastAPI for callback 
-app = mcp.http_app()
+app = mcp.http_app
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
