@@ -130,7 +130,7 @@ auth_provider = RemoteAuthProvider(
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # Use @mcp.route for custom HTTP endpoint
-@mcp.route(methods=["GET"], path="/auth/callback")
+@mcp.custom_route("/auth/callback", methods=["GET"])
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
     if not code:
