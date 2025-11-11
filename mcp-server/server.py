@@ -127,6 +127,24 @@ auth_provider = RemoteAuthProvider(
     base_url="https://nova-mcp.fastmcp.app"
 ) if AUTH0_DOMAIN else None
 
+# define middleware for authentication
+async def auth_middleware(ctx: Context):
+    token = ctx.token  # From auth_provider
+    if not token:
+        raise ValueError("Missing auth token")
+    try:
+        claims = auth_provider.token_verifier.verify(token)
+        email = claims.get("email")
+        session_token = claims.get("sub")
+        near_account_id = claims.get("near_account_id", claims.get("near"))  # From callback
+        if email:
+            store_user_email(email, session_token, near_account_id)
+        ctx.state.user = {"email": email, "session_token": session_token, "near_account_id": near_account_id}
+        logger.info(f"Auth success for {email}")
+    except Exception as e:
+        logger.error(f"Auth middleware error: {e}")
+        raise ValueError(f"Invalid token: {str(e)}")
+
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # Use @mcp.route for custom HTTP endpoint
@@ -199,25 +217,6 @@ async def create_near_account(email: str, id_token: str) -> str:
             logger.error(f"Relayer general error: {e}")
             raise ValueError(f"Relayer unavailable: {str(e)}")
 
-# Middleware: Use ctx for token/user injection
-@mcp.middleware
-async def auth_middleware(ctx: Context):
-    token = ctx.token  # From auth_provider
-    if not token:
-        raise ValueError("Missing auth token")
-    try:
-        claims = auth_provider.token_verifier.verify(token)
-        email = claims.get("email")
-        session_token = claims.get("sub")
-        near_account_id = claims.get("near_account_id", claims.get("near"))  # From callback
-        if email:
-            store_user_email(email, session_token, near_account_id)
-        ctx.state.user = {"email": email, "session_token": session_token, "near_account_id": near_account_id}
-        logger.info(f"Auth success for {email}")
-    except Exception as e:
-        logger.error(f"Auth middleware error: {e}")
-        raise ValueError(f"Invalid token: {str(e)}")
-
 # Relayer signer (no privkey; chain sigs via relayer)
 async def get_user_signer(near_account_id: str, session_token: str) -> Account:
     """Production relayer signer: Submits unsigned txs via NEAR MGR v1 (chain sigs).
@@ -288,11 +287,6 @@ async def get_user_signer(near_account_id: str, session_token: str) -> Account:
 
     # Base Account for views (unchanged)
     return RelayerAccount(near_account_id, RPC_URL)
-
-# Wrap sync helpers (e.g., ipfs_upload)
-async def _async_ipfs_upload(encrypted_b64: str, filename: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _ipfs_upload, encrypted_b64, filename)
 
 def _validate_near_key(private_key: str) -> str:
     """Light validation: base58, with optional ed25519: prefix."""
