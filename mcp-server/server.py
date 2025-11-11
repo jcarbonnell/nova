@@ -556,7 +556,6 @@ async def _get_dynamic_fee(contract_id: str, action: str, file_size_gb: float = 
 
 # Tools for direct external use
 @mcp.tool
-@mcp.requires_auth
 async def ipfs_upload(data: str, filename: str) -> str:
     """Uploads encrypted data to IPFS via Pinata and returns CID."""
     data_bytes = base64.b64decode(data)
@@ -573,19 +572,16 @@ async def ipfs_upload(data: str, filename: str) -> str:
         raise Exception(f"Upload failed: {response.text}")
 
 @mcp.tool
-@mcp.requires_auth
 async def ipfs_retrieve(cid: str) -> str:  # Returns base64 bytes (now async)
     """Retrieves data from IPFS via Pinata gateway."""
     return await _ipfs_retrieve(cid)
 
 @mcp.tool
-@mcp.requires_auth
 def encrypt_data(data: str, key: str) -> str:  # Input b64 data/key; return b64 encrypted
     """Encrypts base64 data with AES-CBC key (32 bytes padded)."""
     return _encrypt_data(data, key)
 
 @mcp.tool
-@mcp.requires_auth
 def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
     """Decrypts base64 encrypted data with AES-CBC key."""
     return _decrypt_data(encrypted, key)
@@ -718,7 +714,6 @@ async def delete_data(ctx: Context, reason: str = "user_request") -> str:
 
 # Tools for NOVA contract interaction (requires valid auth)
 @mcp.tool
-@mcp.requires_auth
 async def register_group(ctx: Context, group_id: str) -> str:
     """Registers new group on NOVA contract as the authenticated user (owner)."""
     user = ctx.state.get('user')
@@ -799,7 +794,6 @@ async def register_group(ctx: Context, group_id: str) -> str:
         raise ValueError(f"Register failed (relayer submission): {str(e)}")
 
 @mcp.tool
-@mcp.requires_auth
 async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Adds member to group (owner only, uses authenticated session)."""
     user = ctx.state.get('user')
@@ -852,7 +846,6 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
         raise ValueError(f"Add failed (relayer submission): {str(e)}")
 
 @mcp.tool
-@mcp.requires_auth
 async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Revokes member from group (owner only, rotates key, uses authenticated session)."""
     user = ctx.state.get('user')
@@ -918,7 +911,6 @@ async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> st
         raise ValueError(f"Revoke failed (relayer submission): {str(e)}")
 
 @mcp.tool
-@mcp.requires_auth
 async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: str, user_id: Optional[str] = None, contract_id: str = None) -> str:
     """Retrieves key: Pass pre-signed payload_b64 (JSON base64) and sig_hex (Ed25519 on raw payload).
     Sign client-side with user's key before calling. user_id optional: defaults to session user.
@@ -945,7 +937,6 @@ async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: 
 
 
 @mcp.tool
-@mcp.requires_auth
 async def record_near_transaction(ctx: Context, group_id: str, user_id: str, file_hash: str, ipfs_hash: str, contract_id: str = None) -> str:
     """Records file tx on NOVA contract (uses session signer)."""
     user = ctx.state.get('user')
@@ -965,7 +956,6 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
         raise ValueError(f"Record failed: {str(e)}")
 
 @mcp.tool
-@mcp.requires_auth
 async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
     """Full upload: get_key → encrypt → IPFS pin → record tx (uses session). Client provides signed payload_b64/sig_hex."""
     user = ctx.state.get('user')
@@ -1014,7 +1004,6 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
         raise RuntimeError(f"Composite upload failed: {str(e)}")
     
 @mcp.tool
-@mcp.requires_auth
 async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
     """Full retrieve: get_key → fetch IPFS → decrypt (uses session). Client provides signed payload_b64/sig_hex for key."""
     user = ctx.state.get('user')
