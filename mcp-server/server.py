@@ -19,9 +19,9 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 import base58
-import py_near
-from py_near.account import Account
-from py_near.exceptions import ExecutionError
+import pynear
+from pynear.account import Account
+from pynear.exceptions import ExecutionError
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth.providers.auth0 import Auth0Provider
