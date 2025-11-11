@@ -124,8 +124,7 @@ token_verifier = JWTVerifier(
 auth_provider = RemoteAuthProvider(
     token_verifier=token_verifier,
     authorization_servers=[AUTH0_ISSUER] if AUTH0_DOMAIN else [],
-    base_url="https://nova-mcp.fastmcp.app",
-    allowed_client_redirect_uris=["http://localhost:*", "https://nova-sdk.com:*"]
+    base_url="https://nova-mcp.fastmcp.app"
 ) if AUTH0_DOMAIN else None
 
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
