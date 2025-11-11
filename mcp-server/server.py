@@ -23,7 +23,8 @@ import py_near
 from py_near.account import Account
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
-from fastmcp.server.auth.providers.auth0 import Auth0Provider
+from fastmcp.server.auth import RemoteAuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 import httpx
 import uvicorn
 
@@ -34,7 +35,7 @@ AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
 if not AUTH0_DOMAIN:
     raise ValueError("AUTH0_DOMAIN env var required")
 AUTH0_AUDIENCE = os.environ.get("AUTH0_AUDIENCE", "https://nova-mcp.fastmcp.app")
-AUTH0_ISSUER = os.environ.get("AUTH0_ISSUER", "") or f"https://{AUTH0_DOMAIN}/"
+AUTH0_ISSUER = os.environ.get("AUTH0_ISSUER", "")
 AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET")
 if not (AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET):
@@ -111,15 +112,21 @@ def get_user_session(session_token: str) -> Optional[Dict[str, Any]]:
         if row:
             return {"id": row[0], "email": row[1], "near_account_id": row[2], "consent_given": bool(row[3])}
         return None
-
-# Auth0 Provider setup
-auth_provider = Auth0Provider(
-    config_url=f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration",
-    client_id=AUTH0_CLIENT_ID,
-    client_secret=AUTH0_CLIENT_SECRET,
-    audience=AUTH0_AUDIENCE,
-    base_url="https://nova-mcp.fastmcp.app"
+    
+# Auth0 JWT Verifier (generic OIDC)
+token_verifier = JWTVerifier(
+    jwks_uri=f"https://{AUTH0_DOMAIN}/.well-known/jwks.json" if AUTH0_DOMAIN else None,
+    issuer=AUTH0_ISSUER if AUTH0_DOMAIN else None,
+    audience=AUTH0_AUDIENCE
 )
+
+# RemoteAuthProvider (OIDC for Auth0)
+auth_provider = RemoteAuthProvider(
+    token_verifier=token_verifier,
+    authorization_servers=[AUTH0_ISSUER] if AUTH0_DOMAIN else [],
+    base_url="https://nova-mcp.fastmcp.app",
+    allowed_client_redirect_uris=["http://localhost:*", "https://nova-sdk.com:*"]
+) if AUTH0_DOMAIN else None
 
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
