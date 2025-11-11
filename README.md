@@ -92,7 +92,7 @@ nova-sdk-rs = "0.1.0"
 
 ## Quick Start Examples
 
-### MCP Server (Natural Language)
+### Chat in natural language at [https://nova-sdk.com](https://nova-sdk.com)
 ```
 You: "Create a group called 'research_team' and upload this data securely"
 Claude: [uses NOVA MCP tools to claim token, fetch TEE key, encrypt, upload to IPFS, and record on NEAR]
