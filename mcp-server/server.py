@@ -19,9 +19,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 import base58
-import pynear
-from pynear.account import Account
-from pynear.exceptions import ExecutionError
+import py_near
+from py_near.account import Account
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth.providers.auth0 import Auth0Provider
@@ -255,10 +254,10 @@ async def get_user_signer(near_account_id: str, session_token: str) -> Account:
                     # Validate response (mimic py_near)
                     status = result.get("status", {})
                     if "SuccessValue" not in status:
-                        raise ExecutionError(f"Relayer failed: {result.get('error', 'Unknown')}")
+                        raise ValueError(f"Relayer failed: {result.get('error', 'Unknown')}")
                     
                     logger.info(f"Relayer tx success for {self.account_id} (attempt {attempt + 1})")
-                    return {"status": status}  # py_near format
+                    return {"status": status}
                     
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code in (429, 503) and attempt < max_retries - 1:
@@ -266,15 +265,15 @@ async def get_user_signer(near_account_id: str, session_token: str) -> Account:
                         logger.warning(f"Relayer retry {attempt + 1}/{max_retries} (status: {e.response.status_code}); wait {wait}ms")
                         await asyncio.sleep(wait / 1000)
                         continue
-                    raise ExecutionError(f"Relayer HTTP error: {e.response.status_code} - {e.response.text[:100]}")
+                    raise ValueError(f"Relayer HTTP error: {e.response.status_code} - {e.response.text[:100]}")
                 except httpx.TimeoutException:
                     if attempt < max_retries - 1:
                         logger.warning(f"Relayer timeout; retry {attempt + 1}/{max_retries}")
                         await asyncio.sleep(2 ** attempt)
                         continue
-                    raise ExecutionError("Relayer timeout after retries")
+                    raise ValueError("Relayer timeout after retries")
                 except Exception as e:
-                    raise ExecutionError(f"Relayer unexpected error: {str(e)}")
+                    raise ValueError(f"Relayer unexpected error: {str(e)}")
 
     # Base Account for views (unchanged)
     return RelayerAccount(near_account_id, RPC_URL)
