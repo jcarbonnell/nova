@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 from contextlib import contextmanager
-from fastapi import Request, FastAPI, HTTPException
+from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.responses import JSONResponse
 import asyncio
@@ -150,7 +150,7 @@ mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # Use @mcp.route for custom HTTP endpoint
 @mcp.custom_route("/", methods=["GET"])
-async def mcp_health():
+async def mcp_health(request: Request):
     return JSONResponse({"status": "MCP ready", "version": "0.3.0", "auth": "enabled"})
 
 @mcp.custom_route("/auth/callback", methods=["GET"])
