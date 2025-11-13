@@ -10,6 +10,7 @@ import logging
 from contextlib import contextmanager
 from fastapi import Request, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse
 import asyncio
 import base64
 
@@ -148,6 +149,10 @@ async def auth_middleware(ctx: Context):
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # Use @mcp.route for custom HTTP endpoint
+@mcp.custom_route("/", methods=["GET"])
+async def mcp_health():
+    return JSONResponse({"status": "MCP ready", "version": "0.3.0", "auth": "enabled"})
+
 @mcp.custom_route("/auth/callback", methods=["GET"])
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
