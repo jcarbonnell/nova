@@ -13,6 +13,7 @@ import ethAccount from "./routes/ethAccount";
 import agentAccount from "./routes/agentAccount";
 import transaction from "./routes/transaction";
 import keyMgmt from "./routes/key-management";
+import userKeys from "./routes/user-keys";
 
 const app = new Hono();
 
@@ -20,17 +21,18 @@ const app = new Hono();
 app.use(cors());
 
 // Health check
-app.get("/", (c) => c.json({ message: "App is running" }));
+app.get("/", (c) => c.json({ message: "NOVA Shade Agent is running" }));
 
 // Routes
 app.route("/api/eth-account", ethAccount);
 app.route("/api/agent-account", agentAccount);
 app.route("/api/transaction", transaction);
 app.route("/api/key-management", keyMgmt);
+app.route("/api/user-keys", userKeys);
 
 // Start the server
 const port = Number(process.env.PORT || "3000");
 
-console.log(`App is running on port ${port}`);
+console.log(`NOVA Shade Agent is running on port ${port}`);
 
 serve({ fetch: app.fetch, port });

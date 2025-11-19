@@ -9,8 +9,7 @@ from typing import Optional, Dict, Any
 import logging
 from contextlib import contextmanager
 from fastapi import Request, HTTPException
-from fastapi.responses import RedirectResponse
-from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import asyncio
 import base64
 
@@ -182,45 +181,18 @@ async def auth_callback(request: Request):
     email = claims.get("email")
     session_token = claims.get("sub")
     near_account_id = claims.get("near_account_id")  # From FastAuth if pre-set
+    
     if not email:
         raise HTTPException(status_code=400, detail="No email in claims")
     
-    # FastAuth NEAR gen (if not pre-set)
-    if not near_account_id:
-        near_account_id = await create_near_account(email, id_token)
-    
     store_user_email(email, session_token, near_account_id, consent=True)
-    logger.info(f"New/updated user: hashed {hashlib.sha256(email.encode()).hexdigest()[:16]}... -> {near_account_id}")
+    logger.info(f"User authenticated: {hashlib.sha256(email.encode()).hexdigest()[:16]}...")
     
+    # Redirect back to frontend
     return RedirectResponse(
-        url=f"https://nova-sdk.com?token={id_token}&near={near_account_id}",
+        url=f"https://nova-sdk.com?token={id_token}",
         status_code=302
     )
-
-async def create_near_account(email: str, id_token: str) -> str:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        try:
-            resp = await client.post(
-                f"{RELAYER_URL}/v1/account/create",  # Relayer v1 (2025)
-                json={
-                    "email": email,
-                    "provider": "auth0",
-                    "token": id_token  # Auth0 verification
-                }
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            account_id = data.get("account_id")
-            if not account_id:
-                raise ValueError("No account_id in relayer response")
-            logger.info(f"Relayer created account for hashed {hashlib.sha256(email.encode()).hexdigest()[:16]}...")
-            return account_id
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Relayer HTTP error {e.response.status_code}: {e.response.text[:100]}")
-            raise ValueError(f"Relayer account creation failed ({e.response.status_code}): {e.response.text[:100]}")
-        except Exception as e:
-            logger.error(f"Relayer general error: {e}")
-            raise ValueError(f"Relayer unavailable: {str(e)}")
 
 # Relayer signer (no privkey; chain sigs via relayer)
 async def get_user_signer(near_account_id: str, session_token: str) -> Account:

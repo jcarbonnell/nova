@@ -22,7 +22,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image
-    image: jcarbonnell/nova-shade-agent@sha256:62dbe7f1a97708c58b488c0cdaccced60bd343e8b538156353a896cace002676
+    image: jcarbonnell/nova-shade-agent@sha256:59755e6d2d43d9959aae4e59089a1c5e410008d881018682c5d9398ebc0acda6
     container_name: shade-agent-app
     ports:
       - "3000:3000"
