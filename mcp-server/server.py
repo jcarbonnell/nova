@@ -1098,4 +1098,4 @@ async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract
         return False
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
