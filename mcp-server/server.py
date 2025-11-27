@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.dependencies import get_http_headers
 import httpx
 import uvicorn
 
@@ -282,6 +283,28 @@ def _validate_near_key(private_key: str) -> str:
     return private_key  # Return original with prefix
 
 # Helper functions (callable internally)
+def get_authenticated_user() -> dict:
+    """Get user info from HTTP headers (FastMCP 2.x compatible)."""
+    headers = get_http_headers()
+    
+    user_email = headers.get("x-user-email")
+    account_id = headers.get("x-account-id")
+    auth_header = headers.get("authorization", "")
+    
+    if not user_email:
+        raise ValueError("Auth required: Connect with Auth0 first (missing X-User-Email)")
+    
+    # Extract token
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+    session_token = hashlib.sha256(f"{user_email}:{token or 'no-token'}".encode()).hexdigest()
+    
+    return {
+        "email": user_email,
+        "session_token": session_token,
+        "near_account_id": account_id,
+        "access_token": token,
+    }
+
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str) -> str:
     """Internal: Use pre-signed payload/sig → claim token → fetch key → verify checksum.
     Expects client-signed payload_b64 and sig_hex (Ed25519 on raw payload bytes).
@@ -566,7 +589,7 @@ def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
 # Consent Tool (GDPR)
 @mcp.tool
 async def set_consent(ctx: Context, granted: bool = True) -> str:
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required.")
     session_token = user["session_token"]
@@ -596,7 +619,7 @@ async def set_consent(ctx: Context, granted: bool = True) -> str:
 # Export/Delete from DB Tools
 @mcp.tool
 async def export_data(ctx: Context) -> dict:
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required.")
 
@@ -647,7 +670,7 @@ async def export_data(ctx: Context) -> dict:
 
 @mcp.tool
 async def delete_data(ctx: Context, reason: str = "user_request") -> str:
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required.")
 
@@ -693,7 +716,7 @@ async def delete_data(ctx: Context, reason: str = "user_request") -> str:
 @mcp.tool
 async def register_group(ctx: Context, group_id: str) -> str:
     """Registers new group on NOVA contract as the authenticated user (owner)."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     
@@ -773,7 +796,7 @@ async def register_group(ctx: Context, group_id: str) -> str:
 @mcp.tool
 async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Adds member to group (owner only, uses authenticated session)."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     
@@ -825,7 +848,7 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
 @mcp.tool
 async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Revokes member from group (owner only, rotates key, uses authenticated session)."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     
@@ -892,7 +915,7 @@ async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: 
     """Retrieves key: Pass pre-signed payload_b64 (JSON base64) and sig_hex (Ed25519 on raw payload).
     Sign client-side with user's key before calling. user_id optional: defaults to session user.
     """
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     session_token = user["session_token"]
@@ -916,7 +939,7 @@ async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: 
 @mcp.tool
 async def record_near_transaction(ctx: Context, group_id: str, user_id: str, file_hash: str, ipfs_hash: str, contract_id: str = None) -> str:
     """Records file tx on NOVA contract (uses session signer)."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     session_token = user["session_token"]
@@ -935,7 +958,8 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
 @mcp.tool
 async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
     """Full upload: get_key → encrypt → IPFS pin → record tx (uses session). Client provides signed payload_b64/sig_hex."""
-    user = ctx.state.get('user')
+    
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     session_token = user["session_token"]
@@ -983,7 +1007,7 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
 @mcp.tool
 async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
     """Full retrieve: get_key → fetch IPFS → decrypt (uses session). Client provides signed payload_b64/sig_hex for key."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     session_token = user["session_token"]
@@ -1028,7 +1052,7 @@ async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payloa
 @mcp.tool
 async def auth_status(ctx: Context, user_id: str = None, group_id: str = "test_group") -> dict:
     """Tool: Check user auth/groups on NOVA contract. Returns {'authorized': bool, 'groups': list[str], 'member_count': int}."""
-    user = ctx.state.get('user')
+    user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required.")
     
