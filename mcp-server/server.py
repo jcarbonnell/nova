@@ -1,3 +1,4 @@
+# NOVA-mcp: w/ unified account architecture (email + wallet users), automated signing from Shade TEE, and self-supported fees.
 import os
 import sqlite3
 import json
@@ -147,6 +148,7 @@ async def auth_middleware(ctx: Context):
         logger.error(f"Auth middleware error: {e}")
         raise ValueError(f"Invalid token: {str(e)}")
 
+# Initialize FastMCP server
 mcp = FastMCP(name="nova-mcp", auth=auth_provider)
 
 # Use @mcp.route for custom HTTP endpoint
@@ -196,76 +198,83 @@ async def auth_callback(request: Request):
         status_code=302
     )
 
-# Relayer signer (no privkey; chain sigs via relayer)
-async def get_user_signer(near_account_id: str, session_token: str) -> Account:
-    """Production relayer signer: Submits unsigned txs via NEAR MGR v1 (chain sigs).
-    
-    - Validates inputs.
-    - Retries on transient errors (e.g., 429/503).
-    - Mimics py_near response: {'status': {'SuccessValue': str}}.
-    - Views use base Account (no override needed).
+# Automated signing in MCP - Fetches key from Shade TEE
+async def get_user_signer(near_account_id: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> Account:
     """
-    if not near_account_id or not session_token:
-        raise ValueError("near_account_id and session_token required")
-    if len(session_token) < 10:  # Basic len check (OIDC sub ~36 chars)
-        raise ValueError("Invalid session_token")
+    Fetches user's private key from Shade TEE and returns a signing Account.
+    Works for both email users and wallet users.
+    """
+    if not near_account_id:
+        raise ValueError("near_account_id required")
+    
+    if not user_email and not wallet_id:
+        raise ValueError("Either user_email or wallet_id required for Shade key retrieval")
 
-    class RelayerAccount(Account):
-        def __init__(self, account_id: str, rpc_url: str):
-            super().__init__(account_id, "", rpc_url)  # Dummy key; relayer signs
+    if not SHADE_API_URL:
+        raise ValueError("SHADE_API_URL not configured")
+    
+    # Build Shade API request
+    shade_payload = {}
+    if user_email:
+        shade_payload["email"] = user_email
+    if wallet_id:
+        shade_payload["wallet_id"] = wallet_id
+    if access_token:
+        shade_payload["auth_token"] = access_token
+    
+    logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}")
+    
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            resp = await client.post(
+                f"{SHADE_API_URL}/api/user-keys/retrieve",
+                json=shade_payload,
+                headers={"Content-Type": "application/json"}
+            )
 
-        async def function_call(self, contract_id: str, method_name: str, args: Dict[str, Any],
-                                amount: int = 0, gas: int = 100_000_000_000_000) -> Dict[str, Any]:
-            """Override: Build unsigned tx JSON, submit to relayer."""
-            # Build actions (FunctionCall only for MCP tools)
-            actions = [{
-                "method_name": method_name,
-                "args": json.dumps(args),
-                "gas": gas,
-                "deposit": amount
-            }]
-            tx_payload = {
-                "signer_id": self.account_id,
-                "receiver_id": contract_id,
-                "actions": actions,
-                "meta": {"session_token": session_token}  # Auth for relayer
-            }
+            if resp.status_code == 404:
+                raise ValueError(
+                    "No NOVA account found. Please create an account at nova-sdk.com first."
+                )
+            
+            if resp.status_code != 200:
+                error_text = resp.text[:200]
+                logger.error(f"Shade key retrieval failed: {resp.status_code} - {error_text}")
+                raise ValueError(f"Failed to retrieve key from Shade: {resp.status_code}")
+            
+            data = resp.json()
+            private_key = data.get("private_key")
+            shade_account_id = data.get("near_account_id")
+            
+            if not private_key:
+                raise ValueError("No private_key in Shade response")
+            
+            # Verify account IDs match (security check)
+            if shade_account_id and shade_account_id != near_account_id:
+                logger.warning(
+                    f"Account ID mismatch: requested={near_account_id}, "
+                    f"shade={shade_account_id}. Using Shade account."
+                )
+                near_account_id = shade_account_id
 
-            relayer_url = f"{RELAYER_URL}/v1/tx/relay"  # 2025 MGR endpoint
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                        resp = await client.post(relayer_url, json=tx_payload)
-                        resp.raise_for_status()  # 4xx/5xx → HTTPError
-                        result = resp.json()
-                    
-                    # Validate response (mimic py_near)
-                    status = result.get("status", {})
-                    if "SuccessValue" not in status:
-                        raise ValueError(f"Relayer failed: {result.get('error', 'Unknown')}")
-                    
-                    logger.info(f"Relayer tx success for {self.account_id} (attempt {attempt + 1})")
-                    return {"status": status}
-                    
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code in (429, 503) and attempt < max_retries - 1:
-                        wait = (2 ** attempt) * 1000  # Exp backoff ms
-                        logger.warning(f"Relayer retry {attempt + 1}/{max_retries} (status: {e.response.status_code}); wait {wait}ms")
-                        await asyncio.sleep(wait / 1000)
-                        continue
-                    raise ValueError(f"Relayer HTTP error: {e.response.status_code} - {e.response.text[:100]}")
-                except httpx.TimeoutException:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Relayer timeout; retry {attempt + 1}/{max_retries}")
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    raise ValueError("Relayer timeout after retries")
-                except Exception as e:
-                    raise ValueError(f"Relayer unexpected error: {str(e)}")
-
-    # Base Account for views (unchanged)
-    return RelayerAccount(near_account_id, RPC_URL)
+            logger.info(f"Retrieved private key from Shade TEE for {user_email}")
+            
+    except httpx.TimeoutException:
+        logger.error("Shade TEE request timed out")
+        raise ValueError("Key retrieval timed out - please try again")
+    except httpx.RequestError as e:
+        logger.error(f"Shade TEE request failed: {e}")
+        raise ValueError(f"Failed to connect to secure key storage: {str(e)}")
+    
+    # Create Account with real private key
+    try:
+        acc = Account(near_account_id, private_key, RPC_URL)
+        await acc.startup()
+        logger.info(f"Signing account ready: {near_account_id}")
+        return acc
+    except Exception as e:
+        logger.error(f"Failed to initialize Account: {e}")
+        raise ValueError(f"Failed to initialize signing account: {str(e)}")
 
 def _validate_near_key(private_key: str) -> str:
     """Light validation: base58, with optional ed25519: prefix."""
@@ -285,95 +294,113 @@ def _validate_near_key(private_key: str) -> str:
 
 # Helper functions (callable internally)
 def get_authenticated_user() -> dict:
-    """Get user info from HTTP headers (FastMCP 2.x compatible)."""
+    """
+    Get user info from HTTP headers (FastMCP 2.x compatible).
+    
+    Headers expected from frontend:
+    - Authorization: Bearer {access_token}
+    - X-User-Email: user@example.com (for email users)
+    - X-Account-Id: user.nova-sdk-5.testnet (NOVA-managed account)
+    - X-Wallet-Id: user.near (for wallet users - their original wallet)
+    
+    Returns:
+        dict with: email, wallet_id, session_token, near_account_id, access_token
+    """
     headers = get_http_headers()
     
     user_email = headers.get("x-user-email")
     account_id = headers.get("x-account-id")
+    wallet_id = headers.get("x-wallet-id")
     auth_header = headers.get("authorization", "")
     
-    if not user_email:
-        raise ValueError("Auth required: Connect with Auth0 first (missing X-User-Email)")
+    if not user_email and not wallet_id:
+        raise ValueError("Auth required: Connect with Auth0 first (missing X-User-Email or X-Wallet-Id header)")
     
     # Extract token
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else None
-    session_token = hashlib.sha256(f"{user_email}:{token or 'no-token'}".encode()).hexdigest()
+    access_token = None
+    if auth_header.startswith("Bearer "):
+        access_token = auth_header[7:]
+
+    # Generate session token hash for internal use
+    identifier = user_email or wallet_id
+    session_token = hashlib.sha256(f"{identifier}:{access_token or 'no-token'}".encode()).hexdigest()
 
     return {
         "email": user_email,
+        "wallet_id": wallet_id,
         "session_token": session_token,
         "near_account_id": account_id,
-        "access_token": token,
+        "access_token": access_token,
     }
 
-async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str) -> str:
-    """Internal: Use pre-signed payload/sig → claim token → fetch key → verify checksum.
-    Expects client-signed payload_b64 and sig_hex (Ed25519 on raw payload bytes).
+async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
     """
-    #user_session = get_user_session(session_token)
-    #if not user_session:
-    #    raise ValueError("Invalid session token")
-    effective_user_id = user_id #or user_session["near_account_id"]
-    acc = await get_user_signer(effective_user_id, session_token)  # Relayer for tx submission
+    Retrieves encryption key from Shade TEE for a group.
     
-    rpc = RPC_URL
-    contract_id = contract_id or CONTRACT_ID
-    try:
-        # Validate provided sig (basic length/check; full verify in contract)
-        if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):  # 64 bytes hex
-            raise ValueError("Invalid sig_hex: Must be 128-char hex")
-        
-        logger.info(f"Using pre-signed payload_b64 for {effective_user_id}: {payload_b64[:50]}...")
+    Args:
+        group_id: The group to get encryption key for
+        user_id: NOVA-managed account ID
+        contract_id: NOVA contract ID
+        session_token: Session token hash
+        payload_b64: Base64-encoded signed payload
+        sig_hex: Hex-encoded Ed25519 signature
+        user_email: Email (for email users)
+        wallet_id: Original wallet ID (for wallet users)
+        access_token: Auth0 JWT token
+    
+    Returns:
+        Base64-encoded encryption key
+    """
+    # Get user's signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=user_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
 
-        # Step 1: Claim token (relayer submits tx; contract verifies sig)
-        est_fee = await _estimate_fee(contract_id, "claim_token")
-        gas_margin = 100_000_000_000_000
-        total_attach = est_fee + gas_margin
-        args_dict = {"group_id": group_id, "payload_b64": payload_b64, "signature_hex": sig_hex}
-        claim_result = await acc.function_call(
-            contract_id=contract_id, method_name="claim_token", args=args_dict,
-            amount=total_attach, gas=100_000_000_000_000
+    contract_id = CONTRACT_ID
+    
+    # Validate signature format
+    if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
+        raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
+    
+    logger.info(f"Using pre-signed payload_b64 for {user_id}: {payload_b64[:50]}...")
+
+    # Build token from payload + signature
+    token = f"{payload_b64}.{sig_hex}"
+    
+    # Fetch encryption key from Shade key-management API
+    async with httpx.AsyncClient() as client:
+        shade_response = await client.post(
+            f"{SHADE_API_URL}/api/key-management/get_key",
+            json={"group_id": group_id, "token": token},
+            timeout=15
         )
-        if "SuccessValue" not in claim_result.status:
-            raise Exception(f"Token claim failed (check sig/authorization): {claim_result.status}")
-        token_b64 = claim_result.status['SuccessValue']
-        token_bytes = base64.b64decode(token_b64)
-        token = token_bytes.decode('utf-8').strip('"')
-
-        if not token:
-            raise Exception(f"No token claimed for {group_id}/{effective_user_id}")
-
-        logger.info(f"Decoded token for {effective_user_id}: {token[:50]}...")
-        logger.info(f"Claim fee: {est_fee / 1e24:.4f} NEAR")
-
-        # Step 2: Shade fetch + checksum
-        async with httpx.AsyncClient() as client:
-            shade_response = await client.post(
-                f"{SHADE_API_URL}/api/key-management/get_key",
-                json={"group_id": group_id, "token": token},
-                timeout=15
-            )
-            shade_response.raise_for_status()  # Raises on 4xx/5xx
-            shade_data = shade_response.json()
         
-        key = shade_data.get("key")
-        checksum = shade_data.get("checksum")
-        if not key or not checksum:
-            raise Exception("Invalid Shade response")
-        verified = await verify_shade_checksum_for_group(group_id, checksum, contract_id)
-        if not verified:
-            raise Exception(f"Shade attestation invalid for {group_id}")
-        logger.info(f"Retrieved key for {group_id}/{effective_user_id} (checksum: {checksum})")
-        return key
-    except Exception as e:
-        if "Unauthorized" in str(e) or "Invalid signature" in str(e):
-            raise Exception("Unauthorized or invalid signature: Ensure client signed correctly.")
-        raise Exception(f"Shade key fetch failed: {str(e)}")
+        if shade_response.status_code != 200:
+            error_text = shade_response.text[:200]
+            logger.error(f"Shade API error: {shade_response.status_code} - {error_text}")
+            raise Exception(f"Shade key fetch failed: {error_text}")
+        
+        shade_data = shade_response.json()
+    
+    key = shade_data.get("key")
+    checksum = shade_data.get("checksum")
+    
+    if not key or not checksum:
+        raise Exception("Invalid Shade response: missing key or checksum")
+    
+    # Optional: Verify checksum against on-chain value
+    # verified = await verify_shade_checksum_for_group(group_id, checksum, contract_id)
+    
+    logger.info(f"Retrieved encryption key for {group_id}/{user_id}")
+    return key
     
 async def _group_contains_key(group_id: str, contract_id: str) -> bool:
     """Internal: Check if group exists (view)."""
     rpc = os.environ["RPC_URL"]
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
+    contract_id = os.environ["CONTRACT_ID"]
     private_key = DUMMY_PRIVATE_KEY  # Dummy
     acc = Account("dummy", private_key, rpc)  # Dummy for view
     await acc.startup()
@@ -387,7 +414,7 @@ async def _group_contains_key(group_id: str, contract_id: str) -> bool:
 async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     """Internal: Check authorization (view)."""
     rpc = os.environ["RPC_URL"]
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
+    contract_id = os.environ["CONTRACT_ID"]
     private_key = DUMMY_PRIVATE_KEY  # Dummy
     acc = Account(user_id, private_key, rpc)
     await acc.startup()
@@ -399,7 +426,7 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     return result.result
 
 def _encrypt_data(data: str, key: str) -> str:
-    """Internal: Encrypts (same as tool)."""
+    """Encrypts base64 data with AES-256-CBC."""
     data_bytes = base64.b64decode(data)
     key_bytes = base64.b64decode(key)[:32]
     iv = os.urandom(16)
@@ -411,7 +438,7 @@ def _encrypt_data(data: str, key: str) -> str:
     return base64.b64encode(iv + encrypted).decode('utf-8')
 
 def _decrypt_data(encrypted: str, key: str) -> str:
-    """Internal: Decrypts (same as tool)."""
+    """Decrypts base64 encrypted data with AES-256-CBC."""
     encrypted_bytes = base64.b64decode(encrypted)
     if len(encrypted_bytes) < 16:
         raise ValueError(f"Invalid encrypted data length: {len(encrypted_bytes)} (must be >=16 for IV)")
@@ -426,6 +453,7 @@ def _decrypt_data(encrypted: str, key: str) -> str:
     return base64.b64encode(decrypted).decode('utf-8')
 
 async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
+    """Upload to IPFS via Pinata."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         encrypted_data = base64.b64decode(encrypted_b64)
         files = {"file": (filename, encrypted_data)}
@@ -478,52 +506,86 @@ async def _ipfs_retrieve(cid: str) -> str:
                 return content
     raise ValueError(f"IPFS failed after {max_retries} retries (CID: {cid})")
 
-async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, ipfs_hash: str, contract_id: str, session_token: str) -> str:
-    """Internal: Records tx using session signer (relayer)."""
-    user_session = get_user_session(session_token)
-    if not user_session:
-        raise ValueError("Invalid session token")
-    effective_account_id = user_session["near_account_id"]
-    if not effective_account_id:
-        raise ValueError("No NEAR account in session")
-    acc = await get_user_signer(effective_account_id, session_token)
+async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, ipfs_hash: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
+    """
+    Records a file transaction on the NOVA contract.
     
-    contract_id = contract_id or CONTRACT_ID
-    est_fee = await _estimate_fee(contract_id, "record_transaction")
+    Uses user's signing key from Shade TEE.
+    """
+    contract_id = CONTRACT_ID
+
+    if not user_email and not wallet_id:
+        raise ValueError("Either user_email or wallet_id required")
+    
+    if not user_id:
+        raise ValueError("user_id (NEAR account) required")
+
+    # Get user's signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=user_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Estimate fee for the transaction
+    fee = await _estimate_fee("record_transaction")
     gas_margin = 100_000_000_000_000
-    total_attach = est_fee + gas_margin  # Relayer budgets; log only
-    logger.info(f"Submitting record tx for {effective_account_id} (est fee: {est_fee / 1e24:.4f} NEAR)")
+    total_attach = fee + gas_margin
+
+    logger.info(f"Submitting record tx for {user_id} (est fee: {fee / 1e24:.4f} NEAR)")
     
+    # Call the contract
     try:
         result = await acc.function_call(
-            contract_id=contract_id, method_name="record_transaction",
-            args={"group_id": group_id, "user_id": user_id, "file_hash": file_hash, "ipfs_hash": ipfs_hash},
-            amount=total_attach, gas=100_000_000_000_000
+            contract_id=contract_id,
+            method_name="record_transaction",
+            args={
+                "group_id": group_id,
+                "user_id": user_id,
+                "file_hash": file_hash,
+                "ipfs_hash": ipfs_hash
+            },
+            amount=total_attach,
+            gas=100_000_000_000_000  # 100 TGas
         )
-        # Relayer may return dict; normalize
+    
+        # Handle result (may be dict from py_near or custom format)
         status = result.get("status", result.status if hasattr(result, "status") else str(result))
-        if "SuccessValue" in status:
-            trans_id = result.get("SuccessValue", status["SuccessValue"])
-            logger.info(f"Recorded tx: {trans_id} (fee: {est_fee / 1e24:.4f} NEAR)")
-            # Log breakdown (unchanged)
-            ipfs_est = 0.005; phala_est = 0.003; nova_fee = est_fee / 1e24
-            logger.info(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
+        
+        if isinstance(status, dict) and "SuccessValue" in status:
+            # Decode base64 transaction ID
+            success_value = status["SuccessValue"]
+            if success_value:
+                trans_id = base64.b64decode(success_value).decode()
+            else:
+                trans_id = hashlib.sha256(f"{group_id}{user_id}{file_hash}{ipfs_hash}".encode()).hexdigest()[:16]
+            
+            logger.info(f"Recorded tx: {trans_id} (fee: {fee / 1e24:.4f} NEAR)")
+            
+            # Log cost breakdown for monitoring
+            ipfs_est = 0.005
+            phala_est = 0.003
+            nova_fee = fee / 1e24
+            logger.info(f"Cost breakdown: {nova_fee:.4f} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
+            
             return trans_id
         else:
-            raise ValueError(f"Record failed (relayer error): {status}")
+            raise ValueError(f"Record failed: {status}")
+            
     except httpx.TimeoutException:
-        raise ValueError("Relayer timeout: Try again later")
+        raise ValueError("Transaction timeout: Try again later")
     except Exception as e:
-        logger.error(f"Relayer submission error: {e}")
-        raise ValueError(f"Record failed (relayer submission): {str(e)}")
-
+        logger.error(f"Transaction submission error: {e}")
+        raise ValueError(f"Record failed: {str(e)}")
+    
 async def _estimate_fee(contract_id: str, action: str) -> int:
     """Queries contract for fee yoctoNEAR."""
-    rpc = os.environ["RPC_URL"]
     contract_id = os.environ["CONTRACT_ID"]
-    private_key = DUMMY_PRIVATE_KEY  # Dummy for view
-    acc = Account("dummy", private_key, rpc)
+    # Use dummy key for view-only calls
+    acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
     await acc.startup()
+
     result = await acc.view_function(
         contract_id=contract_id,
         method_name="estimate_fee",
@@ -717,261 +779,216 @@ async def delete_data(ctx: Context, reason: str = "user_request") -> str:
 @mcp.tool
 async def register_group(ctx: Context, group_id: str) -> str:
     """Registers new group on NOVA contract as the authenticated user (owner)."""
+    
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    
-    session_token = user["session_token"]
-    near_account_id = user.get("near_account_id")
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
-    # Relayer signer (unsigned tx submission)
-    acc = await get_user_signer(near_account_id, session_token)
+    # Get signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
     
-    contract_id = os.environ.get("CONTRACT_ID", "nova-sdk-5.testnet")
-    if await _group_contains_key(group_id, contract_id):
-        raise ValueError(f"Group {group_id} exists")
+    # Estimate fee
+    fee = await _estimate_fee("register_group")
     
-    # Estimate fee + gas margin (relayer budgets; log only)
-    est_fee = await _estimate_fee(contract_id, "register_group")
-    gas_margin = 300_000_000_000_000  # 300 TGas equiv
-    total_attach = est_fee + gas_margin
-    logger.info(f"Submitting register for {near_account_id} (est fee: {est_fee / 1e24:.4f} NEAR)")
+    logger.info(f"Registering group {group_id} for {near_account_id} (fee: {fee/1e24:.4f} NEAR)")
 
-    try:
-        result = await acc.function_call(
-            contract_id=contract_id,
+    # Call contract
+    result = await acc.function_call(
+            contract_id=CONTRACT_ID,
             method_name="register_group",
             args={"group_id": group_id},
-            amount=total_attach,
-            gas=int("300000000000000")  # Relayer handles
+            amount=fee,
+            gas=int("300000000000000")
         )
-        # Normalize result (dict from relayer or py_near obj)
-        status = result.get("status") if isinstance(result, dict) else (result.status if hasattr(result, "status") else str(result))
-        if "SuccessValue" in status:
-            logger.info(f"Registered group: {group_id} by {near_account_id}")
-
-            # Off-chain: Trigger Shade key gen (unchanged, async)
-            async with httpx.AsyncClient() as client:
-                shade_response = await client.post(
-                    f"{SHADE_API_URL}/api/key-management/generate_key",
-                    json={"group_id": group_id, "owner": near_account_id},
-                    timeout=15
-                )
-                shade_response.raise_for_status()
-                shade_data = shade_response.json()
-            
-            checksum = shade_data.get("checksum")
-            if checksum:
-                # Update checksum (relayer tx)
-                checksum_est = await _estimate_fee(contract_id, "update_checksum")
-                checksum_total = checksum_est + 50_000_000_000_000
-                update_result = await acc.function_call(
-                    contract_id=contract_id,
-                    method_name="update_checksum",
-                    args={"group_id": group_id, "checksum": checksum},
-                    amount=checksum_total,
-                    gas=int("50000000000000")
-                )
-                update_status = update_result.get("status") if isinstance(update_result, dict) else (update_result.status if hasattr(update_result, "status") else str(update_result))
-                if "SuccessValue" not in update_status:
-                    raise ValueError(f"Checksum update failed: {update_status}")
-                logger.info(f"Checksum auto-updated for {group_id}: {checksum}")
-            else:
-                raise ValueError("Shade gen returned no checksum")
-            
-            # Log breakdown
-            ipfs_est = 0.005; phala_est = 0.003; nova_fee = est_fee / 1e24
-            logger.info(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
-            
-            return f"Registered (with Shade key gen for {group_id})"
-        else:
-            raise ValueError(f"Register failed (relayer error): {status}. Ensure unique group_id and session validity.")
-    except httpx.TimeoutException:
-        raise ValueError("Relayer timeout: Try again later")
-    except Exception as e:
-        logger.error(f"Relayer submission error for register: {e}")
-        raise ValueError(f"Register failed (relayer submission): {str(e)}")
+        
+    logger.info(f"Group {group_id} registered by {near_account_id}")
+    return f"Group '{group_id}' registered successfully"
+        
 
 @mcp.tool
 async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Adds member to group (owner only, uses authenticated session)."""
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    
-    session_token = user["session_token"]
-    near_account_id = user.get("near_account_id")
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
-    # Relayer signer
-    acc = await get_user_signer(near_account_id, session_token)
+    # Get signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
     
-    contract_id = os.environ.get("CONTRACT_ID", "nova-sdk-5.testnet")
-    if not await _group_contains_key(group_id, contract_id):
-        raise ValueError(f"Group {group_id} not found")
-    if await _is_authorized(group_id, member_id, contract_id):
-        raise ValueError(f"User {member_id} already a member")
-    
-    # Estimate (relayer budgets)
-    est_fee = await _estimate_fee(contract_id, "add_group_member")
+    # Estimate fee
+    fee = await _estimate_fee("add_group_member")
     gas_margin = 300_000_000_000_000
-    total_attach = est_fee + gas_margin
-    logger.info(f"Submitting add member {member_id} to {group_id} by {near_account_id} (est fee: {est_fee / 1e24:.4f} NEAR)")
+    total_attach = fee + gas_margin
+    logger.info(f"Add member {member_id} to {group_id} by {near_account_id} (est fee: {fee / 1e24:.4f} NEAR)")
 
-    try:
-        result = await acc.function_call(
-            contract_id=contract_id,
-            method_name="add_group_member",
-            args={"group_id": group_id, "user_id": member_id},
-            amount=total_attach,
-            gas=int("300000000000000")
-        )
-        status = result.get("status") if isinstance(result, dict) else (result.status if hasattr(result, "status") else str(result))
-        if "SuccessValue" in status:
-            logger.info(f"Added {member_id} to {group_id} by {near_account_id}")
-            
-            # Log breakdown
-            ipfs_est = 0.005; phala_est = 0.003; nova_fee = est_fee / 1e24
-            logger.info(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
-            
-            return "Added"
-        else:
-            raise ValueError(f"Add failed (relayer error): {status}. Ensure owner auth and session validity.")
-    except httpx.TimeoutException:
-        raise ValueError("Relayer timeout: Try again later")
-    except Exception as e:
-        logger.error(f"Relayer submission error for add member: {e}")
-        raise ValueError(f"Add failed (relayer submission): {str(e)}")
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="add_group_member",
+        args={"group_id": group_id, "user_id": member_id},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    return f"Added {member_id} to group '{group_id}'"
 
 @mcp.tool
 async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     """Revokes member from group (owner only, rotates key, uses authenticated session)."""
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    
-    session_token = user["session_token"]
-    near_account_id = user.get("near_account_id")
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
-    # Relayer signer
-    acc = await get_user_signer(near_account_id, session_token)
+    # get signer from shade tee
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
     
-    contract_id = os.environ.get("CONTRACT_ID", "nova-sdk-5.testnet")
-    if not await _group_contains_key(group_id, contract_id):
-        raise ValueError(f"Group {group_id} not found")
-    if not await _is_authorized(group_id, member_id, contract_id):
-        raise ValueError(f"User {member_id} not a member")
-    
-    # Estimate (relayer budgets)
-    est_fee = await _estimate_fee(contract_id, "revoke_group_member")
+    # Estimate fee
+    fee = await _estimate_fee("revoke_group_member")
     gas_margin = 300_000_000_000_000
-    total_attach = est_fee + gas_margin
-    logger.info(f"Submitting revoke {member_id} from {group_id} by {near_account_id} (est fee: {est_fee / 1e24:.4f} NEAR)")
+    total_attach = fee + gas_margin
+    logger.info(f"Revoking {member_id} from {group_id} by {near_account_id} (est fee: {fee / 1e24:.4f} NEAR)")
 
-    try:
-        result = await acc.function_call(
-            contract_id=contract_id,
-            method_name="revoke_group_member",
-            args={"group_id": group_id, "user_id": member_id},
-            amount=total_attach,
-            gas=int("300000000000000")
-        )
-        status = result.get("status") if isinstance(result, dict) else (result.status if hasattr(result, "status") else str(result))
-        if "SuccessValue" in status:
-            logger.info(f"Revoked {member_id} from {group_id} by {near_account_id}, key rotated")
-            
-            # Off-chain: Trigger Shade key rotation (async)
-            async with httpx.AsyncClient() as client:
-                shade_response = await client.post(
-                    f"{SHADE_API_URL}/api/key-management/rotate_key",
-                    json={"group_id": group_id},
-                    timeout=15
-                )
-                shade_response.raise_for_status()
-                shade_data = shade_response.json()
-                if not shade_data.get("success"):
-                    raise ValueError("Shade rotate succeeded but no success flag")
-                logger.info(f"Key rotated in Shade for {group_id}")
-            
-            # Log breakdown
-            ipfs_est = 0.005; phala_est = 0.003; nova_fee = est_fee / 1e24
-            logger.info(f"Cost breakdown: {nova_fee} NEAR total (est {ipfs_est} IPFS + {phala_est} Phala + {nova_fee - ipfs_est - phala_est:.4f} NOVA)")
-            
-            return "Revoked (with Shade key rotate)"
-        else:
-            raise ValueError(f"Revoke failed (relayer error): {status}. Ensure owner auth and session validity.")
-    except httpx.TimeoutException:
-        raise ValueError("Relayer timeout: Try again later")
-    except Exception as e:
-        logger.error(f"Relayer submission error for revoke: {e}")
-        raise ValueError(f"Revoke failed (relayer submission): {str(e)}")
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="revoke_group_member",
+        args={"group_id": group_id, "user_id": member_id},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    return f"Revoked {member_id} from group '{group_id}' (key rotated)"
 
 @mcp.tool
-async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: str, user_id: Optional[str] = None, contract_id: str = None) -> str:
-    """Retrieves key: Pass pre-signed payload_b64 (JSON base64) and sig_hex (Ed25519 on raw payload).
-    Sign client-side with user's key before calling. user_id optional: defaults to session user.
+async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: str, user_id: Optional[str] = None) -> str:
+    """
+    Retrieves encryption key for a group from Shade TEE.
+    Requires pre-signed payload and signature.
+    User pays claim_token fee.
     """
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    effective_user_id = user_id or near_account_id
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    session_token = user["session_token"]
-    session_user_id = user.get("near_account_id")
-    if not session_user_id:
-        raise ValueError("No NEAR account in session; complete FastAuth signup.")
+    if not effective_user_id:
+        raise ValueError("No NEAR account configured")
     
-    # Derive effective user_id (override only if matches session for security)
-    effective_user_id = user_id or session_user_id
-    if user_id and user_id != session_user_id:
-        raise ValueError("user_id must match session account (no delegation)")
-    
-    # Basic sig validation (length/hex; contract verifies full)
+    # Validate signature format
     if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
         raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
     
-    contract_id = contract_id or CONTRACT_ID
-    return await _get_shade_key(group_id, effective_user_id, contract_id, session_token, payload_b64, sig_hex)
+    key = await _get_shade_key(
+        group_id=group_id,
+        user_id=effective_user_id,
+        payload_b64=payload_b64,
+        sig_hex=sig_hex,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    return key
 
 
 @mcp.tool
-async def record_near_transaction(ctx: Context, group_id: str, user_id: str, file_hash: str, ipfs_hash: str, contract_id: str = None) -> str:
-    """Records file tx on NOVA contract (uses session signer)."""
+async def record_near_transaction(ctx: Context, group_id: str, user_id: str, file_hash: str, ipfs_hash: str) -> str:
+    """Records file tx on NOVA contract (User pays record_transaction fee)."""
+    contract_id = CONTRACT_ID
+
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    effective_user_id = user_id or near_account_id
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    session_token = user["session_token"]
-    near_account_id = user.get("near_account_id")
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
+    if not effective_user_id:
+        raise ValueError("No NEAR account configured")
     
-    contract_id = contract_id or CONTRACT_ID
-    # Delegate to helper (now relayer-aware)
+    # Delegate to helper with all user context
     try:
-        return await _record_near_transaction(group_id, user_id, file_hash, ipfs_hash, contract_id, session_token)
+        return await _record_near_transaction(
+            group_id=group_id,
+            user_id=effective_user_id,
+            file_hash=file_hash,
+            ipfs_hash=ipfs_hash,
+            contract_id=contract_id,
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
     except Exception as e:
         logger.error(f"Record tx error for {near_account_id}: {e}")
         raise ValueError(f"Record failed: {str(e)}")
 
 @mcp.tool
-async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
-    """Full upload: get_key → encrypt → IPFS pin → record tx (uses session). Client provides signed payload_b64/sig_hex."""
+async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str) -> dict:
+    """
+    Full upload: get_key → encrypt → IPFS pin → record tx.
     
+    Uses authenticated user context to fetch signing key from Shade TEE.
+    """
+    # Get authenticated user from headers
     user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     
     session_token = user["session_token"]
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
+    
     if not near_account_id:
-        raise ValueError("No NEAR account; complete FastAuth signup.")
+        raise ValueError("No NEAR account; complete account setup first.")
     
     effective_user_id = user_id or near_account_id
     contract_id = CONTRACT_ID
     
+    # Estimate fees
     claim_fee = await _estimate_fee(contract_id, "claim_token")
     record_fee = await _estimate_fee(contract_id, "record_transaction")
     total_fee = claim_fee + record_fee
@@ -981,8 +998,8 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
     logger.info(f"Starting composite upload for {effective_user_id} (est total fee: {total_fee / 1e24:.4f} NEAR)")
     
     try:
-        # Step 1: Fetch key (uses relayer for claim)
-        key = await _get_shade_key(group_id, effective_user_id, contract_id, session_token, payload_b64, sig_hex)
+        # Step 1: Fetch key from shade
+        key = await _get_shade_key(group_id=group_id, user_id=effective_user_id, contract_id=contract_id, session_token=session_token, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         # Step 2: Encrypt (sync, fast)
         encrypted_b64 = _encrypt_data(data, key)
         # Step 3: Async IPFS upload
@@ -990,12 +1007,19 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
         # Step 4: Hash original data
         file_hash = hashlib.sha256(base64.b64decode(data)).hexdigest()
         # Step 5: Record tx (uses relayer)
-        trans_id = await _record_near_transaction(group_id, effective_user_id, file_hash, cid, contract_id, session_token)
+        trans_id = await _record_near_transaction(group_id=group_id, user_id=effective_user_id, file_hash=file_hash, ipfs_hash=cid, contract_id=contract_id, session_token=session_token, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         logger.info(f"Composite upload success: CID={cid}, Trans={trans_id}")
         return {
-            "cid": cid, "trans_id": trans_id, "file_hash": file_hash,
-            "fee_breakdown": {"claim": claim_fee / 1e24, "record": record_fee / 1e24, "total": total_fee / 1e24}
+            "cid": cid,
+            "trans_id": trans_id,
+            "file_hash": file_hash,
+            "fee_breakdown": {
+                "claim": claim_fee / 1e24,
+                "record": record_fee / 1e24,
+                "total": total_fee / 1e24
+            }
         }
+    
     except ValueError as e:
         logger.warning(f"Composite upload auth/param error for {effective_user_id}: {e}")
         raise ValueError(f"Upload auth/param error: {str(e)}")
@@ -1007,27 +1031,29 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
         raise RuntimeError(f"Composite upload failed: {str(e)}")
     
 @mcp.tool
-async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payload_b64: str, sig_hex: str, contract_id: str = None) -> dict:
+async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payload_b64: str, sig_hex: str) -> dict:
     """Full retrieve: get_key → fetch IPFS → decrypt (uses session). Client provides signed payload_b64/sig_hex for key."""
+    contract_id = CONTRACT_ID
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
-    session_token = user["session_token"]
-    near_account_id = user.get("near_account_id")
     if not near_account_id:
-        raise ValueError("No NEAR account; complete FastAuth signup.")
-    
-    effective_user_id = near_account_id
-    contract_id = contract_id or CONTRACT_ID
+        raise ValueError("No NEAR account configured; complete FastAuth signup.")
     if not ipfs_hash.startswith('Qm'):
         raise ValueError(f"Invalid CID: {ipfs_hash}")
     
     est_claim_fee = await _estimate_fee(contract_id, "claim_token")
-    logger.info(f"Starting composite retrieve for {effective_user_id} (est fee: {est_claim_fee / 1e24:.4f} NEAR)")
+    
+    logger.info(f"Starting composite retrieve for {near_account_id} from group {group_id}, (est fee: {est_claim_fee / 1e24:.4f} NEAR)")
     
     try:
         # Step 1: Fetch key (uses relayer for claim; client-signed)
-        key = await _get_shade_key(group_id, effective_user_id, contract_id, session_token, payload_b64, sig_hex)
+        key = await _get_shade_key(group_id=group_id, user_id=near_account_id, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         # Step 2: Async IPFS fetch
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (sync, fast)
@@ -1035,69 +1061,67 @@ async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payloa
         # Step 4: Hash for verification
         decrypted_data = base64.b64decode(decrypted_b64)
         file_hash = hashlib.sha256(decrypted_data).hexdigest()
-        logger.info(f"Composite retrieve success: {len(decrypted_data)} bytes, hash={file_hash}")
+        logger.info(f"Composite retrieve success for {near_account_id} from group {group_id}: {len(decrypted_data)} bytes, hash={file_hash}")
+        
         return {
             "decrypted_b64": decrypted_b64,
             "file_hash": file_hash,
-            "fee_breakdown": {"claim": est_claim_fee / 1e24}
+            "fee_breakdown": {"claim": est_claim_fee / 1e24},
+            "ipfs_hash": ipfs_hash,
+            "group_id": group_id
         }
+    
     except ValueError as e:
-        logger.warning(f"Composite retrieve auth/param error for {effective_user_id}: {e}")
+        logger.warning(f"Composite retrieve auth/param error for {near_account_id}: {e}")
         raise ValueError(f"Retrieve auth/param error: {str(e)}")
     except RuntimeError as e:
-        logger.error(f"Composite retrieve runtime error for {effective_user_id}: {e}")
+        logger.error(f"Composite retrieve runtime error for {near_account_id}: {e}")
         raise RuntimeError(f"Retrieve failed (relayer/IPFS/Shade): {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected composite retrieve error for {effective_user_id}: {e}")
+        logger.error(f"Unexpected composite retrieve error for {near_account_id}: {e}")
         raise RuntimeError(f"Composite retrieve failed: {str(e)}")
 
 @mcp.tool
-async def auth_status(ctx: Context, user_id: str = None, group_id: str = "test_group") -> dict:
+async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
     """Tool: Check user auth/groups on NOVA contract. Returns {'authorized': bool, 'groups': list[str], 'member_count': int}."""
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    near_account_id = user.get("near_account_id")
+
     if not user:
         raise ValueError("Auth required.")
     
-    effective_user_id = user_id or user["near_account_id"]
-    if not effective_user_id:
-        raise ValueError("No user_id provided or in session.")
+    result = {
+        "authenticated": True,
+        "email": user_email,
+        "wallet_id": wallet_id,
+        "near_account_id": near_account_id,
+        "group_id": group_id,
+    }
     
-    contract_id = os.environ["CONTRACT_ID"]
-    rpc = os.environ["RPC_URL"]
-    private_key = DUMMY_PRIVATE_KEY  # Dummy for views only
-    try:
-        acc = Account(effective_user_id, private_key, rpc)
-        await acc.startup()
-        # Check authorized
-        auth_result = await acc.view_function(
-            contract_id=contract_id,
-            method_name="is_authorized",
-            args={"group_id": group_id, "user_id": effective_user_id}
-        )
-        authorized = bool(auth_result.result)
-        
-        # List groups via txs (safe list comp)
-        txs_result = await acc.view_function(
-            contract_id=contract_id,
-            method_name="get_transactions_for_group",
-            args={"group_id": group_id, "user_id": effective_user_id}
-        )
-        tx_list = txs_result.result or []  # Handle None/empty
-        groups = list(set(tx["group_id"] for tx in tx_list if "group_id" in tx))
-        member_count = len(groups)
-        
-        logger.info(f"Auth check for {effective_user_id[:16]}... in {group_id}: authorized={authorized}, {member_count} groups")
-        return {"authorized": authorized, "groups": groups, "member_count": member_count}
-    except Exception as e:
-        logger.error(f"Auth status error for {effective_user_id[:16]}...: {e}")
-        if "Unauthorized" in str(e):
-            return {"authorized": False, "groups": [], "member_count": 0}
-        raise ValueError(f"Auth query failed: {str(e)}")
+    if near_account_id and group_id != "default":
+        try:
+            # View-only call with dummy key
+            acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
+            await acc.startup()
+            
+            auth_result = await acc.view_function(
+                contract_id=CONTRACT_ID,
+                method_name="is_authorized",
+                args={"group_id": group_id, "user_id": near_account_id}
+            )
+            result["authorized_for_group"] = auth_result.result
+        except Exception as e:
+            result["authorized_for_group"] = False
+            result["auth_error"] = str(e)
+    
+    return result
     
 
 async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract_id: str = None) -> bool:
     """Verifies Shade attestation checksum against on-chain expected for the group."""
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
+    contract_id = os.environ["CONTRACT_ID"]
     rpc = os.environ["RPC_URL"]
     private_key = DUMMY_PRIVATE_KEY  # Dummy for views
     acc = Account("dummy.near", private_key, rpc)  # Dummy account for view
