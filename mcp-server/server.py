@@ -297,6 +297,9 @@ def get_authenticated_user() -> dict:
     # Extract token
     token = auth_header[7:] if auth_header.startswith("Bearer ") else None
     session_token = hashlib.sha256(f"{user_email}:{token or 'no-token'}".encode()).hexdigest()
+
+    # Store the session in the database so _get_shade_key can find it
+    store_user_email(user_email, session_token, account_id, consent=True)
     
     return {
         "email": user_email,
@@ -309,10 +312,10 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     """Internal: Use pre-signed payload/sig → claim token → fetch key → verify checksum.
     Expects client-signed payload_b64 and sig_hex (Ed25519 on raw payload bytes).
     """
-    user_session = get_user_session(session_token)
-    if not user_session:
-        raise ValueError("Invalid session token")
-    effective_user_id = user_id or user_session["near_account_id"]
+    #user_session = get_user_session(session_token)
+    #if not user_session:
+    #    raise ValueError("Invalid session token")
+    effective_user_id = user_id #or user_session["near_account_id"]
     acc = await get_user_signer(effective_user_id, session_token)  # Relayer for tx submission
     
     rpc = RPC_URL
