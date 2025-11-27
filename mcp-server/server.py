@@ -298,9 +298,6 @@ def get_authenticated_user() -> dict:
     token = auth_header[7:] if auth_header.startswith("Bearer ") else None
     session_token = hashlib.sha256(f"{user_email}:{token or 'no-token'}".encode()).hexdigest()
 
-    # Store the session in the database so _get_shade_key can find it
-    store_user_email(user_email, session_token, account_id, consent=True)
-    
     return {
         "email": user_email,
         "session_token": session_token,
