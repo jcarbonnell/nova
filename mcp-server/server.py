@@ -49,6 +49,7 @@ IPFS_API_SECRET = os.environ.get("IPFS_API_SECRET", "")
 if not (IPFS_API_KEY and IPFS_API_SECRET):
     raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required")
 RELAYER_URL = os.environ.get("RELAYER_URL", "https://relayer.testnet.near.org")
+DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86 # for view-only NEAR RPC calls (never used for signing)
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -373,7 +374,7 @@ async def _group_contains_key(group_id: str, contract_id: str) -> bool:
     """Internal: Check if group exists (view)."""
     rpc = os.environ["RPC_URL"]
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy
+    private_key = DUMMY_PRIVATE_KEY  # Dummy
     acc = Account("dummy", private_key, rpc)  # Dummy for view
     await acc.startup()
     result = await acc.view_function(
@@ -387,7 +388,7 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     """Internal: Check authorization (view)."""
     rpc = os.environ["RPC_URL"]
     contract_id = contract_id or os.environ["CONTRACT_ID"]
-    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy
+    private_key = DUMMY_PRIVATE_KEY  # Dummy
     acc = Account(user_id, private_key, rpc)
     await acc.startup()
     result = await acc.view_function(
@@ -520,7 +521,7 @@ async def _estimate_fee(contract_id: str, action: str) -> int:
     """Queries contract for fee yoctoNEAR."""
     rpc = os.environ["RPC_URL"]
     contract_id = os.environ["CONTRACT_ID"]
-    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for view
+    private_key = DUMMY_PRIVATE_KEY  # Dummy for view
     acc = Account("dummy", private_key, rpc)
     await acc.startup()
     result = await acc.view_function(
@@ -1063,7 +1064,7 @@ async def auth_status(ctx: Context, user_id: str = None, group_id: str = "test_g
     
     contract_id = os.environ["CONTRACT_ID"]
     rpc = os.environ["RPC_URL"]
-    private_key = ""  # Dummy for views only
+    private_key = DUMMY_PRIVATE_KEY  # Dummy for views only
     try:
         acc = Account(effective_user_id, private_key, rpc)
         await acc.startup()
@@ -1098,10 +1099,10 @@ async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract
     """Verifies Shade attestation checksum against on-chain expected for the group."""
     contract_id = contract_id or os.environ["CONTRACT_ID"]
     rpc = os.environ["RPC_URL"]
-    private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for views
+    private_key = DUMMY_PRIVATE_KEY  # Dummy for views
+    acc = Account("dummy.near", private_key, rpc)  # Dummy account for view
+    await acc.startup()
     try:
-        acc = Account("dummy", private_key, rpc)  # Dummy account for view
-        await acc.startup()
         # Fetch expected checksum from contract view
         checksum_result = await acc.view_function(
             contract_id=contract_id,
