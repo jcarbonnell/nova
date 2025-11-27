@@ -519,7 +519,7 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
 async def _estimate_fee(contract_id: str, action: str) -> int:
     """Queries contract for fee yoctoNEAR."""
     rpc = os.environ["RPC_URL"]
-    contract_id = contract_id or os.environ["CONTRACT_ID"]
+    contract_id = os.environ["CONTRACT_ID"]
     private_key = os.environ.get("NEAR_PRIVATE_KEY", "")  # Dummy for view
     acc = Account("dummy", private_key, rpc)
     await acc.startup()
@@ -962,13 +962,14 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
     user = get_authenticated_user()
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
+    
     session_token = user["session_token"]
     near_account_id = user.get("near_account_id")
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
     effective_user_id = user_id or near_account_id
-    contract_id = contract_id or CONTRACT_ID
+    contract_id = CONTRACT_ID
     
     claim_fee = await _estimate_fee(contract_id, "claim_token")
     record_fee = await _estimate_fee(contract_id, "record_transaction")

@@ -4,7 +4,7 @@ Phala's TEEs ensure confidential training, but lack persistent storage. NOVA com
 
 - Uses off-chain TEE keys (Shade/Phala); no on-chain exposure.
 - `getGroupKey` now auto-handles token claim/checksum verify.
-- Update .env: CONTRACT_ID=nova-sdk-4.testnet, SHADE_API_URL=...
+- Update .env: CONTRACT_ID=nova-sdk-5.testnet, SHADE_API_URL=...
 - Run: Ensure group 'tee_demo_healthcare' exists in v2 contract.
 
 ## Use Case
