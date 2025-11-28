@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
-import { sha512 } from '@noble/hashes/sha2.js';
+import { sha512 } from '@noble/hashes/sha2';
 
 // Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
 const db = new Database('./nova-keys.db');
