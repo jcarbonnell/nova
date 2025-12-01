@@ -132,9 +132,21 @@ auth_provider = RemoteAuthProvider(
 
 # define middleware for authentication
 async def auth_middleware(ctx: Context):
-    token = ctx.token  # From auth_provider
+    token = ctx.token
     if not token:
         raise ValueError("Missing auth token")
+    
+    # wallet users (no auth0 jwt)
+    if token.startswith("wallet:"):
+        wallet_id = token[7:]
+        ctx.state.user = {
+            "wallet_id": wallet_id,
+            "session_token": f"wallet_{wallet_id}",
+            "near_account_id": None,  # Will be set later
+        }
+        return
+    
+    # Email users (Auth0 JWT)
     try:
         claims = auth_provider.token_verifier.verify(token)
         email = claims.get("email")
