@@ -223,7 +223,11 @@ async def auth_callback(request: Request):
     )
 
 # Automated signing in MCP - Fetches key from Shade TEE
-async def get_user_signer(near_account_id: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> Account:
+async def get_user_signer(
+        near_account_id: str, 
+        user_email: str = None, 
+        wallet_id: str = None
+) -> Account:
     """
     Fetches user's private key from Shade TEE and returns a signing Account.
     Works for both email users and wallet users.
@@ -331,33 +335,24 @@ def get_authenticated_user() -> dict:
         dict with: email, wallet_id, session_token, near_account_id, access_token
     """
     headers = get_http_headers()
-    auth_header = headers.get("authorization", "")
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
-    
-    # Wallet user?
-    if token.startswith("wallet:"):
-        wallet_id = token[7:]
-        return {
-            "wallet_id": wallet_id,
-            "session_token": f"wallet_{wallet_id}",
-            "near_account_id": headers.get("x-account-id"),
-            "access_token": None,
-            "email": None,
-        }
-    
-    # Email user
-    email = headers.get("x-user-email")
-    account_id = headers.get("x-account-id")    
-    
-    if not token and not (email or account_id):
-        raise ValueError("Auth required")
+
+    account_id = headers.get("x-account-id")
+    wallet_id = headers.get("x-wallet-id")
+    user_email = headers.get("x-user-email")
+
+    if not account_id:
+        raise ValueError("Missing X-Account-Id header - user not connected")
+
+    # For wallet users: email is fake, but we don't need it
+    identifier = wallet_id or user_email or account_id
+    session_token = hashlib.sha256(f"{identifier}:nova-mcp".encode()).hexdigest()
 
     return {
-        "email": email,
-        "wallet_id": headers.get("x-wallet-id"),
-        "session_token": token or f"email_{email}",
+        "email": user_email or None,
+        "wallet_id": wallet_id or None,
+        "session_token": session_token,
         "near_account_id": account_id,
-        "access_token": token if not token.startswith("wallet:") else None,
+        "access_token": None
     }
 
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
@@ -382,8 +377,7 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     acc = await get_user_signer(
         near_account_id=user_id,
         user_email=user_email,
-        wallet_id=wallet_id,
-        access_token=access_token
+        wallet_id=wallet_id
     )
 
     contract_id = CONTRACT_ID
@@ -551,8 +545,7 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
     acc = await get_user_signer(
         near_account_id=user_id,
         user_email=user_email,
-        wallet_id=wallet_id,
-        access_token=access_token
+        wallet_id=wallet_id
     )
     
     # Estimate fee for the transaction
@@ -822,8 +815,7 @@ async def register_group(ctx: Context, group_id: str) -> str:
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id,
-        access_token=access_token
+        wallet_id=wallet_id
     )
     
     # Estimate fee
@@ -862,8 +854,7 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id,
-        access_token=access_token
+        wallet_id=wallet_id
     )
     
     # Estimate fee
@@ -900,8 +891,7 @@ async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> st
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id,
-        access_token=access_token
+        wallet_id=wallet_id
     )
     
     # Estimate fee
