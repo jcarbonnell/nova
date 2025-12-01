@@ -132,30 +132,42 @@ auth_provider = RemoteAuthProvider(
 
 # define middleware for authentication
 async def auth_middleware(ctx: Context):
-    token = ctx.token
-    if not token:
-        raise ValueError("Missing auth token")
+    token = ctx.token or ""
+    headers = get_http_headers()
     
-    # wallet users (no auth0 jwt)
+    # 1: Wallet users (no auth0 jwt)
     if token.startswith("wallet:"):
-        wallet_id = token[7:]
+        wallet_id = token[7:]  # strip "wallet:"
+        if not wallet_id:
+            raise ValueError("Invalid wallet token")
         ctx.state.user = {
             "wallet_id": wallet_id,
             "session_token": f"wallet_{wallet_id}",
-            "near_account_id": None,  # Will be set later
+            "near_account_id": headers.get("x-account-id"),  # NOVA account
+            "email": None,
         }
+        logger.info(f"Wallet user authenticated: {wallet_id}")
         return
     
-    # Email users (Auth0 JWT)
+    # 2: Email users (Auth0 JWT)
+    if not token:
+        raise ValueError("Missing auth token")
+    
     try:
         claims = auth_provider.token_verifier.verify(token)
         email = claims.get("email")
         session_token = claims.get("sub")
         near_account_id = claims.get("near_account_id", claims.get("near"))  # From callback
-        if email:
-            store_user_email(email, session_token, near_account_id)
-        ctx.state.user = {"email": email, "session_token": session_token, "near_account_id": near_account_id}
-        logger.info(f"Auth success for {email}")
+        
+        if not email:
+            raise ValueError("No email in token")
+        
+        ctx.state.user = {
+            "email": email,
+            "session_token": session_token,
+            "near_account_id": near_account_id or headers.get("x-account-id"),
+        }
+        logger.info(f"Email user authenticated: {email}")
     except Exception as e:
         logger.error(f"Auth middleware error: {e}")
         raise ValueError(f"Invalid token: {str(e)}")
@@ -319,30 +331,33 @@ def get_authenticated_user() -> dict:
         dict with: email, wallet_id, session_token, near_account_id, access_token
     """
     headers = get_http_headers()
-    
-    user_email = headers.get("x-user-email")
-    account_id = headers.get("x-account-id")
-    wallet_id = headers.get("x-wallet-id")
     auth_header = headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
     
-    if not user_email and not wallet_id:
-        raise ValueError("Auth required: Connect with Auth0 first (missing X-User-Email or X-Wallet-Id header)")
+    # Wallet user?
+    if token.startswith("wallet:"):
+        wallet_id = token[7:]
+        return {
+            "wallet_id": wallet_id,
+            "session_token": f"wallet_{wallet_id}",
+            "near_account_id": headers.get("x-account-id"),
+            "access_token": None,
+            "email": None,
+        }
     
-    # Extract token
-    access_token = None
-    if auth_header.startswith("Bearer "):
-        access_token = auth_header[7:]
-
-    # Generate session token hash for internal use
-    identifier = user_email or wallet_id
-    session_token = hashlib.sha256(f"{identifier}:{access_token or 'no-token'}".encode()).hexdigest()
+    # Email user
+    email = headers.get("x-user-email")
+    account_id = headers.get("x-account-id")    
+    
+    if not token and not (email or account_id):
+        raise ValueError("Auth required")
 
     return {
-        "email": user_email,
-        "wallet_id": wallet_id,
-        "session_token": session_token,
+        "email": email,
+        "wallet_id": headers.get("x-wallet-id"),
+        "session_token": token or f"email_{email}",
         "near_account_id": account_id,
-        "access_token": access_token,
+        "access_token": token if not token.startswith("wallet:") else None,
     }
 
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
