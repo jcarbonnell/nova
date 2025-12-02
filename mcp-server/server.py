@@ -248,6 +248,8 @@ async def get_user_signer(
         shade_payload["email"] = user_email
     if wallet_id:
         shade_payload["wallet_id"] = wallet_id
+    if access_token:
+        shade_payload["auth_token"] = access_token
     
     logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}")
     
@@ -345,11 +347,7 @@ def get_authenticated_user() -> dict:
 
     # Extract token
     access_token = None
-    if auth_header.startswith("Bearer wallet:"):
-        # Wallet user - extract wallet_id from token
-        wallet_id = auth_header[14:]  # After "Bearer wallet:"
-        logger.info(f"Wallet user authenticated: {wallet_id}")
-    elif auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):
         access_token = auth_header[7:]
     
     if not user_email and not wallet_id:
@@ -357,14 +355,14 @@ def get_authenticated_user() -> dict:
     
     # For wallet users: email is fake, but we don't need it
     identifier = wallet_id or user_email or account_id
-    session_token = hashlib.sha256(f"{identifier}:nova-mcp".encode()).hexdigest()
+    session_token = hashlib.sha256(f"{identifier}:{access_token or 'wallet-only'}".encode()).hexdigest()
 
     return {
         "email": user_email or None,
         "wallet_id": wallet_id or None,
         "session_token": session_token,
         "near_account_id": account_id,
-        "access_token": None
+        "access_token": access_token,
     }
 
 async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
