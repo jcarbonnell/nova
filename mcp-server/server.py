@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 from contextlib import contextmanager
+from wsgiref import headers
 from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 import asyncio
@@ -173,7 +174,7 @@ async def auth_middleware(ctx: Context):
         raise ValueError(f"Invalid token: {str(e)}")
 
 # Initialize FastMCP server
-mcp = FastMCP(name="nova-mcp", auth=auth_provider)
+mcp = FastMCP(name="nova-mcp")
 
 # Use @mcp.route for custom HTTP endpoint
 @mcp.custom_route("/", methods=["GET"])
@@ -247,8 +248,6 @@ async def get_user_signer(
         shade_payload["email"] = user_email
     if wallet_id:
         shade_payload["wallet_id"] = wallet_id
-    if access_token:
-        shade_payload["auth_token"] = access_token
     
     logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}")
     
@@ -336,13 +335,26 @@ def get_authenticated_user() -> dict:
     """
     headers = get_http_headers()
 
+    user_email = headers.get("x-user-email")
     account_id = headers.get("x-account-id")
     wallet_id = headers.get("x-wallet-id")
-    user_email = headers.get("x-user-email")
+    auth_header = headers.get("authorization", "")
 
     if not account_id:
         raise ValueError("Missing X-Account-Id header - user not connected")
 
+    # Extract token
+    access_token = None
+    if auth_header.startswith("Bearer wallet:"):
+        # Wallet user - extract wallet_id from token
+        wallet_id = auth_header[14:]  # After "Bearer wallet:"
+        logger.info(f"Wallet user authenticated: {wallet_id}")
+    elif auth_header.startswith("Bearer "):
+        access_token = auth_header[7:]
+    
+    if not user_email and not wallet_id:
+        raise ValueError("Auth required: missing X-User-Email or X-Wallet-Id header")
+    
     # For wallet users: email is fake, but we don't need it
     identifier = wallet_id or user_email or account_id
     session_token = hashlib.sha256(f"{identifier}:nova-mcp".encode()).hexdigest()
