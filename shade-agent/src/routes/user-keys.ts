@@ -36,22 +36,19 @@ async function verifyAuth0Token(token: string): Promise<{ email: string; sub: st
       return;
     }
     
-    // Determine which audience to use
-    let audienceToCheck = process.env.AUTH0_AUDIENCE || 'https://nova-mcp.fastmcp.app';
+    // Get all possible valid audiences
+    const validAudiences = [
+      process.env.AUTH0_AUDIENCE || 'https://nova-mcp.fastmcp.app',
+      process.env.AUTH0_CLIENT_ID,
+    ].filter((a): a is string => !!a) as [string, ...string[]];
     
-    // If token has azp claim, it's an idToken - use Client ID for audience
-    if (decoded.payload.azp) {
-      audienceToCheck = process.env.AUTH0_CLIENT_ID || audienceToCheck;
-      console.log('Verifying idToken with Client ID audience');
-    } else {
-      console.log('Verifying accessToken with API audience');
-    }
+    console.log('Verifying token with audiences:', validAudiences);
     
     jwt.verify(
       token,
       getKey,
       {
-        audience: audienceToCheck,
+        audience: validAudiences,
         issuer: `https://${process.env.AUTH0_DOMAIN}/`,
         algorithms: ['RS256'],
       },
@@ -75,7 +72,6 @@ async function verifyAuth0Token(token: string): Promise<{ email: string; sub: st
         }
 
         console.log('✅ Token verified:', email.substring(0, 10) + '...');
-
         resolve({ email, sub });
       }
     );
