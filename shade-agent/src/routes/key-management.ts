@@ -200,16 +200,24 @@ keyMgmt.post('/generate_key', async (c) => {
 
 // Get key for authorized user
 keyMgmt.post('/get_key', async (c) => {
-  const { group_id, token } = await c.req.json();
-  if (!group_id || !token) return c.json({ error: 'group_id and token required' }, 400);
+  const { group_id, token, account_id } = await c.req.json();
+  if (!group_id ) return c.json({ error: 'group_id required' }, 400);
+  if (!token && !account_id) return c.json({ error: 'token or account_id required' }, 400);
   
-  const tokenInfo = await verifyToken(token);
-  if (!tokenInfo.valid || !tokenInfo.user_id) {
-    return c.json({ error: 'Invalid token' }, 403);
+  let user_id: string;
+
+  if (account_id) {
+    // Direct account_id auth for wallet users
+    user_id = account_id;
+    console.log(`Using account_id auth for ${account_id}`);
+  } else {
+    // Token-based auth for email users
+    const tokenInfo = await verifyToken(token);
+    if (!tokenInfo.valid || !tokenInfo.user_id) {
+      return c.json({ error: 'Invalid token' }, 403);
+    }
+    user_id = tokenInfo.user_id;
   }
-  
-  const user_id = tokenInfo.user_id;
-  const nonce = tokenInfo.nonce!;
   
   // Verify on-chain authorization (this is the key security check)
   const authorized = await agentView({

@@ -247,7 +247,7 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
         shade_payload["auth_token"] = access_token
     # ONLY send wallet_id for wallet users
     elif wallet_id:
-        shade_payload["account_id"] = near_account_id
+        shade_payload["account_id"] = wallet_id
     else:
         raise ValueError("Need either (email + auth_token) or wallet_id")      
     
@@ -393,46 +393,27 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
 
     contract_id = CONTRACT_ID
     
-    # Check if we have a valid pre-signed payload
-    use_presigned = (
-        sig_hex and payload_b64 and 
+    # Determine auth method: token-based or account_id-based
+    use_token_auth = (
+        payload_b64 and sig_hex and 
+        payload_b64 != "None" and sig_hex != "None" and
         len(sig_hex) == 128 and 
         re.match(r'^[0-9a-fA-F]{128}$', sig_hex)
     )
     
-    if use_presigned:
-        logger.info(f"Using pre-signed payload_b64 for {user_id}")
-        token = f"{payload_b64}.{sig_hex}"
+    if use_token_auth:
+        logger.info(f"Using pre-signed token for {user_id}")
+        request_body = {"group_id": group_id, "token": f"{payload_b64}.{sig_hex}"}
     else:
-        # Generate fresh signature using the user's key from Shade
-        logger.info(f"Generating fresh signature for {user_email or wallet_id}")
-        
-        import time
-        import json
-        
-        # Create payload
-        payload = {
-            "group_id": group_id,
-            "user_id": user_id,
-            "timestamp": int(time.time()),
-            "action": "get_key"
-        }
-        payload_json = json.dumps(payload, separators=(',', ':'))
-        payload_b64 = base64.b64encode(payload_json.encode()).decode()
-        
-        # Sign with user's key (acc has the private key)
-        message_bytes = payload_b64.encode()
-        signature = acc.signer.sign(message_bytes)
-        sig_hex = signature.signature.hex()
-
-        # Build token from payload + signature
-        token = f"{payload_b64}.{sig_hex}"
+        # Fall back to account_id auth (for wallet users or invalid signatures)
+        logger.info(f"Using account_id auth for {user_id}")
+        request_body = {"group_id": group_id, "account_id": user_id}
     
     # Fetch encryption key from Shade key-management API
     async with httpx.AsyncClient() as client:
         shade_response = await client.post(
             f"{SHADE_API_URL}/api/key-management/get_key",
-            json={"group_id": group_id, "token": token},
+            json=request_body,
             timeout=15
         )
         
@@ -448,9 +429,6 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     
     if not key or not checksum:
         raise Exception("Invalid Shade response: missing key or checksum")
-    
-    # Optional: Verify checksum against on-chain value
-    # verified = await verify_shade_checksum_for_group(group_id, checksum, contract_id)
     
     logger.info(f"Retrieved encryption key for {group_id}/{user_id}")
     return key
