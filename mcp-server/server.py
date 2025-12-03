@@ -240,12 +240,16 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
     
     # Build Shade API request
     shade_payload = {}
-    if user_email:
+
+    # ONLY send email + access token for email users
+    if user_email and access_token:
         shade_payload["email"] = user_email
-    if wallet_id:
-        shade_payload["wallet_id"] = wallet_id
-    if access_token:
         shade_payload["auth_token"] = access_token
+    # ONLY send wallet_id for wallet users
+    elif wallet_id:
+        shade_payload["wallet_id"] = wallet_id
+    else:
+        raise ValueError("Need either (email + auth_token) or wallet_id")      
     
     logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}")
     
@@ -1020,8 +1024,8 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
     contract_id = CONTRACT_ID
     
     # Estimate fees
-    claim_fee = await _estimate_fee(contract_id, "claim_token")
-    record_fee = await _estimate_fee(contract_id, "record_transaction")
+    claim_fee = await _estimate_fee("claim_token")
+    record_fee = await _estimate_fee("record_transaction")
     total_fee = claim_fee + record_fee
     gas_margin = 400_000_000_000_000
     total_attach = total_fee + gas_margin  # Logged for relayer budgeting
@@ -1078,7 +1082,7 @@ async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payloa
     if not ipfs_hash.startswith('Qm'):
         raise ValueError(f"Invalid CID: {ipfs_hash}")
     
-    est_claim_fee = await _estimate_fee(contract_id, "claim_token")
+    est_claim_fee = await _estimate_fee("claim_token")
     
     logger.info(f"Starting composite retrieve for {near_account_id} from group {group_id}, (est fee: {est_claim_fee / 1e24:.4f} NEAR)")
     
