@@ -394,25 +394,20 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     contract_id = CONTRACT_ID
     
     # Skip signature validation if using authenticated session
-    if payload_b64 and sig_hex and sig_hex != "None" and payload_b64 != "None" and len(sig_hex) == 128 and re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
-        token = f"{payload_b64}.{sig_hex}"
+    if sig_hex and payload_b64:
+        # Only use pre-signed payload if signature is valid format
+        if len(sig_hex) == 128 and re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
+            logger.info(f"Using pre-signed payload_b64 for {user_id}")
+        else:
+            # Invalid signature format - fall back to authenticated session
+            logger.info(f"Invalid sig_hex provided, using authenticated session for {user_email or wallet_id}")
+            sig_hex = None
+            payload_b64 = None
     else:
-        # Generate fresh signed token using user's key    
-        payload = {
-            "user_id": user_id,
-            "group_id": group_id,
-            "nonce": int(time.time() * 1000)
-        }
-        payload_json = json.dumps(payload, separators=(',', ':'))
-        payload_b64 = base64.b64encode(payload_json.encode()).decode()
-    
-        # Sign with user's key
-        signature = acc.signer.sign(payload_b64.encode())
-        sig_hex = signature.signature.hex()
+        logger.info(f"Using authenticated session for {user_email or wallet_id}")
 
-        # Build token from payload + signature
-        token = f"{payload_b64}.{sig_hex}"
-        logger.info(f"Generated fresh token for {user_id}")
+    # Build token from payload + signature
+    token = f"{payload_b64}.{sig_hex}"
     
     # Fetch encryption key from Shade key-management API
     async with httpx.AsyncClient() as client:
