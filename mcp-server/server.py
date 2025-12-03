@@ -395,10 +395,14 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     
     # Skip signature validation if using authenticated session
     if sig_hex and payload_b64:
-        # Validate signature format
-        if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
-            raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
-        logger.info(f"Using pre-signed payload_b64 for {user_id}")
+        # Only use pre-signed payload if signature is valid format
+        if len(sig_hex) == 128 and re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
+            logger.info(f"Using pre-signed payload_b64 for {user_id}")
+        else:
+            # Invalid signature format - fall back to authenticated session
+            logger.info(f"Invalid sig_hex provided, using authenticated session for {user_email or wallet_id}")
+            sig_hex = None
+            payload_b64 = None
     else:
         logger.info(f"Using authenticated session for {user_email or wallet_id}")
 
