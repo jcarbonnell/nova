@@ -389,11 +389,14 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
 
     contract_id = CONTRACT_ID
     
-    # Validate signature format
-    if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
-        raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
-    
-    logger.info(f"Using pre-signed payload_b64 for {user_id}: {payload_b64[:50]}...")
+    # Skip signature validation if using authenticated session
+    if sig_hex and payload_b64:
+        # Validate signature format
+        if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
+            raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
+        logger.info(f"Using pre-signed payload_b64 for {user_id}")
+    else:
+        logger.info(f"Using authenticated session for {user_email or wallet_id}")
 
     # Build token from payload + signature
     token = f"{payload_b64}.{sig_hex}"
@@ -607,7 +610,7 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
         logger.error(f"Transaction submission error: {e}")
         raise ValueError(f"Record failed: {str(e)}")
     
-async def _estimate_fee(contract_id: str, action: str) -> int:
+async def _estimate_fee(action: str) -> int:
     """Queries contract for fee yoctoNEAR."""
     contract_id = os.environ["CONTRACT_ID"]
     # Use dummy key for view-only calls
