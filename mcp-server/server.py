@@ -850,6 +850,22 @@ async def register_group(ctx: Context, group_id: str) -> str:
         )
         
     logger.info(f"Group {group_id} registered by {near_account_id}")
+
+    # Generate encryption key in Shade TEE
+    try:
+        async with httpx.AsyncClient() as client:
+            shade_response = await client.post(
+                f"{SHADE_API_URL}/api/key-management/generate_key",
+                json={"group_id": group_id, "owner": near_account_id},
+                timeout=15
+            )
+            if shade_response.status_code == 200:
+                logger.info(f"Encryption key generated in Shade for group {group_id}")
+            else:
+                logger.warning(f"Shade key generation failed: {shade_response.text}")
+    except Exception as e:
+        logger.warning(f"Shade key generation error (group still registered): {e}")
+        
     return f"Group '{group_id}' registered successfully"
         
 
