@@ -224,11 +224,7 @@ async def auth_callback(request: Request):
     )
 
 # Automated signing in MCP - Fetches key from Shade TEE
-async def get_user_signer(
-        near_account_id: str, 
-        user_email: str = None, 
-        wallet_id: str = None
-) -> Account:
+async def get_user_signer(near_account_id: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> Account:
     """
     Fetches user's private key from Shade TEE and returns a signing Account.
     Works for both email users and wallet users.
@@ -387,7 +383,8 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
     acc = await get_user_signer(
         near_account_id=user_id,
         user_email=user_email,
-        wallet_id=wallet_id
+        wallet_id=wallet_id,
+        access_token=access_token
     )
 
     contract_id = CONTRACT_ID
@@ -555,7 +552,8 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
     acc = await get_user_signer(
         near_account_id=user_id,
         user_email=user_email,
-        wallet_id=wallet_id
+        wallet_id=wallet_id,
+        access_token=access_token
     )
     
     # Estimate fee for the transaction
@@ -825,7 +823,8 @@ async def register_group(ctx: Context, group_id: str) -> str:
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id
+        wallet_id=wallet_id,
+        access_token=access_token
     )
     
     # Estimate fee
@@ -864,7 +863,8 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id
+        wallet_id=wallet_id,
+        access_token=access_token
     )
     
     # Estimate fee
@@ -901,7 +901,8 @@ async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> st
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id
+        wallet_id=wallet_id,
+        access_token=access_token
     )
     
     # Estimate fee

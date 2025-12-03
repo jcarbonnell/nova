@@ -1,3 +1,4 @@
+#requirements.txt for mcp server to fastmcp
 fastmcp==2.13.0.2
 fastapi==0.121.1
 py-near==1.1.59
