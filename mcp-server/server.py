@@ -393,21 +393,40 @@ async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_
 
     contract_id = CONTRACT_ID
     
-    # Skip signature validation if using authenticated session
-    if sig_hex and payload_b64:
-        # Only use pre-signed payload if signature is valid format
-        if len(sig_hex) == 128 and re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
-            logger.info(f"Using pre-signed payload_b64 for {user_id}")
-        else:
-            # Invalid signature format - fall back to authenticated session
-            logger.info(f"Invalid sig_hex provided, using authenticated session for {user_email or wallet_id}")
-            sig_hex = None
-            payload_b64 = None
+    # Check if we have a valid pre-signed payload
+    use_presigned = (
+        sig_hex and payload_b64 and 
+        len(sig_hex) == 128 and 
+        re.match(r'^[0-9a-fA-F]{128}$', sig_hex)
+    )
+    
+    if use_presigned:
+        logger.info(f"Using pre-signed payload_b64 for {user_id}")
+        token = f"{payload_b64}.{sig_hex}"
     else:
-        logger.info(f"Using authenticated session for {user_email or wallet_id}")
+        # Generate fresh signature using the user's key from Shade
+        logger.info(f"Generating fresh signature for {user_email or wallet_id}")
+        
+        import time
+        import json
+        
+        # Create payload
+        payload = {
+            "group_id": group_id,
+            "user_id": user_id,
+            "timestamp": int(time.time()),
+            "action": "get_key"
+        }
+        payload_json = json.dumps(payload, separators=(',', ':'))
+        payload_b64 = base64.b64encode(payload_json.encode()).decode()
+        
+        # Sign with user's key (acc has the private key)
+        message_bytes = payload_b64.encode()
+        signature = acc.signer.sign(message_bytes)
+        sig_hex = signature.signature.hex()
 
-    # Build token from payload + signature
-    token = f"{payload_b64}.{sig_hex}"
+        # Build token from payload + signature
+        token = f"{payload_b64}.{sig_hex}"
     
     # Fetch encryption key from Shade key-management API
     async with httpx.AsyncClient() as client:
