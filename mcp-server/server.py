@@ -247,7 +247,7 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
         shade_payload["auth_token"] = access_token
     # ONLY send wallet_id for wallet users
     elif wallet_id:
-        shade_payload["account_id"] = near_account_id
+        shade_payload["wallet_id"] = wallet_id
     else:
         raise ValueError("Need either (email + auth_token) or wallet_id")      
     
