@@ -1055,15 +1055,21 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
     
     logger.info(f"Starting composite upload for {effective_user_id} (est total fee: {total_fee / 1e24:.4f} NEAR)")
     
+    # Normalize data to bytes
+    try:
+        data_bytes = base64.b64decode(data, validate=True)
+    except Exception:
+        data_bytes = data.encode('utf-8')
+
     try:
         # Step 1: Fetch key from shade
         key = await _get_shade_key(group_id=group_id, user_id=near_account_id, contract_id=contract_id, session_token=session_token, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         # Step 2: Encrypt (sync, fast)
         encrypted_b64 = _encrypt_data(data, key)
         # Step 3: Async IPFS upload
-        cid = await _ipfs_upload(encrypted_b64, filename)  # Direct async call
+        cid = await _ipfs_upload(encrypted_b64, filename)
         # Step 4: Hash original data
-        file_hash = hashlib.sha256(base64.b64decode(data)).hexdigest()
+        file_hash = hashlib.sha256(data_bytes).hexdigest()
         # Step 5: Record tx (uses relayer)
         trans_id = await _record_near_transaction(group_id=group_id, user_id=near_account_id, file_hash=file_hash, ipfs_hash=cid, contract_id=contract_id, session_token=session_token, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         logger.info(f"Composite upload success: CID={cid}, Trans={trans_id}")
