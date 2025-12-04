@@ -365,7 +365,7 @@ def get_authenticated_user() -> dict:
         "access_token": access_token,
     }
 
-async def _get_shade_key(group_id: str, user_id: str, contract_id: str, session_token: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
+async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
     """
     Retrieves encryption key from Shade TEE for a group.
     
@@ -1063,7 +1063,7 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
 
     try:
         # Step 1: Fetch key from shade
-        key = await _get_shade_key(group_id=group_id, user_id=near_account_id, contract_id=contract_id, session_token=session_token, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
+        key = await _get_shade_key(group_id=group_id, user_id=near_account_id, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         # Step 2: Encrypt (sync, fast)
         encrypted_b64 = _encrypt_data(data, key)
         # Step 3: Async IPFS upload
@@ -1071,7 +1071,7 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str,
         # Step 4: Hash original data
         file_hash = hashlib.sha256(data_bytes).hexdigest()
         # Step 5: Record tx (uses relayer)
-        trans_id = await _record_near_transaction(group_id=group_id, user_id=near_account_id, file_hash=file_hash, ipfs_hash=cid, contract_id=contract_id, session_token=session_token, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
+        trans_id = await _record_near_transaction(group_id=group_id, user_id=near_account_id, file_hash=file_hash, ipfs_hash=cid, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
         logger.info(f"Composite upload success: CID={cid}, Trans={trans_id}")
         return {
             "cid": cid,
