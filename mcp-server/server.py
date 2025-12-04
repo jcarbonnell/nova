@@ -463,7 +463,13 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
 
 def _encrypt_data(data: str, key: str) -> str:
     """Encrypts base64 data with AES-256-CBC."""
-    data_bytes = base64.b64decode(data)
+    # Try to decode as base64 first (for binary files or pre-encoded data)
+    try:
+        data_bytes = base64.b64decode(data, validate=True)
+    except Exception:
+        # Fall back to UTF-8 encoding for raw text
+        data_bytes = data.encode('utf-8')
+
     key_bytes = base64.b64decode(key)[:32]
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
@@ -1091,6 +1097,7 @@ async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payloa
     wallet_id = user.get("wallet_id")
     access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
+    session_token = user.get("session_token")
     
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
