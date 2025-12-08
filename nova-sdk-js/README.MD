@@ -29,7 +29,7 @@ async function main() {
   // Initialize SDK
   const sdk = new NovaSdk(
     'https://rpc.testnet.near.org',
-    'nova-sdk-4.testnet',
+    'nova-sdk-5.testnet',
     'your_pinata_api_key',
     'your_pinata_secret_key',
     'https://your-shade-agent.phala.network'
