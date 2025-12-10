@@ -25,324 +25,146 @@ npm install nova-sdk-js
 ```typescript
 import { NovaSdk } from 'nova-sdk-js';
 
-async function main() {
-  // Initialize SDK with email (requires NOVA account at nova-sdk.com)
-  const sdk = new NovaSdk({ email: 'user@example.com' });
+// 1. Get your session token from nova-sdk.com after login
+const sessionToken = 'eyJhbG...'; // JWT from nova-sdk.com/api/auth/session-token
 
-  // OR with NEAR wallet
-  const sdk = new NovaSdk({ walletId: 'alice.near' });
+// 2. Initialize SDK
+const sdk = new NovaSdk('alice-nova.nova-sdk-5.testnet', { sessionToken });
 
-  // OR with known NOVA account ID
-  const sdk = new NovaSdk({ accountId: 'alice-nova.nova-sdk-5.testnet' });
-
-  // Upload encrypted file (MCP handles encryption, IPFS, signing)
-  const data = Buffer.from('Confidential data');
-  const result = await sdk.compositeUpload(
-    'project_alpha',      // group_id
-    data,                 // data buffer
-    'report.txt'          // filename
-  );
-
-  console.log('✅ Uploaded to IPFS:', result.cid);
-  console.log('📝 Transaction ID:', result.trans_id);
-  console.log('🔒 File Hash:', result.file_hash);
-  console.log('💰 Fee:', result.fee_breakdown.total, 'NEAR');
-
-  // Retrieve and decrypt file
-  const retrieved = await sdk.compositeRetrieve(
-    'project_alpha',
-    result.cid
-  );
-
-  const content = retrieved.data.toString('utf8');
-  console.log('📄 Content:', content);
-}
-
-main().catch(console.error);
+// 3. Upload a file
+const data = Buffer.from('Hello, NOVA!');
+const result = await sdk.compositeUpload('my-group', data, 'hello.txt');
+console.log('CID:', result.cid);
 ```
 
-## Architecture
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   Your App  │ ──── │  MCP Server │ ──── │  Shade TEE  │
-│  (SDK v3)   │      │  (FastMCP)  │      │   (Phala)   │
-└─────────────┘      └─────────────┘      └─────────────┘
-                            │
-                     ┌──────┴──────┐
-                     │             │
-              ┌──────┴───┐   ┌─────┴─────┐
-              │   NEAR   │   │   IPFS    │
-              │ Contract │   │ (Pinata)  │
-              └──────────┘   └───────────┘
+## Getting Started
 
-## Core Concepts
+1. **Create an account** at nova-sdk.com by connecting your NEAR wallet or email or social.
 
-### User Identification
-NOVA v3 supports multiple authentication methods:
-
-```typescript
-// Email user (Auth0)
-const sdk = new NovaSdk({ email: 'user@example.com' });
-
-// NEAR wallet user
-const sdk = new NovaSdk({ walletId: 'alice.near' });
-
-// Direct account ID (if already known)
-const sdk = new NovaSdk({ accountId: 'alice-nova.nova-sdk-5.testnet' });
-
-// With Auth0 token (for email users in custom apps)
-const sdk = new NovaSdk({ 
-  email: 'user@example.com',
-  authToken: 'jwt-token-from-auth0'
-});
+2. **Get your session token** by calling the session-token API after login:
+```bash
+# For wallet users:
+   curl -X POST https://nova-sdk.com/api/auth/session-token \
+     -H "Content-Type: application/json" \
+     -d '{"wallet_id": "alice.near"}'
+   
+   # Response:
+   # { "token": "eyJhbG...", "account_id": "alice-nova.nova-sdk-5.testnet" }
 ```
 
-### Groups
+3. **Use the SDK** with your account ID and session token
 
-Groups provide isolated access control domains. Each group has:
-- A unique identifier (`group_id`)
-- An owner who manages membership
-- TEE-derived encryption keys (generated in Shade Agent on registration)
-- Immutable transaction logs
+## Core Operations
 
+### Upload a File
 ```typescript
-// Register new group (caller becomes owner)
-await sdk.registerGroup('secure_vault');
+const data = Buffer.from('Hello, NOVA!');
+const result = await sdk.compositeUpload('my-group', data, 'hello.txt');
 
-// Add members
-await sdk.addGroupMember('secure_vault', 'bob-nova.nova-sdk-5.testnet');
-
-// Check authorization
-const authorized = await sdk.isAuthorized('secure_vault');
-
-// Get group owner
-const owner = await sdk.getGroupOwner('secure_vault');
-
-// Verify group TEE checksum
-const checksum = await sdk.getGroupChecksum('secure_vault');
-
-// Revoke member (automatically rotates key)
-await sdk.revokeGroupMember('secure_vault', 'bob-nova.nova-sdk-5.testnet');
+console.log('CID:', result.cid);
+console.log('Transaction ID:', result.trans_id);
+console.log('Fee:', result.fee_breakdown.total, 'NEAR');
 ```
 
-### Encryption & Signing
-
-All encryption and transaction signing is handled by the MCP server:
-- Keys fetched from Shade TEE
-- AES-256-CBC encryption with random IV
-- Ed25519 signatures for NEAR transactions
-- User never handles private keys
-
-Registration triggers Shade key gen; revocation rotates keys off-chain.
-
-## API Reference
-
-### Initialization
-
+### Retrive a File
 ```typescript
-import { NovaSdk, UserIdentifier, NovaSdkConfig } from 'nova-sdk-js';
+const result = await sdk.compositeRetrieve('my-group', 'QmXyz...');
 
-const sdk = new NovaSdk(
-  userIdentifier: UserIdentifier,
-  config?: NovaSdkConfig
-);
-```
-
-### UserIdentifier
-
-```typescript
-interface UserIdentifier {
-  email?: string;      // Email (for Auth0 users)
-  walletId?: string;   // NEAR wallet ID (e.g., 'alice.near')
-  accountId?: string;  // NOVA account (e.g., 'alice-nova.nova-sdk-5.testnet')
-  authToken?: string;  // Optional Auth0 JWT
-}
-```
-
-### NovaSdkConfig
-
-```typescript
-interface NovaSdkConfig {
-  rpcUrl?: string;     // Default: 'https://rpc.testnet.near.org'
-  contractId?: string; // Default: 'nova-sdk-5.testnet'
-  mcpUrl?: string;     // Default: 'https://nova-mcp.fastmcp.app'
-  shadeUrl?: string;   // Default: 'https://shade-agent-nova.phala.network'
-}
-```
-
-### User Context
-
-```typescript
-// Get resolved NOVA account ID
-await sdk.getAccountId(): Promise<string>
-
-// Resolve account from Shade TEE
-await sdk.resolveUserAccount(): Promise<{
-  accountId?: string;
-  publicKey?: string;
-  network?: string;
-}>
-
-// Check authentication status
-await sdk.authStatus(groupId?: string): Promise<AuthStatusResult>
+console.log('Data:', result.data.toString());
+console.log('File hash:', result.file_hash);
 ```
 
 ### Group Management
+```typescript
+// Create a new group (you become owner)
+await sdk.registerGroup('my-team');
+
+// Add members
+await sdk.addGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
+
+// Revoke access (triggers key rotation)
+await sdk.revokeGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
+```
+
+### Check Authorization
+```typescript
+const isAuthorized = await sdk.isAuthorized('my-group');
+console.log('Authorized:', isAuthorized);
+
+const status = await sdk.authStatus('my-group');
+console.log('Status:', status);
+```
+
+### Security Model
+
+1. **Session token (JWT)** proves you own the account
+2. **MCP server** verifies token before any operation
+3. **Only the authenticated owner** can use their account
+4. **Encryption keys** managed securely in TEE
+
+## Configuration
 
 ```typescript
-// Create new group (triggers TEE key generation)
-await sdk.registerGroup(groupId: string): Promise<string>
+const sdk = new NovaSdk('alice-nova.nova-sdk.near', {
+  sessionToken: 'eyJhbG...',                 // Required: JWT from nova-sdk.com
+  rpcUrl: 'https://rpc.testnet.near.org',    // Optional: default testnet
+  contractId: 'nova-sdk.near',               // Optional: default nova-sdk-5.testnet
+  mcpUrl: 'https://nova-mcp.fastmcp.app',    // Optional: rarely change
+});
+```
 
-// Grant access to user
-await sdk.addGroupMember(groupId: string, memberId: string): Promise<string>
+## Token Refresh
 
-// Revoke access (triggers TEE key rotation)
-await sdk.revokeGroupMember(groupId: string, memberId: string): Promise<string>
+Session tokens expire after 24 hours. Refresh by calling the session-token endpoint again:
 
-// Check user authorization
-await sdk.isAuthorized(groupId: string, userId?: string): Promise<boolean>
+```typescript
+async function refreshToken(walletId: string): Promise<string> {
+  const response = await fetch('https://nova-sdk.com/api/auth/session-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wallet_id: walletId }),
+  });
+  const data = await response.json();
+  return data.token;
+}
+```
+
+## Read-Only Queries
+
+These don't require MCP authentication (direct RPC calls):
+
+```typescript
+// Check balance
+const balance = await sdk.getBalance();
 
 // Get group owner
-await sdk.getGroupOwner(groupId: string): Promise<string | null>
+const owner = await sdk.getGroupOwner('my-group');
 
-// Get TEE checksum
-await sdk.getGroupChecksum(groupId: string): Promise<string | null>
-```
+// Get fee estimate
+const fee = await sdk.estimateFee('record_transaction');
 
-### File Operations
-
-```typescript
-// Upload: Encrypt → IPFS → Record on-chain
-await sdk.compositeUpload(
-  groupId: string,
-  data: Buffer,
-  filename: string
-): Promise<CompositeUploadResult>
-
-// Retrieve: IPFS → Decrypt
-await sdk.compositeRetrieve(
-  groupId: string,
-  ipfsHash: string
-): Promise<CompositeRetrieveResult>
-
-// Query transaction history
-await sdk.getTransactionsForGroup(
-  groupId: string,
-  userId?: string
-): Promise<Transaction[]>
-```
-
-### Utilities
-
-```typescript
-// Check NEAR account balance (in yoctoNEAR)
-await sdk.getBalance(accountId?: string): Promise<string>
-
-// Estimate fee for an action
-await sdk.estimateFee(action: string): Promise<bigint>
-
-// Compute SHA256 hash
-sdk.computeHash(data: Buffer): string
-```
-
-## Types
-
-```typescript
-interface Transaction {
-  group_id: string;
-  user_id: string;
-  file_hash: string;
-  ipfs_hash: string;
-}
-
-interface FeeBreakdown {
-  claim: number;
-  record?: number;
-  total: number;
-}
-
-interface CompositeUploadResult {
-  cid: string;              // IPFS content identifier
-  trans_id: string;         // NEAR transaction ID
-  file_hash: string;        // SHA256 hash (hex)
-  fee_breakdown: FeeBreakdown;
-}
-
-interface CompositeRetrieveResult {
-  data: Buffer;             // Decrypted file data
-  file_hash: string;        // SHA256 hash for verification
-  fee_breakdown: FeeBreakdown;
-  ipfs_hash: string;
-  group_id: string;
-}
-
-interface AuthStatusResult {
-  authenticated: boolean;
-  email?: string;
-  wallet_id?: string;
-  near_account_id?: string;
-  authorized_for_group?: boolean;
-}
-
-class NovaError extends Error {
-  constructor(message: string, cause?: Error);
-}
-```
-
-## Environment Setup
-
-For testing and development, set these variables in a `.env` file:
-
-```bash
-# NOVA account ID for integration tests
-TEST_NOVA_ACCOUNT_ID=your-nova-account.nova-sdk-5.testnet
-```
-
-
-## Testing
-
-```bash
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Run with coverage
-npm run test:coverage
+// List transactions
+const txs = await sdk.getTransactionsForGroup('my-group');
 ```
 
 ## Error Handling
 
-The SDK uses a custom `NovaError` class:
-
 ```typescript
-import { NovaSdk, NovaError } from 'nova-sdk-js';
+import { NovaError } from 'nova-sdk-js';
 
 try {
-  await sdk.compositeUpload('my_group', data, 'file.txt');
-} catch (error) {
-  if (error instanceof NovaError) {
-    console.error('NOVA error:', error.message);
-    if (error.cause) console.error('Caused by:', error.cause);
+  await sdk.compositeUpload('my-group', data, 'file.txt');
+} catch (e) {
+  if (e instanceof NovaError) {
+    if (e.message.includes('expired')) {
+      // Token expired - refresh and retry
+      const newToken = await refreshToken(walletId);
+      // Reinitialize SDK with new token
+    }
+    console.error('NOVA error:', e.message);
   }
 }
 ```
-
-Common errors: 
-- ```No NOVA account found``` - Create account at nova-sdk.com first
-- ```MCP tool failed: Unauthorized``` - User not authorized for group
-- ```Invalid CID``` - IPFS hash must start with 'Qm'
-
-
-## Security Considerations
-
-⚠️ **NOVA v3 Security Model:**
-
-1. **No Client-Side Keys** - Private keys never leave Shade TEE.
-2. **MCP as Trusted Intermediary**: Signs on behalf of authenticated users.
-3. **TEE Privacy**: Keys in encrypted Shade DB; attested checksums on-chain.
-4. **User Authentication**: Email users via Auth0 JWT; wallet users via wallet_id lookup.
-5. **IPFS Encryption**: All data encrypted before upload.
 
 ## NEAR Deposits
 
@@ -355,64 +177,6 @@ Some operations require NEAR token deposits (paid from user's NOVA account):
 - `compositeRetrieve()` - 0.001 NEAR (claim only)
 
 Ensure your NOVA account has sufficient balance before calling these methods.
-
-## Examples
-
-### Secure File Sharing
-
-```typescript
-const sdk = new NovaSdk({ email: 'alice@example.com' });
-
-// Create a group
-await sdk.registerGroup('team_docs');
-
-// Add collaborator
-await sdk.addGroupMember('team_docs', 'bob-nova.nova-sdk-5.testnet');
-
-// Upload confidential document
-const doc = Buffer.from('Q3 Financial Report...');
-const result = await sdk.compositeUpload('team_docs', doc, 'q3-report.txt');
-console.log('Shared at:', result.cid);
-
-// Bob retrieves (using his own SDK instance)
-const bobSdk = new NovaSdk({ walletId: 'bob.near' });
-const retrieved = await bobSdk.compositeRetrieve('team_docs', result.cid);
-console.log('Content:', retrieved.data.toString());
-```
-
-### Check Group Status
-
-```typescript
-const sdk = new NovaSdk({ accountId: 'alice-nova.nova-sdk-5.testnet' });
-
-// Get group info
-const owner = await sdk.getGroupOwner('team_docs');
-const checksum = await sdk.getGroupChecksum('team_docs');
-const authorized = await sdk.isAuthorized('team_docs');
-
-console.log('Owner:', owner);
-console.log('TEE Checksum:', checksum);
-console.log('I am authorized:', authorized);
-
-// List transactions
-const txs = await sdk.getTransactionsForGroup('team_docs');
-txs.forEach(tx => {
-  console.log(`File: ${tx.file_hash} → IPFS: ${tx.ipfs_hash}`);
-});
-```
-
-## Building from Source
-
-```bash
-# Install dependencies
-npm install
-
-# Build TypeScript
-npm run build
-
-# Run tests
-npm test
-```
 
 ## Contributing
 
