@@ -44,7 +44,6 @@ const crypto = __importStar(require("crypto"));
 const buffer_1 = require("buffer");
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
-const SHADE_API_URL = 'https://111507d14bb0a0c60d28a61bf6a973ccf4691a36-3000.dstack-prod5.phala.network';
 const DEFAULT_RPC_URL = 'https://rpc.testnet.near.org';
 const DEFAULT_CONTRACT_ID = 'nova-sdk-5.testnet';
 class NovaError extends Error {
@@ -58,98 +57,36 @@ class NovaError extends Error {
 exports.NovaError = NovaError;
 class NovaSdk {
     provider;
-    userIdentifier;
+    sessionToken;
+    accountId;
     contractId;
     mcpUrl;
-    shadeUrl;
     rpcUrl;
-    constructor(userIdOrConfig, config) {
-        this.userIdentifier = userIdOrConfig;
+    constructor(accountId, config) {
+        if (!accountId || typeof accountId !== 'string') {
+            throw new NovaError('accountId required: get yours at nova-sdk.com');
+        }
+        if (!config?.sessionToken) {
+            throw new NovaError('sessionToken required: get yours at nova-sdk.com/api/auth/session-token');
+        }
+        this.accountId = accountId;
+        this.sessionToken = config.sessionToken;
         this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
         this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
         this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
-        this.shadeUrl = config?.shadeUrl || SHADE_API_URL;
         this.provider = new providers_1.JsonRpcProvider({ url: this.rpcUrl });
-        // Validate user identifier
-        if (!this.userIdentifier.email && !this.userIdentifier.walletId && !this.userIdentifier.accountId) {
-            throw new NovaError('User identifier required: provide email, walletId, or accountId');
-        }
     }
-    // User Context Management
-    // Get the NOVA account ID for this user.
-    async getAccountId() {
-        if (this.userIdentifier.accountId) {
-            return this.userIdentifier.accountId;
-        }
-        // Resolve from Shade TEE
-        const resolved = await this.resolveUserAccount();
-        if (!resolved.accountId) {
-            throw new NovaError('No NOVA account found. Please create an account at nova-sdk.com first.');
-        }
-        this.userIdentifier.accountId = resolved.accountId;
-        return resolved.accountId;
-    }
-    // Resolve user's NOVA account from Shade TEE using email or wallet_id.
-    async resolveUserAccount() {
-        const payload = {};
-        if (this.userIdentifier.walletId) {
-            payload.wallet_id = this.userIdentifier.walletId;
-        }
-        else if (this.userIdentifier.email) {
-            payload.email = this.userIdentifier.email;
-            if (this.userIdentifier.authToken) {
-                payload.auth_token = this.userIdentifier.authToken;
-            }
-        }
-        else {
-            throw new NovaError('Cannot resolve account: no email or walletId provided');
-        }
-        try {
-            const response = await axios_1.default.post(`${this.shadeUrl}/api/user-keys/check`, payload, {
-                timeout: 10000,
-                headers: { 'Content-Type': 'application/json' },
-            });
-            if (response.data.exists) {
-                return {
-                    accountId: response.data.account_id,
-                    publicKey: response.data.public_key,
-                    network: response.data.network,
-                };
-            }
-            return {};
-        }
-        catch (e) {
-            if (axios_1.default.isAxiosError(e) && e.response?.status === 404) {
-                return {};
-            }
-            throw new NovaError(`Failed to resolve user account: ${e}`, e);
-        }
-    }
-    // Build HTTP headers for MCP server authentication.
+    // Build HTTP headers for MCP server authentication. 
+    // Includes JWT session token for ownership verification.
     getMcpHeaders() {
-        const headers = {
+        return {
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.sessionToken}`,
+            'X-Account-Id': this.accountId,
         };
-        if (this.userIdentifier.authToken) {
-            headers['Authorization'] = `Bearer ${this.userIdentifier.authToken}`;
-        }
-        if (this.userIdentifier.email) {
-            headers['X-User-Email'] = this.userIdentifier.email;
-        }
-        if (this.userIdentifier.walletId) {
-            headers['X-Wallet-Id'] = this.userIdentifier.walletId;
-        }
-        if (this.userIdentifier.accountId) {
-            headers['X-Account-Id'] = this.userIdentifier.accountId;
-        }
-        return headers;
     }
     // MCP Tool Invocations - Call an MCP tool directly.
     async callMcpTool(toolName, args) {
-        // Ensure we have account ID resolved
-        if (!this.userIdentifier.accountId) {
-            await this.getAccountId();
-        }
         try {
             const response = await axios_1.default.post(`${this.mcpUrl}/tools/${toolName}`, args, {
                 headers: this.getMcpHeaders(),
@@ -196,20 +133,13 @@ class NovaSdk {
     // Upload encrypted file to IPFS and record on NEAR blockchain.
     // MCP server handles: key retrieval, encryption, IPFS upload, transaction signing.
     async compositeUpload(groupId, data, filename, payloadB64, sigHex) {
-        const accountId = await this.getAccountId();
         const dataB64 = data.toString('base64');
-        // If payload/sig not provided, generate them (requires local signing capability)
-        let finalPayloadB64 = payloadB64;
-        let finalSigHex = sigHex;
-        if (!finalPayloadB64 || !finalSigHex) {
-            // For MCP v3, the server can handle signing internally
-            // We pass empty strings and let MCP use get_user_signer()
-            finalPayloadB64 = '';
-            finalSigHex = '';
-        }
+        // For MCP v3, the server handles signing internally
+        const finalPayloadB64 = payloadB64 || '';
+        const finalSigHex = sigHex || '';
         return this.callMcpTool('composite_upload', {
             group_id: groupId,
-            user_id: accountId,
+            user_id: this.accountId,
             data: dataB64,
             filename,
             payload_b64: finalPayloadB64,
@@ -222,7 +152,7 @@ class NovaSdk {
         if (!ipfsHash.startsWith('Qm')) {
             throw new NovaError(`Invalid CID: ${ipfsHash}`);
         }
-        // For MCP v3, server handles signing
+        // For MCP, server handles signing
         const finalPayloadB64 = payloadB64 || '';
         const finalSigHex = sigHex || '';
         const result = await this.callMcpTool('composite_retrieve', {
@@ -241,7 +171,7 @@ class NovaSdk {
     }
     // Read-Only Contract Queries (Direct RPC - no auth needed)
     async getBalance(accountId) {
-        const id = accountId || await this.getAccountId();
+        const id = accountId || this.accountId;
         try {
             const accountView = await this.provider.viewAccount(id);
             return accountView.amount.toString();
@@ -251,7 +181,7 @@ class NovaSdk {
         }
     }
     async isAuthorized(groupId, userId) {
-        const id = userId || await this.getAccountId();
+        const id = userId || this.accountId;
         try {
             const result = await this.provider.query({
                 request_type: 'call_function',
@@ -320,7 +250,7 @@ class NovaSdk {
         }
     }
     async getTransactionsForGroup(groupId, userId) {
-        const id = userId || await this.getAccountId();
+        const id = userId || this.accountId;
         try {
             const result = await this.provider.query({
                 request_type: 'call_function',

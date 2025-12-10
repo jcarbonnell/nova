@@ -1,15 +1,9 @@
 import { Buffer } from 'buffer';
-export interface UserIdentifier {
-    email?: string;
-    walletId?: string;
-    accountId?: string;
-    authToken?: string;
-}
 export interface NovaSdkConfig {
+    sessionToken: string;
     rpcUrl?: string;
     contractId?: string;
     mcpUrl?: string;
-    shadeUrl?: string;
 }
 export interface Transaction {
     group_id: string;
@@ -37,8 +31,6 @@ export interface CompositeRetrieveResult {
 }
 export interface AuthStatusResult {
     authenticated: boolean;
-    email?: string;
-    wallet_id?: string;
     near_account_id?: string;
     authorized_for_group?: boolean;
 }
@@ -48,18 +40,12 @@ export declare class NovaError extends Error {
 }
 export declare class NovaSdk {
     private provider;
-    private userIdentifier;
+    private sessionToken;
+    readonly accountId: string;
     readonly contractId: string;
     readonly mcpUrl: string;
-    readonly shadeUrl: string;
     readonly rpcUrl: string;
-    constructor(userIdOrConfig: UserIdentifier, config?: NovaSdkConfig);
-    getAccountId(): Promise<string>;
-    resolveUserAccount(): Promise<{
-        accountId?: string;
-        publicKey?: string;
-        network?: string;
-    }>;
+    constructor(accountId: string, config: NovaSdkConfig);
     private getMcpHeaders;
     private callMcpTool;
     authStatus(groupId?: string): Promise<AuthStatusResult>;
