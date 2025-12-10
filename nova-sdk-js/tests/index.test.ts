@@ -300,7 +300,8 @@ describe('NovaSdk v3', () => {
         },
         message: 'Request failed with status 401',
       };
-      mockAxiosPost.mockRejectedValueOnce(axiosError);
+      mockAxiosPost.mockRejectedValue(axiosError);
+      mockAxiosIsAxiosError.mockReturnValue(true);
 
       const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
 
