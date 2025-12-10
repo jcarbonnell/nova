@@ -30,6 +30,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_http_headers
 import httpx
 import uvicorn
+import jwt
 
 # Load .env variables
 load_dotenv()
@@ -51,7 +52,12 @@ IPFS_API_SECRET = os.environ.get("IPFS_API_SECRET", "")
 if not (IPFS_API_KEY and IPFS_API_SECRET):
     raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required")
 RELAYER_URL = os.environ.get("RELAYER_URL", "https://relayer.testnet.near.org")
-DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86 # for view-only NEAR RPC calls (never used for signing)
+DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86 # for view-only NEAR RPC calls
+SESSION_TOKEN_SECRET = os.environ.get("SESSION_TOKEN_SECRET")
+if not SESSION_TOKEN_SECRET:
+    raise ValueError("SESSION_TOKEN_SECRET env var required")
+SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
+SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -336,12 +342,42 @@ def get_authenticated_user() -> dict:
         dict with: email, wallet_id, session_token, near_account_id, access_token
     """
     headers = get_http_headers()
-
     user_email = headers.get("x-user-email")
     account_id = headers.get("x-account-id")
     wallet_id = headers.get("x-wallet-id")
     auth_header = headers.get("authorization", "")
+    
+    # Check for SDK session token (nova-sdk-js/rs clients)
+    if auth_header.startswith("Bearer ") and SESSION_TOKEN_SECRET:
+        token = auth_header[7:]
+        try:
+            payload = verify_sdk_session_token(token)
+            verified_account_id = payload.get("account_id")
+            claimed_account_id = headers.get("x-account-id")
+            
+            # Security: Verify claimed account matches JWT
+            if claimed_account_id and claimed_account_id != verified_account_id:
+                logger.warning(f"SDK account mismatch: claimed={claimed_account_id}, token={verified_account_id}")
+                raise ValueError(f"Account ID mismatch")
+            
+            # Extract user type from subject
+            subject = payload.get("sub", "")
+            wallet_id = subject[7:] if subject.startswith("wallet|") else None
+            email = subject[6:] if subject.startswith("email|") else None
+            
+            logger.info(f"SDK session authenticated: {verified_account_id}")
+            return {
+                "email": email,
+                "wallet_id": wallet_id,
+                "session_token": hashlib.sha256(token.encode()).hexdigest(),
+                "near_account_id": verified_account_id,
+                "access_token": token,
+            }
+        except ValueError:
+            # Not a valid SDK token - fall through to existing auth
+            pass
 
+    # check for nova-sdk.com session token
     if not account_id:
         raise ValueError("Missing X-Account-Id header - user not connected")
 
@@ -364,6 +400,36 @@ def get_authenticated_user() -> dict:
         "near_account_id": account_id,
         "access_token": access_token,
     }
+
+def verify_sdk_session_token(token: str) -> dict:
+    """
+    Verify JWT session token from nova-sdk-js (third-party dApps).
+    Returns payload with account_id if valid, raises on invalid.
+    """
+    if not SESSION_TOKEN_SECRET:
+        raise ValueError("SDK session tokens not configured on this server")
+    
+    try:
+        payload = jwt.decode(
+            token,
+            SESSION_TOKEN_SECRET,
+            algorithms=["HS256"],
+            issuer=SESSION_TOKEN_ISSUER,
+            audience=SESSION_TOKEN_AUDIENCE,
+        )
+        
+        if payload.get("type") != "nova_session":
+            raise ValueError("Invalid token type")
+        
+        if not payload.get("account_id"):
+            raise ValueError("Token missing account_id")
+        
+        return payload
+        
+    except jwt.ExpiredSignatureError:
+        raise ValueError("Session token expired. Refresh at nova-sdk.com")
+    except jwt.InvalidTokenError as e:
+        raise ValueError(f"Invalid session token: {str(e)}")
 
 async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex: str, user_email: str = None, wallet_id: str = None, access_token: str = None) -> str:
     """

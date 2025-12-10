@@ -9,3 +9,4 @@ loguru==0.7.3
 httpx==0.28.1
 uvicorn==0.38.0
 cryptography==43.0.1
+PyJWT==2.10.1
