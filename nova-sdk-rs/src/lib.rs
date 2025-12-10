@@ -12,7 +12,7 @@ use reqwest::Client;
 
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL: &str = "https://nova-mcp.fastmcp.app";
-const DEFAULT_RPC_URL: &str = "https://rpc.testnet.fastnear.com/?apiKey=0b1399596423db51740cfbe041490f6a7611a6b0089d30afb7d459939723171c";
+const DEFAULT_RPC_URL: &str = "https://rpc.testnet.near.org";
 const DEFAULT_CONTRACT_ID: &str = "nova-sdk-5.testnet";
 
 #[derive(Error, Debug)]

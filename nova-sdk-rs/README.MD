@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. NOVA v2 hybridizes IPFS storage with Shade Agents and TEEs (via Phala) for verifiable privacy, using ephemeral nonce-based tokens for key access. Files are encrypted client-side and stored off-chain, with on-chain metadata ensuring auditable, group-based controls.
+A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. NOVA hybridizes IPFS storage with Shade Agents and TEEs (via Phala) for verifiable privacy, using ephemeral nonce-based tokens for key access. Files are encrypted client-side and stored off-chain, with on-chain metadata ensuring auditable, group-based controls. In the current SDK, users authenticate with JWT session tokens obtained from nova-sdk.com.
 
 ## Features
 
@@ -19,35 +19,29 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "0.2.0"
+nova-sdk-rs = "0.4.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
 
 ```rust
-use nova_sdk_rs::{NovaSdk, CompositeUploadResult};
-use std::env;
+use nova_sdk_rs::NovaSdk;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK (v2 requires Shade API URL for TEE key fetches)
-    let shade_url = env::var("SHADE_API_URL").unwrap_or("https://your-shade.phala.network".to_string());
+    // 1. Get your session token from nova-sdk.com/api/auth/session-token
+    let session_token = "eyJhbGciOiJIUzI1NiJ9..."; // JWT from nova-sdk.com
+    
+    // 2. Initialize SDK with your NOVA account and session token
     let sdk = NovaSdk::new(
-        "https://rpc.testnet.near.org",
-        "nova-v2-contract.testnet",  // v2 contract
-        "your_pinata_api_key",
-        "your_pinata_secret_key",
-        &shade_url,  // TEE endpoint
-    ).with_signer(
-        "ed25519:your_private_key",
-        "your-account.testnet"
+        "alice-nova.nova-sdk-5.testnet",  // Your NOVA-managed account
+        session_token,
     )?;
 
-    // Upload encrypted file (authenticates via token to TEE for key)
-    let result: CompositeUploadResult = sdk.composite_upload(
-        "secure_project_v2",
-        "alice.testnet",
+    // 3. Upload encrypted file (MCP handles: get key → encrypt → IPFS → record tx)
+    let result = sdk.composite_upload(
+        "secure_project",
         b"Confidential AI dataset",
         "dataset.bin"
     ).await?;
@@ -55,19 +49,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Uploaded to IPFS: {}", result.cid);
     println!("📝 Transaction ID: {}", result.trans_id);
     println!("🔒 File Hash: {}", result.file_hash);
+    println!("💰 Fee: {} NEAR", result.fee_breakdown.total);
 
-    // Retrieve and decrypt (fetches ephemeral key from TEE)
+    // 4. Retrieve and decrypt (MCP handles: get key → fetch IPFS → decrypt)
     let retrieved = sdk.composite_retrieve(
-        "secure_project_v2",
+        "secure_project",
         &result.cid
     ).await?;
 
-    let decrypted = &retrieved.data;  // Vec<u8> for binary
-    println!("📄 Retrieved {} bytes; hash matches: {}", decrypted.len(), retrieved.file_hash);
+    println!("📄 Retrieved {} bytes", retrieved.data.len());
+    println!("✅ Hash matches: {}", retrieved.file_hash == result.file_hash);
 
     Ok(())
 }
 ```
+
+## Getting Your Session Token
+
+Before using the SDK, obtain a session token from nova-sdk.com:
+
+```bash
+# For wallet users
+curl -X POST https://nova-sdk.com/api/auth/session-token \
+  -H "Content-Type: application/json" \
+  -d '{"wallet_id": "your-wallet.near"}'
+
+# Response: { "token": "eyJhbG...", "account_id": "you-nova.nova-sdk-5.testnet", "expires_in": 86400 }
+```
+
+The session token is valid for 24 hours. Store it securely and refresh before expiry.
 
 ## Core Concepts
 
@@ -95,13 +105,10 @@ sdk.register_group("secure_vault").await?;
 // Add members
 sdk.add_group_member("secure_vault", "bob.testnet").await?;
 
-// Check authorization
-let authorized = sdk.is_authorized("secure_vault", "bob.testnet").await?;
+// Check authorization (direct RPC - no MCP needed)
+let authorized = sdk.is_authorized("secure_vault", Some("bob.testnet")).await?;
 
-// Fetch key from TEE
-let key_b64 = sdk.get_group_key("secure_v2", "bob.testnet").await?;
-
-// Revoke member (automatically rotates key)
+// Revoke member (automatically rotates key in TEE)
 sdk.revoke_group_member("secure_vault", "bob.testnet").await?;
 ```
 
@@ -115,26 +122,21 @@ All data is encrypted client-side using AES-256-CBC:
 
 ### Transaction Recording
 
-Records file metadata (CID/hash) on-chain; now callable by any group member (v2 enhancement).
+File metadata (CID/hash) is recorded on-chain automatically during composite_upload.
 
 ```rust
-let trans_id = sdk.record_transaction(
-    "my_group",
-    "alice.testnet",
-    "file_hash_sha256",
-    "QmIPFSHash"
-).await?;
-
 // Query group transactions
-let txs = sdk.get_transactions_for_group("my_group", "alice.testnet").await?;
+let txs = sdk.get_transactions_for_group("my_group", None).await?;
+for tx in txs {
+    println!("File: {} | IPFS: {}", tx.file_hash, tx.ipfs_hash);
+}
 ```
 
 ## API Overview
 
 ### Initialization
 
-- `NovaSdk::new(rpc_url, contract_id, pinata_key, pinata_secret, shade_api_url)` - Create SDK instance
-- `with_signer(private_key, account_id)` - Attach NEAR signer (ed25519 support for tokens)
+- `NovaSdk::new(account_id, session_token)` - Create SDK instance
 
 ### Group Management
 
@@ -142,11 +144,6 @@ let txs = sdk.get_transactions_for_group("my_group", "alice.testnet").await?;
 - `add_group_member(group_id, user_id)` - Grant access to user.
 - `revoke_group_member(group_id, user_id)` - Revoke access and auto-rotate key in TEE.
 - `is_authorized(group_id, user_id)` - Check user authorization.
-
-### Key Management (TEE-Ephemeral)
-
-- `store_group_key(group_id, user_id)` - Fetches via token flow (signs payload → claim → Shade decrypt + checksum verify).
-- `get_group_key(group_id)` - View on-chain TEE attestation (for manual verification).
 
 ### File Operations
 
@@ -166,11 +163,8 @@ For testing and development, set these environment variables in a `.env` file:
 
 ```bash
 # Required for integration tests
-TEST_NEAR_ACCOUNT_ID=your-account.testnet
-TEST_NEAR_PRIVATE_KEY=ed25519:your_private_key
-PINATA_API_KEY=your_pinata_key
-PINATA_SECRET_KEY=your_pinata_secret
-SHADE_API_URL=https://your-shade.phala.network
+TEST_NOVA_ACCOUNT_ID=alice-nova.nova-sdk-5.testnet
+TEST_SESSION_TOKEN=eyJhbGciOiJIUzI1NiJ9...  # Get from nova-sdk.com
 ```
 
 ## Testing
@@ -193,14 +187,14 @@ The SDK uses a custom `NovaError` enum:
 ```rust
 use nova_sdk_rs::NovaError;
 
-match sdk.get_group_key("my_group", "user.testnet").await {
-    Ok(key) => println!("Key: {}", key),
+match sdk.composite_upload("my_group", b"data", "file.txt").await {
+    Ok(result) => println!("CID: {}", result.cid),
     Err(NovaError::Near(msg)) => eprintln!("RPC error: {}", msg),
-    Err(NovaError::Shade(msg)) => eprintln!("TEE: {}", msg),
-    Err(NovaError::ChecksumMismatch) => eprintln!("TEE attestation failed"),
-    Err(NovaError::InvalidKey) => eprintln!("Invalid encryption key"),
+    Err(NovaError::Mcp(msg)) => eprintln!("MCP server error: {}", msg),
+    Err(NovaError::Auth(msg)) => eprintln!("Authentication error: {}", msg),
+    Err(NovaError::InvalidCid(cid)) => eprintln!("Invalid CID: {}", cid),
     Err(NovaError::ParseAccount) => eprintln!("Invalid account ID"),
-    Err(NovaError::Signing(msg)) => eprintln!("Signing failed: {}", msg),
+    Err(NovaError::Http(msg)) => eprintln!("HTTP error: {}", msg),
 }
 ```
 
@@ -223,7 +217,6 @@ See the [examples](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs/exa
 
 - `simple_upload.rs` - Basic file upload
 - `group_management.rs` - Managing groups and members
-- `key_rotation.rs` - Handling member revocation
 
 ## Contributing
 
