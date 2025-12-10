@@ -1,401 +1,488 @@
-import { NovaSdk, NovaError, Transaction, FeeBreakdown } from '../src/index';
-import * as NodeCrypto from 'crypto';
+// nova/nova-sdk-js/tests/index.test.ts
+import { NovaSdk, NovaError, UserIdentifier, NovaSdkConfig } from '../src/index';
 import axios from 'axios';
 
 jest.mock('axios');
 
 const mockAxiosPost = axios.post as jest.MockedFunction<typeof axios.post>;
-mockAxiosPost.mockResolvedValue({
-  status: 200,
-  data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: '97a57412d4f963777c711137e491829a1635f9a65787ecc0e5d3d7c6c3e5d3be' }
-});
+const mockAxiosIsAxiosError = axios.isAxiosError as jest.MockedFunction<typeof axios.isAxiosError>;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  jest.spyOn(console, 'log').mockImplementation(() => {}); // Mock logs to avoid noise
+  jest.spyOn(console, 'log').mockImplementation(() => {});
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+  mockAxiosIsAxiosError.mockReturnValue(false);
 });
 
 afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe('NovaSdk', () => {
-  const rpcUrl = 'https://rpc.testnet.near.org';
-  const contractId = 'nova-sdk-5.testnet';
-  const fakePinataKey = 'fake_key';
-  const fakePinataSecret = 'fake_secret';
-  const shadeApiUrl = 'https://1b7616f73af7404b06274bb91394525f58f63c53-3000.dstack-prod5.phala.network';
+describe('NovaSdk v3', () => {
+  const defaultConfig: NovaSdkConfig = {
+    rpcUrl: 'https://rpc.testnet.near.org',
+    contractId: 'nova-sdk-5.testnet',
+  };
 
-  test('constructor initializes correctly', () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    expect(sdk.contractId).toBe(contractId);
-    expect(sdk.pinataKey).toBe(fakePinataKey);
-    expect(sdk.pinataSecret).toBe(fakePinataSecret);
-    expect(sdk.shadeApiUrl).toBe(shadeApiUrl);
+  describe('Constructor', () => {
+    test('initializes with email identifier', () => {
+      const sdk = new NovaSdk({ email: 'user@example.com' });
+      expect(sdk.contractId).toBe('nova-sdk-5.testnet');
+      expect(sdk.mcpUrl).toBe('https://nova-mcp.fastmcp.app');
+      expect(sdk.shadeUrl).toBe('https://111507d14bb0a0c60d28a61bf6a973ccf4691a36-3000.dstack-prod5.phala.network');
+    });
+
+    test('initializes with walletId identifier', () => {
+      const sdk = new NovaSdk({ walletId: 'alice.near' });
+      expect(sdk.contractId).toBe('nova-sdk-5.testnet');
+    });
+
+    test('initializes with accountId identifier', () => {
+      const sdk = new NovaSdk({ accountId: 'alice-nova.nova-sdk-5.testnet' });
+      expect(sdk.contractId).toBe('nova-sdk-5.testnet');
+    });
+
+    test('accepts custom config', () => {
+      const sdk = new NovaSdk(
+        { email: 'user@example.com' },
+        {
+          rpcUrl: 'https://rpc.mainnet.near.org',
+          contractId: 'nova-sdk.near',
+          mcpUrl: 'https://custom-mcp.example.com',
+          shadeUrl: 'https://custom-shade.example.com',
+        }
+      );
+      expect(sdk.rpcUrl).toBe('https://rpc.mainnet.near.org');
+      expect(sdk.contractId).toBe('nova-sdk.near');
+      expect(sdk.mcpUrl).toBe('https://custom-mcp.example.com');
+      expect(sdk.shadeUrl).toBe('https://custom-shade.example.com');
+    });
+
+    test('throws without user identifier', () => {
+      expect(() => new NovaSdk({} as UserIdentifier)).toThrow(NovaError);
+      expect(() => new NovaSdk({} as UserIdentifier)).toThrow('User identifier required');
+    });
   });
 
-  test('withSigner accepts valid key format', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    // Mock valid key (in real: use env or test key)
-    const mockKey = 'ed25519:ABC123dummybase58key32bytesencodedhereforrusttest';
-    const result = await sdk.withSigner(mockKey, 'test.account.testnet');
-    expect(result).toBe(sdk);
-  });
+  describe('User Context Management', () => {
+    test('getAccountId returns cached accountId', async () => {
+      const sdk = new NovaSdk({ accountId: 'alice-nova.nova-sdk-5.testnet' });
+      const accountId = await sdk.getAccountId();
+      expect(accountId).toBe('alice-nova.nova-sdk-5.testnet');
+      expect(mockAxiosPost).not.toHaveBeenCalled();
+    });
 
-  test('withSigner rejects completely invalid format', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    await expect(
-      sdk.withSigner('not-a-valid-key', 'test.account.testnet')
-    ).rejects.toThrow(NovaError);
-  });
-
-  test('getBalance returns yoctoNEAR string', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const balance = await sdk.getBalance('nova-sdk-5.testnet');
-    expect(balance).toMatch(/^\d+$/);
-    expect(BigInt(balance)).toBeGreaterThanOrEqual(0n);
-  }, 10000);
-
-  test('isAuthorized returns false for unauthorized user', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const authorized = await sdk.isAuthorized('test-group-1', 'nonexistent.user.testnet');
-    expect(typeof authorized).toBe('boolean');
-    expect(authorized).toBe(false);
-  }, 10000);
-
-  test('estimateFee returns bigint for known action', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    // Mock provider.query to return a sample fee (e.g., 0.001 NEAR = 10^21 yocto)
-    const mockProvider = (sdk as any).provider;
-    const spyQuery = jest.spyOn(mockProvider, 'query');
-    spyQuery.mockResolvedValueOnce({
-      result: '1000000000000000000000' // 10^21 yocto
-    } as any);
-
-    const fee = await sdk.estimateFee('claim_token');
-    expect(fee).toBe(1000000000000000000000n);
-    expect(typeof fee).toBe('bigint');
-
-    spyQuery.mockRestore();
-  });
-
-  test('getGroupKey throws for unauthorized user', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    await expect(
-      sdk.getGroupKey('test-group-1', 'nonexistent.user.testnet')
-    ).rejects.toThrow(NovaError);
-  }, 10000);
-
-  test('getTransactionsForGroup returns array', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    const accountId = process.env.TEST_NEAR_ACCOUNT_ID || 'nova-sdk-5.testnet';
-    
-    try {
-      const transactions = await sdk.getTransactionsForGroup('test-group-1', accountId);
-      expect(Array.isArray(transactions)).toBe(true);
-    } catch (error) {
-      expect(error).toBeInstanceOf(NovaError);
-    }
-  }, 10000);
-
-  test('executeContractCall requires signer', async () => {
-    const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-    await expect(
-      sdk.registerGroup('test_group_new')
-    ).rejects.toThrow('No signer attached');
-  });
-
-  // Integration tests - only run if environment variables are set
-  describe('Integration tests', () => {
-    const privateKey = process.env.TEST_NEAR_PRIVATE_KEY;
-    const accountId = process.env.TEST_NEAR_ACCOUNT_ID;
-    const pinataKey = process.env.PINATA_API_KEY;
-    const pinataSecret = process.env.PINATA_SECRET_KEY;
-
-    const shouldSkip = !privateKey || !accountId;
-    const skipMessage = 'Skipping: TEST_NEAR_PRIVATE_KEY and TEST_NEAR_ACCOUNT_ID required';
-
-    test('withSigner works with valid credentials', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      const signedSdk = await sdk.withSigner(privateKey!, accountId!);
-      expect(signedSdk).toBe(sdk); // Should return same instance
-    }, 10000);
-
-    test('estimateFee returns expected value in integration', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      const fee = await sdk.estimateFee('claim_token');
-      expect(fee).toBeGreaterThan(0n); // Should be >0 for real contract
-    }, 10000);
-
-    test('getGroupKey returns base64 key for authorized user', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      await sdk.withSigner(privateKey!, accountId!);
-
-      const mockChecksum = '97a57412d4f963777c711137e491829a1635f9a65787ecc0e5d3d7c6c3e5d3be';
-
-      // Mock Shade response
+    test('getAccountId resolves from Shade for wallet user', async () => {
       mockAxiosPost.mockResolvedValueOnce({
         status: 200,
-        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: mockChecksum }
+        data: {
+          exists: true,
+          account_id: 'alice-nova.nova-sdk-5.testnet',
+          public_key: 'ed25519:ABC123',
+          network: 'testnet',
+        },
       });
 
-      // Mock provider.query for estimate_fee in getGroupKey
-      const mockQuery = jest.spyOn((sdk as any).provider, 'query');
-      mockQuery.mockResolvedValueOnce({
-        result: '1000000000000000000000' // 0.001 NEAR for estimate_fee
-      } as any);
+      const sdk = new NovaSdk({ walletId: 'alice.near' });
+      const accountId = await sdk.getAccountId();
 
-      // Mock getGroupChecksum: set result to the JSON string directly so decoded = '"hexstr"', parse = 'hexstr'
-      mockQuery.mockResolvedValueOnce({
-        result: JSON.stringify(mockChecksum) // '"hexstr"'
-      } as any);
-
-      // Mock callFunction for claim_token: toString returns base64 of plain token str
-      const mockCallFn = jest.spyOn(sdk.account!, 'callFunction');
-      const plainToken = 'payloadB64.sigHex';
-      mockCallFn.mockResolvedValueOnce({
-        toString: () => Buffer.from(plainToken, 'utf8').toString('base64') // base64 of token str
-      } as any);
-
-      const key = await sdk.getGroupKey('test-group-1', accountId!);
-      console.log('Retrieved key length:', key.length);
-
-      expect(typeof key).toBe('string');
-      expect(key.length).toBeGreaterThan(20);
-      const testBuffer = Buffer.from(key, 'base64');
-      expect(testBuffer.length).toBeGreaterThan(0);
-
-      // Verify fee log was called (since console.log mocked)
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Key access fee:'));
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Cost breakdown:'));
-
-      mockQuery.mockRestore();
-      mockCallFn.mockRestore();
-    }, 10000);
-
-    test('isAuthorized returns true for authorized user', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      const authorized = await sdk.isAuthorized('test-group-1', accountId!);
-      expect(typeof authorized).toBe('boolean');
-    }, 10000);
-
-    test('compositeUpload and retrieve full flow', async () => {
-      if (!privateKey || !accountId || !pinataKey || !pinataSecret) {
-        console.log('Skipping: All env vars required');
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret, shadeApiUrl);
-      await sdk.withSigner(privateKey, accountId);
-
-      // Mock Shade for key fetch
-      (axios.post as jest.Mock).mockResolvedValueOnce({
-        status: 200,
-        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: 'dummy_checksum' }
-      });
-
-      const testData = Buffer.from('Test data for NOVA SDK: ' + Date.now());
-      const filename = `test-v2-${Date.now()}.txt`;
-      
-      const uploadResult = await sdk.compositeUpload('test-group-1', accountId, testData, filename);
-      
-      expect(uploadResult.cid).toMatch(/^Qm[a-zA-Z0-9]{44}$/); // Valid IPFS CID
-      expect(uploadResult.file_hash).toMatch(/^[a-f0-9]{64}$/); // SHA256 hex
-      expect(uploadResult.trans_id).toBeTruthy();
-
-      // Verify fee_breakdown
-      expect(uploadResult.fee_breakdown).toBeDefined();
-      expect(typeof uploadResult.fee_breakdown.claim).toBe('number');
-      expect(typeof uploadResult.fee_breakdown.record).toBe('number');
-      expect(typeof uploadResult.fee_breakdown.total).toBe('number');
-      expect(uploadResult.fee_breakdown.total).toBeGreaterThanOrEqual(0);
-
-      // Mock again for retrieve
-      (axios.post as jest.Mock).mockResolvedValueOnce({
-        status: 200,
-        data: { key: 'dHVtbXlLZXlGb3JUZXN0aW5nCg==', checksum: 'dummy_checksum' }
-      });
-
-      // Retrieve the data
-      const retrieveResult = await sdk.compositeRetrieve('test-group-1', uploadResult.cid);
-      
-      expect(retrieveResult.data.toString()).toBe(testData.toString());
-      expect(retrieveResult.file_hash).toBe(uploadResult.file_hash);
-
-      // Verify fee_breakdown for retrieve
-      expect(retrieveResult.fee_breakdown).toBeDefined();
-      expect(typeof retrieveResult.fee_breakdown.claim).toBe('number');
-      expect(retrieveResult.fee_breakdown.record).toBeUndefined();
-      expect(typeof retrieveResult.fee_breakdown.total).toBe('number');
-      expect(retrieveResult.fee_breakdown.total).toBeGreaterThanOrEqual(0);
-
-      // Verify logs for fees
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Composite upload fee:'));
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Cost breakdown:'));
-      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Composite retrieve fee:'));
-    }, 30000);
-
-    test('transferTokens sends NEAR tokens', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      await sdk.withSigner(privateKey!, accountId!);
-
-      // Send 0.001 NEAR to self (1000000000000000000000 yoctoNEAR)
-      const result = await sdk.transferTokens(accountId!, '1000000000000000000000');
-      expect(result).toBe('Success');
-    }, 30000);
-
-    test('addGroupMember adds member to group', async () => {
-      if (shouldSkip) {
-        console.log(skipMessage);
-        return;
-      }
-
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      await sdk.withSigner(privateKey!, accountId!);
-
-      // Mock estimate_fee for add_group_member
-      const mockQuery = jest.spyOn((sdk as any).provider, 'query');
-      mockQuery.mockResolvedValueOnce({
-        result: '1000000000000000000000' // 0.001 NEAR
-      } as any);
-
-      // Mock callFunction to simulate error (e.g., not owner) for expected failure
-      const mockCallFn = jest.spyOn(sdk.account!, 'callFunction');
-      mockCallFn.mockRejectedValueOnce(new Error('Only group owner can add')); // Simulate contract error
-
-      // Attempt to add a member (may fail if not owner or already exists)
-      try {
-        const result = await sdk.addGroupMember('test-group-1', 'newmember.testnet');
-        expect(result).toBeTruthy();
-      } catch (error) {
-        // Expected if not group owner or member already exists
-        expect(error).toBeInstanceOf(NovaError);
-      }
-
-      mockQuery.mockRestore();
-      mockCallFn.mockRestore();
-    }, 5000);
-  });
-
-  // multi-user specific test
-  test('registerGroup sets caller as owner', async () => {
-    const sdkA = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-
-    // Use a valid base58 mock key (no 'l', '0', 'O', 'I'; 44 chars for 32 bytes)
-    const mockKey = 'ed25519:3t4Y8x3Y5Z7a9b1c3d5e7f9g1h3i5j7k9m1n3o5p7q9r1s3t5u7v9w1x3y5z7A9B1C';  // Valid alphabet
-    await sdkA.withSigner(mockKey, 'userA.testnet');
-  
-    // Mock estimate_fee
-    const mockQuery = jest.spyOn((sdkA as any).provider, 'query');
-    mockQuery.mockResolvedValueOnce({
-      result: '50000000000000000000000' // 0.05 NEAR for register
-    } as any);
-
-    // Mock callFunction to simulate success (avoids real tx)
-    const mockCallFn = jest.spyOn(sdkA.account!, 'callFunction');
-    mockCallFn.mockResolvedValueOnce({
-      toString: () => 'Success'
-    } as any);
-
-    const registerResult = await sdkA.registerGroup('groupA');
-    expect(registerResult).toBe('Success');  // Or parse_outcome returns
-  
-    // Mock getGroupOwner (JSON str for parse)
-    mockQuery.mockResolvedValueOnce({
-      result: '"userA.testnet"' // JSON str
-    } as any);
-
-    const owner = await sdkA.getGroupOwner('groupA');
-    expect(owner).toBe('userA.testnet');
-  
-    mockCallFn.mockRestore();
-    mockQuery.mockRestore();
-  });
-
-  describe('Encryption/Decryption', () => {
-    test('encrypt/decrypt round trip', () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      
-      // Generate a valid 32-byte key
-      const key = NodeCrypto.randomBytes(32);
-      const keyB64 = key.toString('base64');
-      
-      const originalData = Buffer.from('Secret test data');
-      
-      // Use reflection to access private methods for testing
-      const encrypted = (sdk as any).encryptData(originalData, keyB64);
-      expect(typeof encrypted).toBe('string');
-      expect(encrypted.length).toBeGreaterThan(0);
-      
-      const decryptedB64 = (sdk as any).decryptData(encrypted, keyB64);
-      const decrypted = Buffer.from(decryptedB64, 'base64');
-      
-      expect(decrypted.toString()).toBe(originalData.toString());
+      expect(accountId).toBe('alice-nova.nova-sdk-5.testnet');
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://111507d14bb0a0c60d28a61bf6a973ccf4691a36-3000.dstack-prod5.phala.network/api/user-keys/check',
+        { wallet_id: 'alice.near' },
+        expect.any(Object)
+      );
     });
 
-    test('decryptData fails with wrong key', () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      
-      const key1 = NodeCrypto.randomBytes(32).toString('base64');
-      const key2 = NodeCrypto.randomBytes(32).toString('base64');
-      
-      const originalData = Buffer.from('Secret data');
-      const encrypted = (sdk as any).encryptData(originalData, key1);
-      
-      // Decrypting with wrong key should throw
-      expect(() => {
-        (sdk as any).decryptData(encrypted, key2);
-      }).toThrow();
+    test('getAccountId resolves from Shade for email user', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          exists: true,
+          account_id: 'bob-nova.nova-sdk-5.testnet',
+          public_key: 'ed25519:XYZ789',
+          network: 'testnet',
+        },
+      });
+
+      const sdk = new NovaSdk({ email: 'bob@example.com', authToken: 'jwt-token' });
+      const accountId = await sdk.getAccountId();
+
+      expect(accountId).toBe('bob-nova.nova-sdk-5.testnet');
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://111507d14bb0a0c60d28a61bf6a973ccf4691a36-3000.dstack-prod5.phala.network/api/user-keys/check',
+        { email: 'bob@example.com', auth_token: 'jwt-token' },
+        expect.any(Object)
+      );
+    });
+
+    test('getAccountId throws when no account found', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { exists: false },
+      });
+
+      const sdk = new NovaSdk({ walletId: 'newuser.near' });
+      await expect(sdk.getAccountId()).rejects.toThrow('No NOVA account found');
+    });
+
+    test('resolveUserAccount handles 404 gracefully', async () => {
+      mockAxiosIsAxiosError.mockReturnValue(true);
+      mockAxiosPost.mockRejectedValueOnce({
+        response: { status: 404 },
+        isAxiosError: true,
+      });
+
+      const sdk = new NovaSdk({ walletId: 'unknown.near' });
+      const result = await sdk.resolveUserAccount();
+
+      expect(result).toEqual({});
     });
   });
 
-  describe('Error handling', () => {
+  describe('MCP Tool Invocations', () => {
+    test('authStatus calls MCP correctly', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          authenticated: true,
+          email: 'user@example.com',
+          near_account_id: 'user-nova.nova-sdk-5.testnet',
+          authorized_for_group: true,
+        },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet', email: 'user@example.com' });
+      const result = await sdk.authStatus('my-group');
+
+      expect(result.authenticated).toBe(true);
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://nova-mcp.fastmcp.app/tools/auth_status',
+        { group_id: 'my-group' },
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'X-Account-Id': 'user-nova.nova-sdk-5.testnet',
+            'X-User-Email': 'user@example.com',
+          }),
+        })
+      );
+    });
+
+    test('registerGroup calls MCP correctly', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { message: "Group 'my-team' registered successfully" },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'owner-nova.nova-sdk-5.testnet' });
+      const result = await sdk.registerGroup('my-team');
+
+      expect(result).toBe("Group 'my-team' registered successfully");
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://nova-mcp.fastmcp.app/tools/register_group',
+        { group_id: 'my-team' },
+        expect.any(Object)
+      );
+    });
+
+    test('addGroupMember calls MCP correctly', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { message: "Added bob-nova.nova-sdk-5.testnet to group 'my-team'" },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'owner-nova.nova-sdk-5.testnet' });
+      const result = await sdk.addGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
+
+      expect(result).toContain('Added bob-nova');
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://nova-mcp.fastmcp.app/tools/add_group_member',
+        { group_id: 'my-team', member_id: 'bob-nova.nova-sdk-5.testnet' },
+        expect.any(Object)
+      );
+    });
+
+    test('revokeGroupMember calls MCP correctly', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { message: "Revoked bob-nova.nova-sdk-5.testnet from group 'my-team'" },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'owner-nova.nova-sdk-5.testnet' });
+      const result = await sdk.revokeGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
+
+      expect(result).toContain('Revoked bob-nova');
+    });
+  });
+
+  describe('Composite Operations', () => {
+    test('compositeUpload calls MCP with correct params', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          cid: 'QmXyz123456789abcdefghijklmnopqrstuvwxyz1234',
+          trans_id: 'tx-12345',
+          file_hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+          fee_breakdown: { claim: 0.001, record: 0.002, total: 0.003 },
+        },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+      const data = Buffer.from('Hello, NOVA!');
+      const result = await sdk.compositeUpload('my-group', data, 'hello.txt');
+
+      expect(result.cid).toBe('QmXyz123456789abcdefghijklmnopqrstuvwxyz1234');
+      expect(result.trans_id).toBe('tx-12345');
+      expect(result.fee_breakdown.total).toBe(0.003);
+
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://nova-mcp.fastmcp.app/tools/composite_upload',
+        {
+          group_id: 'my-group',
+          user_id: 'user-nova.nova-sdk-5.testnet',
+          data: data.toString('base64'),
+          filename: 'hello.txt',
+          payload_b64: '',
+          sig_hex: '',
+        },
+        expect.any(Object)
+      );
+    });
+
+    test('compositeRetrieve calls MCP and decodes response', async () => {
+      const originalData = 'Hello, NOVA!';
+      const dataB64 = Buffer.from(originalData).toString('base64');
+
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          decrypted_b64: dataB64,
+          file_hash: 'somehash',
+          fee_breakdown: { claim: 0.001, total: 0.001 },
+          ipfs_hash: 'QmXyz123456789abcdefghijklmnopqrstuvwxyz1234',
+          group_id: 'my-group',
+        },
+      });
+
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+      const result = await sdk.compositeRetrieve('my-group', 'QmXyz123456789abcdefghijklmnopqrstuvwxyz1234');
+
+      expect(result.data.toString()).toBe(originalData);
+      expect(result.ipfs_hash).toBe('QmXyz123456789abcdefghijklmnopqrstuvwxyz1234');
+      expect(result.group_id).toBe('my-group');
+    });
+
+    test('compositeRetrieve validates CID format', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      await expect(sdk.compositeRetrieve('my-group', 'invalid_cid')).rejects.toThrow('Invalid CID');
+    });
+  });
+
+  describe('Read-Only Contract Queries', () => {
+    test('getBalance queries RPC', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      // Mock provider.viewAccount
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'viewAccount').mockResolvedValueOnce({
+        amount: '1000000000000000000000000',
+      });
+
+      const balance = await sdk.getBalance();
+      expect(balance).toBe('1000000000000000000000000');
+    });
+
+    test('isAuthorized queries contract', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('true'),
+      });
+
+      const authorized = await sdk.isAuthorized('my-group');
+      expect(authorized).toBe(true);
+    });
+
+    test('getGroupOwner queries contract', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('"owner-nova.nova-sdk-5.testnet"'),
+      });
+
+      const owner = await sdk.getGroupOwner('my-group');
+      expect(owner).toBe('owner-nova.nova-sdk-5.testnet');
+    });
+
+    test('getGroupChecksum queries contract', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('"abc123checksum"'),
+      });
+
+      const checksum = await sdk.getGroupChecksum('my-group');
+      expect(checksum).toBe('abc123checksum');
+    });
+
+    test('estimateFee queries contract', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('1000000000000000000000'),
+      });
+
+      const fee = await sdk.estimateFee('claim_token');
+      expect(fee).toBe(1000000000000000000000n);
+    });
+
+    test('getTransactionsForGroup queries contract', async () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from(JSON.stringify([
+          { group_id: 'my-group', user_id: 'user-nova.nova-sdk-5.testnet', file_hash: 'abc', ipfs_hash: 'Qm123' },
+        ])),
+      });
+
+      const txs = await sdk.getTransactionsForGroup('my-group');
+      expect(Array.isArray(txs)).toBe(true);
+      expect(txs[0].group_id).toBe('my-group');
+    });
+  });
+
+  describe('Utility Methods', () => {
+    test('computeHash returns SHA256 hex', () => {
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+      const hash = sdk.computeHash(Buffer.from('test data'));
+
+      expect(hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(hash).toBe('916f0027a575074ce72a331777c3478d6513f786a591bd892da1a577bf2335f9');
+    });
+  });
+
+  describe('Error Handling', () => {
     test('NovaError preserves cause', () => {
       const cause = new Error('Original error');
       const novaError = new NovaError('Wrapper error', cause);
-      
+
       expect(novaError.message).toBe('Wrapper error');
       expect(novaError.cause).toBe(cause);
       expect(novaError.name).toBe('NovaError');
     });
 
-    test('compositeRetrieve validates CID format', async () => {
-      const sdk = new NovaSdk(rpcUrl, contractId, fakePinataKey, fakePinataSecret, shadeApiUrl);
-      const privateKey = process.env.TEST_NEAR_PRIVATE_KEY;
-      const accountId = process.env.TEST_NEAR_ACCOUNT_ID;
-      
-      if (privateKey && accountId) {
-        await sdk.withSigner(privateKey, accountId);
-      }
-      
-      await expect(
-        sdk.compositeRetrieve('test-group-1', 'invalid_cid')
-      ).rejects.toThrow('Invalid CID');
+    test('MCP errors are wrapped in NovaError', async () => {
+      mockAxiosIsAxiosError.mockReturnValue(true);
+      mockAxiosPost.mockRejectedValueOnce({
+        response: { data: { error: 'Unauthorized' } },
+        message: 'Request failed',
+        isAxiosError: true,
+      });
+
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+
+      await expect(sdk.registerGroup('my-group')).rejects.toThrow(NovaError);
+      await expect(sdk.registerGroup('my-group')).rejects.toThrow(/MCP tool.*failed/);
     });
+
+    test('Shade errors are wrapped in NovaError', async () => {
+      mockAxiosPost.mockRejectedValueOnce(new Error('Network error'));
+
+      const sdk = new NovaSdk({ walletId: 'alice.near' });
+
+      await expect(sdk.resolveUserAccount()).rejects.toThrow(NovaError);
+      await expect(sdk.resolveUserAccount()).rejects.toThrow('Failed to resolve user account');
+    });
+  });
+
+  describe('Header Construction', () => {
+    test('getMcpHeaders includes all identifiers', async () => {
+      mockAxiosPost.mockResolvedValueOnce({ status: 200, data: {} });
+
+      const sdk = new NovaSdk({
+        email: 'user@example.com',
+        walletId: 'user.near',
+        accountId: 'user-nova.nova-sdk-5.testnet',
+        authToken: 'jwt-token-123',
+      });
+
+      await sdk.authStatus();
+
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        expect.objectContaining({
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer jwt-token-123',
+            'X-User-Email': 'user@example.com',
+            'X-Wallet-Id': 'user.near',
+            'X-Account-Id': 'user-nova.nova-sdk-5.testnet',
+          },
+        })
+      );
+    });
+
+    test('getMcpHeaders omits undefined values', async () => {
+      mockAxiosPost.mockResolvedValueOnce({ status: 200, data: {} });
+
+      const sdk = new NovaSdk({ accountId: 'user-nova.nova-sdk-5.testnet' });
+      await sdk.authStatus();
+
+      const call = mockAxiosPost.mock.calls[0];
+      const headers = call[2]?.headers;
+
+      expect(headers).not.toHaveProperty('Authorization');
+      expect(headers).not.toHaveProperty('X-User-Email');
+      expect(headers).not.toHaveProperty('X-Wallet-Id');
+      expect(headers).toHaveProperty('X-Account-Id');
+    });
+  });
+
+  describe('Integration Tests', () => {
+    const shouldSkip = !process.env.TEST_NOVA_ACCOUNT_ID;
+
+    test('real getBalance query', async () => {
+      if (shouldSkip) {
+        console.log('Skipping: TEST_NOVA_ACCOUNT_ID required');
+        return;
+      }
+
+      const sdk = new NovaSdk({ accountId: process.env.TEST_NOVA_ACCOUNT_ID! });
+      const balance = await sdk.getBalance();
+
+      expect(balance).toMatch(/^\d+$/);
+      expect(BigInt(balance)).toBeGreaterThanOrEqual(0n);
+    }, 10000);
+
+    test('real estimateFee query', async () => {
+      if (shouldSkip) {
+        console.log('Skipping: TEST_NOVA_ACCOUNT_ID required');
+        return;
+      }
+
+      const sdk = new NovaSdk({ accountId: process.env.TEST_NOVA_ACCOUNT_ID! });
+      const fee = await sdk.estimateFee('claim_token');
+
+      expect(fee).toBeGreaterThan(0n);
+    }, 10000);
+
+    test('real isAuthorized query', async () => {
+      if (shouldSkip) {
+        console.log('Skipping: TEST_NOVA_ACCOUNT_ID required');
+        return;
+      }
+
+      const sdk = new NovaSdk({ accountId: process.env.TEST_NOVA_ACCOUNT_ID! });
+      const authorized = await sdk.isAuthorized('test-group-1');
+
+      expect(typeof authorized).toBe('boolean');
+    }, 10000);
   });
 });

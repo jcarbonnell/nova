@@ -37,18 +37,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NovaSdk = exports.NovaError = void 0;
-const accounts_1 = require("@near-js/accounts");
+// nova/nova-sdk-js/src/index.ts
 const providers_1 = require("@near-js/providers");
-const signers_1 = require("@near-js/signers");
-const crypto_1 = require("@near-js/crypto");
 const axios_1 = __importDefault(require("axios"));
 const crypto = __importStar(require("crypto"));
 const buffer_1 = require("buffer");
-const ed25519 = __importStar(require("@noble/ed25519"));
-const sha2_js_1 = require("@noble/hashes/sha2.js");
-const bs58_1 = __importDefault(require("bs58"));
-// Set sha512 for noble/ed25519
-ed25519.hashes.sha512 = sha2_js_1.sha512;
+// Infrastructure endpoints (public, immutable)
+const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
+const SHADE_API_URL = 'https://111507d14bb0a0c60d28a61bf6a973ccf4691a36-3000.dstack-prod5.phala.network';
+const DEFAULT_RPC_URL = 'https://rpc.testnet.near.org';
+const DEFAULT_CONTRACT_ID = 'nova-sdk-5.testnet';
 class NovaError extends Error {
     cause;
     constructor(message, cause) {
@@ -60,48 +58,206 @@ class NovaError extends Error {
 exports.NovaError = NovaError;
 class NovaSdk {
     provider;
-    account;
-    privateKeyStr;
+    userIdentifier;
     contractId;
-    pinataKey;
-    pinataSecret;
-    shadeApiUrl;
-    constructor(rpcUrl, contractId, pinataKey, pinataSecret, shadeApiUrl) {
-        this.provider = new providers_1.JsonRpcProvider({ url: rpcUrl });
-        this.contractId = contractId;
-        this.pinataKey = pinataKey;
-        this.pinataSecret = pinataSecret;
-        this.shadeApiUrl = shadeApiUrl;
+    mcpUrl;
+    shadeUrl;
+    rpcUrl;
+    constructor(userIdOrConfig, config) {
+        this.userIdentifier = userIdOrConfig;
+        this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
+        this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
+        this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
+        this.shadeUrl = config?.shadeUrl || SHADE_API_URL;
+        this.provider = new providers_1.JsonRpcProvider({ url: this.rpcUrl });
+        // Validate user identifier
+        if (!this.userIdentifier.email && !this.userIdentifier.walletId && !this.userIdentifier.accountId) {
+            throw new NovaError('User identifier required: provide email, walletId, or accountId');
+        }
     }
-    async withSigner(privateKey, accountId) {
+    // User Context Management
+    // Get the NOVA account ID for this user.
+    async getAccountId() {
+        if (this.userIdentifier.accountId) {
+            return this.userIdentifier.accountId;
+        }
+        // Resolve from Shade TEE
+        const resolved = await this.resolveUserAccount();
+        if (!resolved.accountId) {
+            throw new NovaError('No NOVA account found. Please create an account at nova-sdk.com first.');
+        }
+        this.userIdentifier.accountId = resolved.accountId;
+        return resolved.accountId;
+    }
+    // Resolve user's NOVA account from Shade TEE using email or wallet_id.
+    async resolveUserAccount() {
+        const payload = {};
+        if (this.userIdentifier.walletId) {
+            payload.wallet_id = this.userIdentifier.walletId;
+        }
+        else if (this.userIdentifier.email) {
+            payload.email = this.userIdentifier.email;
+            if (this.userIdentifier.authToken) {
+                payload.auth_token = this.userIdentifier.authToken;
+            }
+        }
+        else {
+            throw new NovaError('Cannot resolve account: no email or walletId provided');
+        }
         try {
-            this.privateKeyStr = privateKey;
-            const keyPair = crypto_1.KeyPair.fromString(privateKey);
-            const signer = new signers_1.KeyPairSigner(keyPair);
-            this.account = new accounts_1.Account(accountId, this.provider, signer);
-            return this;
+            const response = await axios_1.default.post(`${this.shadeUrl}/api/user-keys/check`, payload, {
+                timeout: 10000,
+                headers: { 'Content-Type': 'application/json' },
+            });
+            if (response.data.exists) {
+                return {
+                    accountId: response.data.account_id,
+                    publicKey: response.data.public_key,
+                    network: response.data.network,
+                };
+            }
+            return {};
         }
         catch (e) {
-            throw new NovaError('Signing error', e);
+            if (axios_1.default.isAxiosError(e) && e.response?.status === 404) {
+                return {};
+            }
+            throw new NovaError(`Failed to resolve user account: ${e}`, e);
         }
     }
-    async getBalance(accountId) {
+    // Build HTTP headers for MCP server authentication.
+    getMcpHeaders() {
+        const headers = {
+            'Content-Type': 'application/json',
+        };
+        if (this.userIdentifier.authToken) {
+            headers['Authorization'] = `Bearer ${this.userIdentifier.authToken}`;
+        }
+        if (this.userIdentifier.email) {
+            headers['X-User-Email'] = this.userIdentifier.email;
+        }
+        if (this.userIdentifier.walletId) {
+            headers['X-Wallet-Id'] = this.userIdentifier.walletId;
+        }
+        if (this.userIdentifier.accountId) {
+            headers['X-Account-Id'] = this.userIdentifier.accountId;
+        }
+        return headers;
+    }
+    // MCP Tool Invocations - Call an MCP tool directly.
+    async callMcpTool(toolName, args) {
+        // Ensure we have account ID resolved
+        if (!this.userIdentifier.accountId) {
+            await this.getAccountId();
+        }
         try {
-            // Use provider.viewAccount for read-only account state
-            const accountView = await this.provider.viewAccount(accountId);
+            const response = await axios_1.default.post(`${this.mcpUrl}/tools/${toolName}`, args, {
+                headers: this.getMcpHeaders(),
+                timeout: 60000, // 60s for composite operations
+            });
+            return response.data;
+        }
+        catch (e) {
+            if (axios_1.default.isAxiosError(e)) {
+                const errorMsg = e.response?.data?.error || e.response?.data?.message || e.message;
+                throw new NovaError(`MCP tool '${toolName}' failed: ${errorMsg}`, e);
+            }
+            throw new NovaError(`MCP tool '${toolName}' failed: ${e}`, e);
+        }
+    }
+    // Core NOVA Operations (via MCP)
+    // Check authentication status and group authorization.
+    async authStatus(groupId = 'default') {
+        return this.callMcpTool('auth_status', { group_id: groupId });
+    }
+    // Register a new group. Caller becomes owner.
+    async registerGroup(groupId) {
+        const result = await this.callMcpTool('register_group', {
+            group_id: groupId
+        });
+        return result.message || `Group '${groupId}' registered successfully`;
+    }
+    // Add a member to a group. Caller must be owner.
+    async addGroupMember(groupId, memberId) {
+        const result = await this.callMcpTool('add_group_member', {
+            group_id: groupId,
+            member_id: memberId,
+        });
+        return result.message || `Added ${memberId} to group '${groupId}'`;
+    }
+    // Revoke a member from a group. Caller must be owner.
+    async revokeGroupMember(groupId, memberId) {
+        const result = await this.callMcpTool('revoke_group_member', {
+            group_id: groupId,
+            member_id: memberId,
+        });
+        return result.message || `Revoked ${memberId} from group '${groupId}'`;
+    }
+    // Upload encrypted file to IPFS and record on NEAR blockchain.
+    // MCP server handles: key retrieval, encryption, IPFS upload, transaction signing.
+    async compositeUpload(groupId, data, filename, payloadB64, sigHex) {
+        const accountId = await this.getAccountId();
+        const dataB64 = data.toString('base64');
+        // If payload/sig not provided, generate them (requires local signing capability)
+        let finalPayloadB64 = payloadB64;
+        let finalSigHex = sigHex;
+        if (!finalPayloadB64 || !finalSigHex) {
+            // For MCP v3, the server can handle signing internally
+            // We pass empty strings and let MCP use get_user_signer()
+            finalPayloadB64 = '';
+            finalSigHex = '';
+        }
+        return this.callMcpTool('composite_upload', {
+            group_id: groupId,
+            user_id: accountId,
+            data: dataB64,
+            filename,
+            payload_b64: finalPayloadB64,
+            sig_hex: finalSigHex,
+        });
+    }
+    // Retrieve and decrypt file from IPFS.
+    // MCP server handles: key retrieval, IPFS fetch, decryption.
+    async compositeRetrieve(groupId, ipfsHash, payloadB64, sigHex) {
+        if (!ipfsHash.startsWith('Qm')) {
+            throw new NovaError(`Invalid CID: ${ipfsHash}`);
+        }
+        // For MCP v3, server handles signing
+        const finalPayloadB64 = payloadB64 || '';
+        const finalSigHex = sigHex || '';
+        const result = await this.callMcpTool('composite_retrieve', {
+            group_id: groupId,
+            ipfs_hash: ipfsHash,
+            payload_b64: finalPayloadB64,
+            sig_hex: finalSigHex,
+        });
+        return {
+            data: buffer_1.Buffer.from(result.decrypted_b64, 'base64'),
+            file_hash: result.file_hash,
+            fee_breakdown: result.fee_breakdown,
+            ipfs_hash: result.ipfs_hash,
+            group_id: result.group_id,
+        };
+    }
+    // Read-Only Contract Queries (Direct RPC - no auth needed)
+    async getBalance(accountId) {
+        const id = accountId || await this.getAccountId();
+        try {
+            const accountView = await this.provider.viewAccount(id);
             return accountView.amount.toString();
         }
         catch (e) {
-            throw new NovaError(`Near RPC error: ${e}`, e);
+            throw new NovaError(`Balance query error: ${e}`, e);
         }
     }
     async isAuthorized(groupId, userId) {
+        const id = userId || await this.getAccountId();
         try {
             const result = await this.provider.query({
                 request_type: 'call_function',
                 account_id: this.contractId,
                 method_name: 'is_authorized',
-                args_base64: buffer_1.Buffer.from(JSON.stringify({ group_id: groupId, user_id: userId })).toString('base64'),
+                args_base64: buffer_1.Buffer.from(JSON.stringify({ group_id: groupId, user_id: id })).toString('base64'),
                 finality: 'final',
             });
             const callResult = result;
@@ -109,7 +265,7 @@ class NovaSdk {
             return JSON.parse(decoded);
         }
         catch (e) {
-            throw new NovaError(`Near RPC error: ${e}`, e);
+            throw new NovaError(`Authorization check error: ${e}`, e);
         }
     }
     async getGroupChecksum(groupId) {
@@ -140,30 +296,10 @@ class NovaSdk {
             });
             const callResult = result;
             const decoded = buffer_1.Buffer.from(callResult.result).toString().trim();
-            return decoded ? JSON.parse(decoded) : null; // Returns owner AccountId string
+            return decoded ? JSON.parse(decoded) : null;
         }
         catch (e) {
             throw new NovaError(`Owner fetch error: ${e}`, e);
-        }
-    }
-    async updateChecksum(groupId, checksum) {
-        if (!this.account)
-            throw new NovaError('No signer attached (must be group owner)');
-        const fee = await this.estimateFee('update_checksum');
-        const gasMargin = 50n * 10n ** 12n; // 50 TGas
-        const totalDeposit = fee + gasMargin;
-        try {
-            const result = await this.account.callFunction({
-                contractId: this.contractId,
-                methodName: 'update_checksum',
-                args: { group_id: groupId, checksum },
-                gas: 50n * 10n ** 12n, // 50 TGas
-                deposit: totalDeposit,
-            });
-            return result ? result.toString() : 'Success (group owner only)';
-        }
-        catch (e) {
-            throw new NovaError(`Checksum update error: ${e} (ensure caller is group owner)`, e);
         }
     }
     async estimateFee(action) {
@@ -183,98 +319,14 @@ class NovaSdk {
             throw new NovaError(`Fee estimate error: ${e}`, e);
         }
     }
-    async getGroupKey(groupId, userId) {
-        if (!this.account || !this.privateKeyStr)
-            throw new NovaError('No signer attached');
-        try {
-            const fee = await this.estimateFee('claim_token');
-            const gasMargin = 100n * 10n ** 12n; // 100 TGas
-            const totalDeposit = fee + gasMargin;
-            // Step 1: Generate payload
-            const timestamp = BigInt(Date.now()) * 1000000n; // ms to ns
-            const nonceInput = `${groupId}${userId}${timestamp}`;
-            const nonceHash = crypto.createHash('sha256').update(nonceInput).digest();
-            const nonce = nonceHash.toString('hex');
-            // Derive ed25519 public key from private (seed[:32])
-            let seedBytes;
-            if (this.privateKeyStr.startsWith('ed25519:')) {
-                const seedB58 = this.privateKeyStr.slice(8);
-                const seedBytesFull = buffer_1.Buffer.from(bs58_1.default.decode(seedB58));
-                seedBytes = buffer_1.Buffer.from(seedBytesFull.subarray(0, 32));
-            }
-            else {
-                throw new NovaError('Invalid private key format');
-            }
-            const publicBytes = ed25519.getPublicKey(new Uint8Array(seedBytes));
-            const signingPkB58 = bs58_1.default.encode(publicBytes);
-            const payloadDict = {
-                group_id: groupId,
-                user_id: userId,
-                nonce: nonce,
-                timestamp: Number(timestamp), // JSON can't handle BigInt
-                signing_pk_b58: signingPkB58
-            };
-            const payloadStr = JSON.stringify(payloadDict);
-            const payloadBytes = buffer_1.Buffer.from(payloadStr);
-            const payloadB64 = payloadBytes.toString('base64');
-            // Step 2: Sign raw payload bytes
-            const sigBytes = ed25519.sign(payloadBytes, seedBytes);
-            const sigHex = buffer_1.Buffer.from(sigBytes).toString('hex');
-            // Step 3: Claim token on-chain
-            const claimResult = await this.account.callFunction({
-                contractId: this.contractId,
-                methodName: 'claim_token',
-                args: {
-                    group_id: groupId,
-                    payload_b64: payloadB64,
-                    signature_hex: sigHex
-                },
-                gas: 100000000000000n,
-                deposit: totalDeposit,
-            });
-            if (!claimResult)
-                throw new NovaError('Token claim failed');
-            // Parse returned token (base64-decoded str)
-            const tokenB64 = claimResult.toString(); // Adjust based on actual return
-            if (!tokenB64)
-                throw new NovaError('Empty token from claim');
-            const tokenBytes = buffer_1.Buffer.from(tokenB64, 'base64');
-            const token = tokenBytes.toString('utf-8').replace(/"/g, '').trim(); // Strip quotes
-            // Step 4: Fetch key from Shade API
-            if (!this.shadeApiUrl)
-                throw new NovaError('Shade API URL not set');
-            const shadeResponse = await axios_1.default.post(`${this.shadeApiUrl}/api/key-management/get_key`, {
-                group_id: groupId,
-                token: token
-            }, { timeout: 15000 });
-            if (shadeResponse.status !== 200) {
-                throw new NovaError(`Shade fetch failed: ${shadeResponse.statusText}`);
-            }
-            const shadeData = shadeResponse.data;
-            const key = shadeData.key;
-            const checksum = shadeData.checksum;
-            // Step 5: Verify checksum on-chain (new: add here for explicit sequencing)
-            const onChainChecksum = await this.getGroupChecksum(groupId);
-            if ((onChainChecksum || '').trim() !== (checksum || '').trim()) {
-                throw new NovaError('Checksum mismatch: Shade attestation invalid');
-            }
-            // Log breakdown
-            const feeNear = Number(fee) / 1e24;
-            console.log(`Key access fee: ${feeNear} NEAR (auth overhead)`);
-            console.log(`Cost breakdown: ${feeNear} NEAR total (est 0.005 IPFS + 0.003 Phala + ${feeNear - 0.008} NOVA)`);
-            return key;
-        }
-        catch (e) {
-            throw new NovaError(`Shade key fetch error: ${e}`, e);
-        }
-    }
     async getTransactionsForGroup(groupId, userId) {
+        const id = userId || await this.getAccountId();
         try {
             const result = await this.provider.query({
                 request_type: 'call_function',
                 account_id: this.contractId,
                 method_name: 'get_transactions_for_group',
-                args_base64: buffer_1.Buffer.from(JSON.stringify({ group_id: groupId, user_id: userId })).toString('base64'),
+                args_base64: buffer_1.Buffer.from(JSON.stringify({ group_id: groupId, user_id: id })).toString('base64'),
                 finality: 'final',
             });
             const callResult = result;
@@ -282,158 +334,12 @@ class NovaSdk {
             return JSON.parse(decoded);
         }
         catch (e) {
-            throw new NovaError(`Near RPC error: ${e}`, e);
+            throw new NovaError(`Transactions query error: ${e}`, e);
         }
     }
-    async executeContractCall(methodName, args, action) {
-        if (!this.account)
-            throw new NovaError('No signer attached');
-        const fee = await this.estimateFee(action);
-        const gasMargin = 300n * 10n ** 12n; // 300 TGas
-        const totalDeposit = fee + gasMargin;
-        try {
-            const result = await this.account.callFunction({
-                contractId: this.contractId,
-                methodName,
-                args,
-                gas: 300000000000000n,
-                deposit: totalDeposit,
-            });
-            return result ? result.toString() : 'Success';
-        }
-        catch (e) {
-            throw new NovaError(`Near RPC error: ${e}`, e);
-        }
-    }
-    async registerGroup(groupId) {
-        // Caller (signer) becomes group owner automatically
-        return this.executeContractCall('register_group', { group_id: groupId }, 'register_group');
-    }
-    async addGroupMember(groupId, userId) {
-        // Must be signed as group owner
-        return this.executeContractCall('add_group_member', { group_id: groupId, user_id: userId }, 'add_group_member');
-    }
-    async revokeGroupMember(groupId, userId) {
-        // Must be signed as group owner
-        return this.executeContractCall('revoke_group_member', { group_id: groupId, user_id: userId }, 'revoke_group_member');
-    }
-    async recordTransaction(groupId, userId, fileHash, ipfsHash) {
-        const result = await this.executeContractCall('record_transaction', {
-            group_id: groupId,
-            user_id: userId,
-            file_hash: fileHash,
-            ipfs_hash: ipfsHash,
-        }, 'record_transaction');
-        return result;
-    }
-    async transferTokens(toAccount, amountYocto) {
-        if (!this.account)
-            throw new NovaError('No signer attached');
-        try {
-            await this.account.transfer({ receiverId: toAccount, amount: BigInt(amountYocto) });
-            return 'Success';
-        }
-        catch (e) {
-            throw new NovaError(`Near RPC error: ${e}`, e);
-        }
-    }
-    async compositeUpload(groupId, userId, data, filename) {
-        // Any authorized user (including group owner) can record
-        const claimFee = await this.estimateFee('claim_token');
-        const recordFee = await this.estimateFee('record_transaction');
-        const totalFee = claimFee + recordFee;
-        const gasMargin = 400000000000000n; // 400 TGas for chain
-        const totalDeposit = totalFee + gasMargin; // Used in getGroupKey/record
-        const keyB64 = await this.getGroupKey(groupId, userId); // Handles claim fee internally
-        const encryptedB64 = this.encryptData(data, keyB64);
-        const cid = await this.ipfsUpload(encryptedB64, filename);
-        const fileHash = this.computeHash(data).toString('hex');
-        const transId = await this.recordTransaction(groupId, userId, fileHash, cid); // Handles record fee
-        const feeBreakdown = {
-            claim: Number(claimFee) / 1e24,
-            record: Number(recordFee) / 1e24,
-            total: Number(totalFee) / 1e24
-        };
-        console.log(`Composite upload fee: ${feeBreakdown.total} NEAR total`);
-        console.log(`Cost breakdown: ${feeBreakdown.total} NEAR (est 0.005 IPFS + 0.003 Phala + ${feeBreakdown.total - 0.008} NOVA)`);
-        return { cid, trans_id: transId, file_hash: fileHash, fee_breakdown: feeBreakdown };
-    }
-    async compositeRetrieve(groupId, ipfsHash) {
-        if (!ipfsHash.startsWith('Qm'))
-            throw new NovaError(`Invalid CID: ${ipfsHash}`);
-        const userId = this.account.accountId;
-        const claimFee = await this.estimateFee('claim_token');
-        const keyB64 = await this.getGroupKey(groupId, userId); // Handles claim fee
-        const encryptedB64 = await this.ipfsRetrieve(ipfsHash);
-        const decryptedB64 = this.decryptData(encryptedB64, keyB64);
-        const data = buffer_1.Buffer.from(decryptedB64, 'base64');
-        const fileHash = this.computeHash(data).toString('hex');
-        const feeBreakdown = {
-            claim: Number(claimFee) / 1e24,
-            total: Number(claimFee) / 1e24
-        };
-        console.log(`Composite retrieve fee: ${feeBreakdown.total} NEAR (key access)`);
-        return { data, file_hash: fileHash, fee_breakdown: feeBreakdown };
-    }
-    encryptData(data, keyB64) {
-        const key = buffer_1.Buffer.from(keyB64, 'base64');
-        if (key.length !== 32)
-            throw new NovaError('Invalid key length');
-        const iv = crypto.randomBytes(16);
-        const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-        let encrypted = cipher.update(data);
-        encrypted = buffer_1.Buffer.concat([encrypted, cipher.final()]);
-        const result = buffer_1.Buffer.concat([iv, encrypted]);
-        return result.toString('base64');
-    }
-    decryptData(encryptedB64, keyB64) {
-        const key = buffer_1.Buffer.from(keyB64, 'base64');
-        if (key.length !== 32)
-            throw new NovaError('Invalid key length');
-        const encrypted = buffer_1.Buffer.from(encryptedB64, 'base64');
-        if (encrypted.length < 16)
-            throw new NovaError('Invalid encrypted data');
-        const iv = Uint8Array.prototype.slice.call(encrypted, 0, 16);
-        const ciphertext = Uint8Array.prototype.slice.call(encrypted, 16);
-        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-        let decrypted = decipher.update(ciphertext);
-        decrypted = buffer_1.Buffer.concat([decrypted, decipher.final()]);
-        return decrypted.toString('base64');
-    }
-    async ipfsUpload(dataB64, filename) {
-        const data = buffer_1.Buffer.from(dataB64, 'base64');
-        const FormData = require('form-data');
-        const form = new FormData();
-        form.append('file', data, { filename });
-        const response = await axios_1.default.post('https://api.pinata.cloud/pinning/pinFileToIPFS', form, {
-            headers: {
-                ...form.getHeaders(),
-                'pinata_api_key': this.pinataKey,
-                'pinata_secret_api_key': this.pinataSecret,
-            },
-        });
-        return response.data.IpfsHash;
-    }
-    async ipfsRetrieve(cid, retries = 3) {
-        let url = `https://gateway.pinata.cloud/ipfs/${cid}`;
-        for (let i = 0; i < retries; i++) {
-            try {
-                const response = await axios_1.default.get(url, { timeout: 15000, responseType: 'arraybuffer' });
-                return buffer_1.Buffer.from(response.data).toString('base64');
-            }
-            catch (e) {
-                if (i === retries - 1) {
-                    url = `https://ipfs.io/ipfs/${cid}`;
-                    const fallback = await axios_1.default.get(url, { timeout: 15000, responseType: 'arraybuffer' });
-                    return buffer_1.Buffer.from(fallback.data).toString('base64');
-                }
-                await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
-            }
-        }
-        throw new NovaError('IPFS retrieve failed');
-    }
+    // Utility Method: Compute SHA256 hash of data.
     computeHash(data) {
-        return crypto.createHash('sha256').update(data).digest();
+        return crypto.createHash('sha256').update(data).digest('hex');
     }
 }
 exports.NovaSdk = NovaSdk;
