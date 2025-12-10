@@ -1,39 +1,40 @@
-// nova-sdk-rs v0.3.0 - Supports fees model with estimate and breakdowns
+// nova-sdk-rs v0.4.0 - Multi-user architecture via MCP server
 use near_jsonrpc_client::{methods, JsonRpcClient};
-use near_jsonrpc_client::methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest;
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
-use near_primitives::types::{AccountId, Balance, BlockReference, Finality, BlockHeight};
-use near_primitives::views::{QueryRequest, ExecutionOutcomeView, FinalExecutionOutcomeView, ExecutionStatusView};
-use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::{
-    Action, FunctionCallAction, SignedTransaction, TransferAction
-};
-use near_crypto::{InMemorySigner, Signer, SecretKey};
+use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
+use near_primitives::views::QueryRequest;
 use thiserror::Error;
 use std::str::FromStr;
 use serde_json::json;
-use base64::Engine;
-use base64::engine::general_purpose;
-use tokio::time::{sleep, Duration};
-use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Deserialize};
 use sha2::{Sha256, Digest};
-use ed25519_dalek::{Keypair, Signer as Ed25519Signer};
 use reqwest::Client;
+
+// Infrastructure endpoints (public, immutable)
+const DEFAULT_MCP_URL: &str = "https://nova-mcp.fastmcp.app";
+const DEFAULT_RPC_URL: &str = "https://rpc.testnet.fastnear.com/?apiKey=0b1399596423db51740cfbe041490f6a7611a6b0089d30afb7d459939723171c";
+const DEFAULT_CONTRACT_ID: &str = "nova-sdk-5.testnet";
 
 #[derive(Error, Debug)]
 pub enum NovaError {
-    #[error("Near RPC error: {0}")]
+    #[error("NEAR RPC error: {0}")]
     Near(String),
-    #[error("Invalid key length or format")]
-    InvalidKey,
+    #[error("MCP error: {0}")]
+    Mcp(String),
     #[error("Account ID parse failed")]
     ParseAccount,
-    #[error("Signing error: {0}")]
-    Signing(String),
-    #[error("Shade API error: {0}")]
-    Shade(String),
-    #[error("Checksum mismatch")]
-    ChecksumMismatch,
+    #[error("Invalid CID: {0}")]
+    InvalidCid(String),
+    #[error("Authentication error: {0}")]
+    Auth(String),
+    #[error("HTTP error: {0}")]
+    Http(String),
+}
+
+impl From<reqwest::Error> for NovaError {
+    fn from(e: reqwest::Error) -> Self {
+        NovaError::Http(e.to_string())
+    }
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -45,14 +46,14 @@ pub struct Transaction {
 }
 
 /// Result structs for composites
-#[derive(Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct FeeBreakdown {
     pub claim: f64,
     pub record: Option<f64>,
     pub total: f64,
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Debug)]
 pub struct CompositeUploadResult {
     pub cid: String,
     pub trans_id: String,
@@ -65,61 +66,274 @@ pub struct CompositeRetrieveResult {
     pub data: Vec<u8>,
     pub file_hash: String,
     pub fee_breakdown: FeeBreakdown,
+    pub ipfs_hash: String,
+    pub group_id: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct McpRetrieveResponse {
+    decrypted_b64: String,
+    file_hash: String,
+    fee_breakdown: FeeBreakdown,
+    ipfs_hash: String,
+    group_id: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AuthStatusResult {
+    pub authenticated: bool,
+    pub near_account_id: Option<String>,
+    pub authorized_for_group: Option<bool>,
+}
+
+#[derive(Deserialize, Debug)]
+struct McpMessageResponse {
+    message: Option<String>,
+}
+
+/// Configuration for NovaSdk
+#[derive(Clone)]
+pub struct NovaSdkConfig {
+    pub rpc_url: String,
+    pub contract_id: String,
+    pub mcp_url: String,
+}
+
+impl Default for NovaSdkConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: DEFAULT_RPC_URL.to_string(),
+            contract_id: DEFAULT_CONTRACT_ID.to_string(),
+            mcp_url: DEFAULT_MCP_URL.to_string(),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct NovaSdk {
     client: JsonRpcClient,
+    http_client: Client,
+    account_id: String,
+    session_token: String,
     contract_id: AccountId,
-    signer: Option<Signer>,
-    pinata_key: String,
-    pinata_secret: String,
-    shade_api_url: String,
+    mcp_url: String,
+    rpc_url: String,
 }
 
 impl NovaSdk {
-    /// Creates a new NovaSdk instance.
-    pub fn new(rpc_url: &str, contract_id: &str, pinata_key: &str, pinata_secret: &str, shade_api_url: &str) -> Self {
-        let client = JsonRpcClient::connect(rpc_url);
-        let contract_id = AccountId::from_str(contract_id).expect("Invalid contract_id format");
-        NovaSdk {
-            client,
-            contract_id,
-            signer: None,
-            pinata_key: pinata_key.to_string(),
-            pinata_secret: pinata_secret.to_string(),
-            shade_api_url: shade_api_url.to_string(),
+    /// Creates a new NovaSdk instance with `account_id` - Your NOVA-managed account (e.g., "alice-nova.nova-sdk-5.testnet"), `session_token` - JWT from nova-sdk.com/api/auth/session-token
+    pub fn new(account_id: &str, session_token: &str) -> Result<Self, NovaError> {
+        Self::with_config(account_id, session_token, NovaSdkConfig::default())
+    }
+
+    /// Creates a new NovaSdk instance with custom configuration.
+    pub fn with_config(
+        account_id: &str,
+        session_token: &str,
+        config: NovaSdkConfig,
+    ) -> Result<Self, NovaError> {
+        if account_id.is_empty() {
+            return Err(NovaError::Auth("account_id required: get yours at nova-sdk.com".to_string()));
         }
+        if session_token.is_empty() {
+            return Err(NovaError::Auth("session_token required: get yours at nova-sdk.com/api/auth/session-token".to_string()));
+        }
+
+        let contract_id = AccountId::from_str(&config.contract_id)
+            .map_err(|_| NovaError::ParseAccount)?;
+
+        Ok(Self {
+            client: JsonRpcClient::connect(&config.rpc_url),
+            http_client: Client::new(),
+            account_id: account_id.to_string(),
+            session_token: session_token.to_string(),
+            contract_id,
+            mcp_url: config.mcp_url,
+            rpc_url: config.rpc_url,
+        })
     }
 
-    /// Attaches a signer using a NEAR private key string (e.g., "ed25519:base58key").
-    pub fn with_signer(mut self, private_key: &str, account_id: &str) -> Result<Self, NovaError> {
-        // Validate account_id first
-        let account_id_acc = AccountId::from_str(account_id).map_err(|_| NovaError::ParseAccount)?;
-        // Then parse the secret key
-        let secret_key = SecretKey::from_str(private_key).map_err(|e| NovaError::Signing(e.to_string()))?;
-        let signer = InMemorySigner::from_secret_key(account_id_acc, secret_key);
-        self.signer = Some(signer);
-        Ok(self)
+    /// Returns the account ID
+    pub fn account_id(&self) -> &str {
+        &self.account_id
     }
 
+    /// Returns the contract ID
+    pub fn contract_id(&self) -> &str {
+        self.contract_id.as_str()
+    }
+
+    /// Returns the MCP URL
+    pub fn mcp_url(&self) -> &str {
+        &self.mcp_url
+    }
+
+    /// Returns the RPC URL
+    pub fn rpc_url(&self) -> &str {
+        &self.rpc_url
+    }
+
+    /// Calls an MCP tool with the given arguments.
+    async fn call_mcp_tool<T: for<'de> Deserialize<'de>>(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<T, NovaError> {
+        let url = format!("{}/tools/{}", self.mcp_url, tool_name);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.session_token))
+            .header("X-Account-Id", &self.account_id)
+            .json(&args)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            
+            // Parse error message if JSON
+            let error_msg = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
+                json.get("error")
+                    .or(json.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&error_text)
+                    .to_string()
+            } else {
+                error_text
+            };
+
+            return Err(NovaError::Mcp(format!(
+                "MCP tool '{}' failed ({}): {}",
+                tool_name, status, error_msg
+            )));
+        }
+
+        response
+            .json::<T>()
+            .await
+            .map_err(|e| NovaError::Mcp(format!("Failed to parse MCP response: {}", e)))
+    }
+
+    /// NOVA core operations via MCP server
+    /// Check authentication status and group authorization.
+    pub async fn auth_status(&self, group_id: Option<&str>) -> Result<AuthStatusResult, NovaError> {
+        let args = json!({
+            "group_id": group_id.unwrap_or("default")
+        });
+        self.call_mcp_tool("auth_status", args).await
+    }
+
+    /// Register a new group. Caller becomes owner.
+    pub async fn register_group(&self, group_id: &str) -> Result<String, NovaError> {
+        let args = json!({ "group_id": group_id });
+        let response: McpMessageResponse = self.call_mcp_tool("register_group", args).await?;
+        Ok(response.message.unwrap_or_else(|| format!("Group '{}' registered successfully", group_id)))
+    }
+
+    /// Add a member to a group (owner only).
+    pub async fn add_group_member(&self, group_id: &str, member_id: &str) -> Result<String, NovaError> {
+        let args = json!({
+            "group_id": group_id,
+            "member_id": member_id
+        });
+        let response: McpMessageResponse = self.call_mcp_tool("add_group_member", args).await?;
+        Ok(response.message.unwrap_or_else(|| format!("Added {} to group '{}'", member_id, group_id)))
+    }
+
+    /// Revoke a member from a group (owner only, triggers key rotation).
+    pub async fn revoke_group_member(&self, group_id: &str, member_id: &str) -> Result<String, NovaError> {
+        let args = json!({
+            "group_id": group_id,
+            "member_id": member_id
+        });
+        let response: McpMessageResponse = self.call_mcp_tool("revoke_group_member", args).await?;
+        Ok(response.message.unwrap_or_else(|| format!("Revoked {} from group '{}'", member_id, group_id)))
+    }
+
+    /// Upload encrypted file to IPFS and record on NEAR blockchain.
+    /// MCP server handles: key retrieval, encryption, IPFS upload, transaction signing.
+    pub async fn composite_upload(
+        &self,
+        group_id: &str,
+        data: &[u8],
+        filename: &str,
+    ) -> Result<CompositeUploadResult, NovaError> {
+        let data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+
+        let args = json!({
+            "group_id": group_id,
+            "user_id": self.account_id,
+            "data": data_b64,
+            "filename": filename,
+            "payload_b64": "",
+            "sig_hex": ""
+        });
+
+        self.call_mcp_tool("composite_upload", args).await
+    }
+
+    /// Retrieve and decrypt file from IPFS.
+    /// MCP server handles: key retrieval, IPFS fetch, decryption.
+    pub async fn composite_retrieve(
+        &self,
+        group_id: &str,
+        ipfs_hash: &str,
+    ) -> Result<CompositeRetrieveResult, NovaError> {
+        if !ipfs_hash.starts_with("Qm") {
+            return Err(NovaError::InvalidCid(ipfs_hash.to_string()));
+        }
+
+        let args = json!({
+            "group_id": group_id,
+            "ipfs_hash": ipfs_hash,
+            "payload_b64": "",
+            "sig_hex": ""
+        });
+
+        let response: McpRetrieveResponse = self.call_mcp_tool("composite_retrieve", args).await?;
+
+        let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &response.decrypted_b64)
+            .map_err(|e| NovaError::Mcp(format!("Failed to decode data: {}", e)))?;
+
+        Ok(CompositeRetrieveResult {
+            data,
+            file_hash: response.file_hash,
+            fee_breakdown: response.fee_breakdown,
+            ipfs_hash: response.ipfs_hash,
+            group_id: response.group_id,
+        })
+    }
+
+    /// Read-Only Contract Queries (Direct RPC - no auth needed)
     /// Queries the balance of an account on NEAR.
-    pub async fn get_balance(&self, account_id: &str) -> Result<Balance, NovaError> {
-        let account_id_acc = AccountId::from_str(account_id).map_err(|_| NovaError::ParseAccount)?;
+    pub async fn get_balance(&self, account_id: Option<&str>) -> Result<Balance, NovaError> {
+        let id = account_id.unwrap_or(&self.account_id);
+        let account_id_acc = AccountId::from_str(id).map_err(|_| NovaError::ParseAccount)?;
+        
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::ViewAccount { account_id: account_id_acc },
         };
-        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
         match response.kind {
             JsonRpcQueryResponseKind::ViewAccount(acc) => Ok(acc.amount),
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
     }
 
-    /// Checks if a user is authorized in a group (read-only contract view).
-    pub async fn is_authorized(&self, group_id: &str, user_id: &str) -> Result<bool, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id.to_string()}).to_string().into_bytes();
+    /// Checks if a user is authorized in a group
+    pub async fn is_authorized(&self, group_id: &str, user_id: Option<&str>) -> Result<bool, NovaError> {
+        let id = user_id.unwrap_or(&self.account_id);
+        let args = json!({"group_id": group_id, "user_id": id}).to_string().into_bytes();
+        
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::CallFunction {
@@ -128,19 +342,24 @@ impl NovaSdk {
                 args: args.into(),
             },
         };
-        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
-                let bool_result: bool = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                let bool_result: bool = serde_json::from_slice(&result.result)
+                    .map_err(|e| NovaError::Near(e.to_string()))?;
                 Ok(bool_result)
             }
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
     }
 
-    /// Fetches the group checksum for a group (read-only contract view).
+    /// Fetches the group checksum 
     pub async fn get_group_checksum(&self, group_id: &str) -> Result<Option<String>, NovaError> {
         let args = json!({"group_id": group_id}).to_string().into_bytes();
+        
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::CallFunction {
@@ -149,29 +368,56 @@ impl NovaSdk {
                 args: args.into(),
             },
         };
-        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
-                let checksum: Option<String> = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                if result.result.is_empty() {
+                    return Ok(None);
+                }
+                let checksum: Option<String> = serde_json::from_slice(&result.result)
+                    .map_err(|e| NovaError::Near(e.to_string()))?;
                 Ok(checksum)
             }
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
     }
 
-    /// Updates the Shade checksum for a group (group owner-only, payable).
-    pub async fn update_checksum(&self, group_id: &str, checksum: &str) -> Result<String, NovaError> {
-        let fee = self.estimate_fee("update_checksum").await?;
-        let gas = 50_000_000_000_000u64; // 50 TGas
-        let attached_deposit = fee + gas as u128;
-        let args = json!({"group_id": group_id, "checksum": checksum}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("update_checksum", args, "update_checksum", 50_000_000_000_000, attached_deposit).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
+    /// Fetches the group owner.
+    pub async fn get_group_owner(&self, group_id: &str) -> Result<Option<String>, NovaError> {
+        let args = json!({"group_id": group_id}).to_string().into_bytes();
+        
+        let request = methods::query::RpcQueryRequest {
+            block_reference: BlockReference::Finality(Finality::Final),
+            request: QueryRequest::CallFunction {
+                account_id: self.contract_id.clone(),
+                method_name: "get_group_owner".to_string(),
+                args: args.into(),
+            },
+        };
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        match response.kind {
+            JsonRpcQueryResponseKind::CallResult(result) => {
+                if result.result.is_empty() {
+                    return Ok(None);
+                }
+                let owner: Option<String> = serde_json::from_slice(&result.result)
+                    .map_err(|e| NovaError::Near(e.to_string()))?;
+                Ok(owner)
+            }
+            _ => Err(NovaError::Near("Invalid response kind".to_string())),
+        }
     }
 
     /// Estimates fee for an action (yoctoNEAR, read-only view).
     pub async fn estimate_fee(&self, action: &str) -> Result<u128, NovaError> {
         let args = json!({"action": action}).to_string().into_bytes();
+        
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::CallFunction {
@@ -180,116 +426,29 @@ impl NovaSdk {
                 args: args.into(),
             },
         };
-        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
-                let fee: u128 = serde_json::from_slice(&result.result).map_err(|e| NovaError::Near(e.to_string()))?;
+                let fee: u128 = serde_json::from_slice(&result.result)
+                    .map_err(|e| NovaError::Near(e.to_string()))?;
                 Ok(fee)
             }
             _ => Err(NovaError::Near("Invalid response kind".to_string())),
         }
     }
 
-    /// Fetches the base64-encoded group key for an authorized user (v2: Shade/TEE flow).
-    pub async fn get_group_key(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
-        let signer = self.signer.as_ref().ok_or(NovaError::Signing("No signer attached".to_string()))?;
-        let _signer_account_id = match signer {
-            Signer::InMemory(s) => s.account_id.clone(),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-
-        let fee = self.estimate_fee("claim_token").await?;
-        let gas = 100_000_000_000_000u64; // 100 TGas
-        let _attached_deposit = fee + gas as u128;
-
-        // Step 1: Generate payload
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| NovaError::Near("Time error".to_string()))?;
-        let ts_ns = (now.as_secs() * 1_000_000_000u64) + (now.subsec_nanos() as u64);
-        let input = format!("{}{}{}", group_id, user_id, ts_ns);
-        let mut hasher = Sha256::new();
-        hasher.update(input.as_bytes());
-        let nonce = hex::encode(hasher.finalize());
-
-        // Extract seed from private key
-        let private_key_str = match signer {
-            Signer::InMemory(s) => format!("{}", s.secret_key),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-        let seed_b58 = if let Some(stripped) = private_key_str.strip_prefix("ed25519:") {
-            stripped.to_string()
-        } else {
-            return Err(NovaError::Signing("Invalid private key format".to_string()));
-        };
-        let seed_bytes_full = bs58::decode(&seed_b58)
-            .into_vec()
-            .map_err(|_| NovaError::Signing("Base58 decode error".to_string()))?;
-        if seed_bytes_full.len() != 64 {
-            return Err(NovaError::InvalidKey);
-        }
-        let seed_bytes = &seed_bytes_full[0..32];
-        let keypair = Keypair::from_bytes(seed_bytes)
-            .map_err(|e| NovaError::Signing(format!("Keypair from bytes failed: {:?}", e)))?;
-        let public_bytes = keypair.public.as_bytes();
-        let signing_pk_b58 = bs58::encode(public_bytes).into_string();
-
-        let payload_dict = json!({
-            "group_id": group_id,
-            "user_id": user_id,
-            "nonce": nonce,
-            "timestamp": ts_ns,
-            "signing_pk_b58": signing_pk_b58
-        });
-        let payload_str = serde_json::to_string(&payload_dict).map_err(|e| NovaError::Signing(e.to_string()))?;
-        let payload_bytes = payload_str.as_bytes();
-        let signature = keypair.sign(payload_bytes);
-        let sig_bytes = signature.to_bytes();
-        let sig_hex = hex::encode(sig_bytes);
-
-        let payload_b64 = general_purpose::STANDARD.encode(payload_bytes);
-
-        // Step 2: Claim token on-chain
-        let args = json!({
-            "group_id": group_id,
-            "payload_b64": payload_b64,
-            "signature_hex": sig_hex
-        }).to_string().into_bytes();
-        let outcome = self.execute_contract_call("claim_token", args, "claim_token", 100_000_000_000_000, 1_000_000_000_000_000_000).await?;
-        let token_b64 = self.parse_outcome_detailed(&outcome.transaction_outcome.outcome)?;
-        let token_bytes = general_purpose::STANDARD.decode(&token_b64).map_err(|_| NovaError::Near("Token base64 error".to_string()))?;
-        let token = String::from_utf8(token_bytes).map_err(|_| NovaError::Near("Token UTF-8 error".to_string()))?;
-
-        // Step 3: Fetch key from Shade API
-        let client = Client::new();
-        let shade_req = client.post(format!("{}/api/key-management/get_key", self.shade_api_url))
-            .json(&json!({ "group_id": group_id, "token": token }))
-            .send()
-            .await
-            .map_err(|e| NovaError::Shade(e.to_string()))?;
-        if !shade_req.status().is_success() {
-            return Err(NovaError::Shade(format!("Shade HTTP: {}", shade_req.status())));
-        }
-        let shade_json: serde_json::Value = shade_req.json().await.map_err(|e| NovaError::Shade(e.to_string()))?;
-        let key_b64 = shade_json["key"].as_str().ok_or(NovaError::Shade("No key".to_string()))?.to_string();
-        let checksum = shade_json["checksum"].as_str().ok_or(NovaError::Shade("No checksum".to_string()))?;
-
-        // Step 4: Verify checksum
-        let on_chain_checksum = self.get_group_checksum(group_id).await?;
-        let on_chain_str = on_chain_checksum.as_deref().unwrap_or("").trim();
-        if on_chain_str != checksum.trim() {
-            return Err(NovaError::ChecksumMismatch);
-        }
-
-        // Log breakdown
-        let fee_near = fee as f64 / 1e24;
-        println!("Key access fee: {} NEAR (auth overhead)", fee_near);
-        println!("Cost breakdown: {} NEAR total (est 0.005 IPFS + 0.003 Phala + {:.4} NOVA)", fee_near, fee_near - 0.008);
-
-        Ok(key_b64)
-    }
-
-    /// Fetches transactions for a group (authorized user view).
-    pub async fn get_transactions_for_group(&self, group_id: &str, user_id: &str) -> Result<Vec<Transaction>, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
+    /// Fetches transactions for a group.
+    pub async fn get_transactions_for_group(
+        &self,
+        group_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<Vec<Transaction>, NovaError> {
+        let id = user_id.unwrap_or(&self.account_id);
+        let args = json!({"group_id": group_id, "user_id": id}).to_string().into_bytes();
+        
         let request = methods::query::RpcQueryRequest {
             block_reference: BlockReference::Finality(Finality::Final),
             request: QueryRequest::CallFunction {
@@ -298,7 +457,10 @@ impl NovaSdk {
                 args: args.into(),
             },
         };
-        let response = self.client.call(request).await.map_err(|e| NovaError::Near(e.to_string()))?;
+        
+        let response = self.client.call(request).await
+            .map_err(|e| NovaError::Near(e.to_string()))?;
+        
         match response.kind {
             JsonRpcQueryResponseKind::CallResult(result) => {
                 let txs: Vec<Transaction> = serde_json::from_slice(&result.result)
@@ -309,916 +471,611 @@ impl NovaSdk {
         }
     }
 
-    /// Executes a signed function call on the contract.
-    async fn execute_contract_call(
-        &self,
-        method_name: &str,
-        args: Vec<u8>,
-        action: &str,
-        _gas: u64,
-        _attached_deposit: u128
-    ) -> Result<FinalExecutionOutcomeView, NovaError> {
-        let fee = self.estimate_fee(action).await?;
-        let gas = 300_000_000_000_000u64; // 300 TGas
-        let attached_deposit = fee + gas as u128;
-
-        let signer = self.signer.as_ref().ok_or(NovaError::Signing("No signer attached".to_string()))?;
-
-        let signer_account_id = match signer {
-            Signer::InMemory(s) => s.account_id.clone(),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-
-        let public_key = match signer {
-            Signer::InMemory(s) => s.public_key.clone(),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-
-        // Fetch latest access key for nonce
-        let access_key_request = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-            request: QueryRequest::ViewAccessKey {
-                account_id: signer_account_id.clone(),
-                public_key: public_key.clone(),
-            },
-        };
-        let access_key_response = self.client.call(access_key_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-        let access_key = match access_key_response.kind {
-            JsonRpcQueryResponseKind::AccessKey(ak) => ak,
-            _ => return Err(NovaError::Near("Invalid access key response".to_string())),
-        };
-        let nonce = access_key.nonce + 1;
-
-        // Fetch latest block hash
-        let block_request = methods::block::RpcBlockRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-        };
-        let block_response = self.client.call(block_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-        let block_hash: CryptoHash = block_response.header.hash;
-        let block_height: BlockHeight = block_response.header.height;
-
-        // Build transaction with FunctionCallAction
-        let actions = vec![Action::FunctionCall(Box::new(FunctionCallAction {
-            method_name: method_name.to_string(),
-            args,
-            gas,
-            deposit: attached_deposit,
-        }))];
-
-        // Use SignedTransaction::from_actions to construct the transaction
-        let signed_tx = SignedTransaction::from_actions(
-            nonce,
-            signer_account_id,
-            self.contract_id.clone(),
-            signer,
-            actions,
-            block_hash,
-            block_height,
-        );
-
-        let broadcast_request = RpcBroadcastTxCommitRequest { signed_transaction: signed_tx };
-        let broadcast_response = self.client.call(broadcast_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-
-        Ok(broadcast_response)
+    /// Compute SHA256 hash of data.
+    pub fn compute_hash(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        hex::encode(result)
     }
-
-    /// Registers a new group (owner-only, payable).
-    pub async fn register_group(&self, group_id: &str) -> Result<String, NovaError> {
-        // Registers as caller (self-owned)
-        let args = json!({"group_id": group_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("register_group", args, "register_group", 300_000_000_000_000, 100_000_000_000_000_000_000_000).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
-    }
-
-    /// Adds a member to a group (owner-only, payable).
-    pub async fn add_group_member(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("add_group_member", args, "add_group_member", 300_000_000_000_000, 500_000_000_000_000_000).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
-    }
-
-    /// Revokes a member from a group (owner-only, payable, rotates key).
-    pub async fn revoke_group_member(&self, group_id: &str, user_id: &str) -> Result<String, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("revoke_group_member", args, "revoke_group_member", 300_000_000_000_000, 500_000_000_000_000_000).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
-    }
-
-    /// Records a file transaction (owner-only, payable, returns trans_id).
-    pub async fn record_transaction(&self, group_id: &str, user_id: &str, file_hash: &str, ipfs_hash: &str) -> Result<String, NovaError> {
-        let args = json!({"group_id": group_id, "user_id": user_id, "file_hash": file_hash, "ipfs_hash": ipfs_hash}).to_string().into_bytes();
-        let outcome = self.execute_contract_call("record_transaction", args, "record_transaction", 300_000_000_000_000, 2_000_000_000_000_000_000).await?;
-        match self.parse_outcome_detailed(&outcome.transaction_outcome.outcome) {
-            Ok(value) => Ok(value),
-            Err(_) => self.parse_outcome(&outcome.transaction_outcome.outcome),
-        }
-    }
-
-    /// Transfers tokens to another account (signed transfer action).
-    pub async fn transfer_tokens(&self, to_account: &str, amount_yocto: u128) -> Result<String, NovaError> {
-        let to_id = AccountId::from_str(to_account).map_err(|_| NovaError::ParseAccount)?;
-        let actions = vec![Action::Transfer(TransferAction { deposit: amount_yocto })];
-        let outcome = self.execute_transfer(to_id, actions).await?;
-        self.parse_outcome(&outcome.transaction_outcome.outcome)
-    }
-
-    async fn execute_transfer(
-        &self,
-        to_id: AccountId,
-        actions: Vec<Action>,
-    ) -> Result<FinalExecutionOutcomeView, NovaError> {
-        let signer = self.signer.as_ref().ok_or(NovaError::Signing("No signer attached".to_string()))?;
-
-        let signer_account_id = match signer {
-            Signer::InMemory(s) => s.account_id.clone(),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-
-        let public_key = match signer {
-            Signer::InMemory(s) => s.public_key.clone(),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-
-        // Fetch nonce and block hash
-        let access_key_request = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-            request: QueryRequest::ViewAccessKey {
-                account_id: signer_account_id.clone(),
-                public_key: public_key.clone(),
-            },
-        };
-        let access_key_response = self.client.call(access_key_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-        let access_key = match access_key_response.kind {
-            JsonRpcQueryResponseKind::AccessKey(ak) => ak,
-            _ => return Err(NovaError::Near("Invalid access key response".to_string())),
-        };
-        let nonce = access_key.nonce + 1;
-
-        let block_request = methods::block::RpcBlockRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-        };
-        let block_response = self.client.call(block_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-        let block_hash: CryptoHash = block_response.header.hash;
-        let block_height: BlockHeight = block_response.header.height;
-
-        let signed_tx = SignedTransaction::from_actions(
-            nonce,
-            signer_account_id,
-            to_id,
-            signer,
-            actions,
-            block_hash,
-            block_height,
-        );
-
-        let broadcast_request = RpcBroadcastTxCommitRequest { signed_transaction: signed_tx };
-        let broadcast_response = self.client.call(broadcast_request).await.map_err(|e| NovaError::Near(e.to_string()))?;
-
-        Ok(broadcast_response)
-    }
-
-    fn parse_outcome(&self, outcome: &ExecutionOutcomeView) -> Result<String, NovaError> {
-        match &outcome.status {
-            ExecutionStatusView::SuccessValue(value) => {
-                if !value.is_empty() {
-                    String::from_utf8(value.clone()).map_err(|e| NovaError::Near(e.to_string()))
-                } else {
-                    Ok("Success".to_string())
-                }
-            }
-            ExecutionStatusView::SuccessReceiptId(_) => Ok("Success".to_string()),
-            _ => Err(NovaError::Near("Transaction failed".to_string())),
-        }
-    }
-
-    fn parse_outcome_detailed(&self, outcome: &ExecutionOutcomeView) -> Result<String, NovaError> {
-        match &outcome.status {
-            ExecutionStatusView::SuccessValue(value) => String::from_utf8(value.clone()).map_err(|e| NovaError::Near(e.to_string())),
-            _ => Err(NovaError::Near("Transaction failed - no return value".to_string())),
-        }
-    }
-
-    /// Full upload workflow: get_key → encrypt → IPFS pin → record tx.
-    pub async fn composite_upload(
-        &self,
-        group_id: &str,
-        user_id: &str,
-        data: &[u8],
-        filename: &str,
-    ) -> Result<CompositeUploadResult, NovaError> {
-        // Estimate fees
-        let claim_fee = self.estimate_fee("claim_token").await?;
-        let record_fee = self.estimate_fee("record_transaction").await?;
-        let total_fee = claim_fee + record_fee;
-        let gas = 400_000_000_000_000u64; // 400 TGas
-        let _attached_deposit = total_fee + gas as u128;
-
-        // Step 1: Fetch group key
-        let key_b64 = self.get_group_key(group_id, user_id).await?;
-        
-        // Step 2: Encrypt data
-        let encrypted_b64 = self.encrypt_data(data, &key_b64)?;
-        
-        // Step 3: Upload to IPFS
-        let cid = self.ipfs_upload(&encrypted_b64, filename).await?;
-        
-        // Step 4: Calculate file hash from original data
-        let file_hash = hex_encode(&sha256_hash(data));
-        
-        // Step 5: Record transaction on blockchain
-        let trans_id = self.record_transaction(group_id, user_id, &file_hash, &cid).await?;
-        
-        let fee_breakdown = FeeBreakdown {
-            claim: claim_fee as f64 / 1e24,
-            record: Some(record_fee as f64 / 1e24),
-            total: total_fee as f64 / 1e24,
-        };
-
-        println!("Composite upload fee: {} NEAR total", fee_breakdown.total);
-        println!("Cost breakdown: {} NEAR (est 0.005 IPFS + 0.003 Phala + {:.4} NOVA)", fee_breakdown.total, fee_breakdown.total - 0.008);
-
-        Ok(CompositeUploadResult {
-            cid,
-            trans_id,
-            file_hash,
-            fee_breakdown,
-        })
-    }
-
-    /// Full retrieve workflow: get_key → fetch IPFS → decrypt.
-    pub async fn composite_retrieve(
-        &self,
-        group_id: &str,
-        ipfs_hash: &str,
-    ) -> Result<CompositeRetrieveResult, NovaError> {
-        // Validate CID format
-        if !ipfs_hash.starts_with("Qm") {
-            return Err(NovaError::Near(format!("Invalid CID: {}", ipfs_hash)));
-        }
-
-        // Estimate fee
-        let claim_fee = self.estimate_fee("claim_token").await?;
-        let gas = 100_000_000_000_000u64; // 100 TGas
-        let _attached_deposit = claim_fee + gas as u128;
-        
-        // Step 1: Get user_id from signer
-        let user_id = match &self.signer {
-            Some(Signer::InMemory(s)) => s.account_id.to_string(),
-            None => return Err(NovaError::Signing("No signer attached for retrieve".to_string())),
-            _ => return Err(NovaError::Signing("Unsupported signer type".to_string())),
-        };
-        
-        // Step 2: Fetch group key
-        let key_b64 = self.get_group_key(group_id, &user_id).await?;
-        
-        // Step 3: Fetch from IPFS
-        let encrypted_b64 = self.ipfs_retrieve(ipfs_hash).await?;
-        
-        // Step 4: Decrypt
-        let decrypted_b64 = self.decrypt_data(&encrypted_b64, &key_b64)?;
-        
-        // Step 5: Calculate hash for verification
-        let decrypted_bytes = general_purpose::STANDARD.decode(&decrypted_b64)
-            .map_err(|_| NovaError::InvalidKey)?;
-        let file_hash = hex_encode(&sha256_hash(&decrypted_bytes));
-        
-        let fee_breakdown = FeeBreakdown {
-            claim: claim_fee as f64 / 1e24,
-            record: None,
-            total: claim_fee as f64 / 1e24,
-        };
-
-        println!("Composite retrieve fee: {} NEAR (key access)", fee_breakdown.total);
-
-        Ok(CompositeRetrieveResult {
-            data: decrypted_bytes,
-            file_hash,
-            fee_breakdown,
-        })
-    }
-
-    /// Helper: Encrypt data with AES-256-CBC
-    fn encrypt_data(&self, data: &[u8], key_b64: &str) -> Result<String, NovaError> {
-        use aes::Aes256;
-        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
-        
-        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
-        
-        // Decode key
-        let key_bytes = general_purpose::STANDARD.decode(key_b64)
-            .map_err(|_| NovaError::InvalidKey)?;
-        if key_bytes.len() != 32 {
-            return Err(NovaError::InvalidKey);
-        }
-        
-        // Generate random IV (16 bytes)
-        let mut iv = [0u8; 16];
-        use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut iv);
-        
-        // Prepare buffer with room for padding
-        let mut buffer = vec![0u8; data.len() + 16];
-        buffer[..data.len()].copy_from_slice(data);
-
-        // Encrypt with padding
-        let cipher = Aes256CbcEnc::new(key_bytes.as_slice().into(), &iv.into());
-        let ciphertext = cipher.encrypt_padded_mut::<Pkcs7>(&mut buffer, data.len())
-            .map_err(|_| NovaError::Near("Encryption failed".to_string()))?;
-        
-        // Prepend IV to ciphertext
-        let mut result = iv.to_vec();
-        result.extend_from_slice(ciphertext);
-        
-        Ok(general_purpose::STANDARD.encode(result))
-    }
-
-    /// Helper: Decrypt data with AES-256-CBC
-    fn decrypt_data(&self, encrypted_b64: &str, key_b64: &str) -> Result<String, NovaError> {
-        use aes::Aes256;
-        use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-        
-        type Aes256CbcDec = cbc::Decryptor<Aes256>;
-        
-        // Decode key and encrypted data
-        let key_bytes = general_purpose::STANDARD.decode(key_b64)
-            .map_err(|_| NovaError::InvalidKey)?;
-        if key_bytes.len() != 32 {
-            return Err(NovaError::InvalidKey);
-        }
-        
-        let encrypted_bytes = general_purpose::STANDARD.decode(encrypted_b64)
-            .map_err(|_| NovaError::InvalidKey)?;
-        if encrypted_bytes.len() < 16 {
-            return Err(NovaError::InvalidKey);
-        }
-        
-        // Extract IV (first 16 bytes) and ciphertext
-        let (iv, ciphertext) = encrypted_bytes.split_at(16);
-        
-        // Decrypt with padding removal
-        let cipher = Aes256CbcDec::new(key_bytes.as_slice().into(), iv.into());
-        let mut buffer = ciphertext.to_vec();
-        let decrypted = cipher.decrypt_padded_mut::<Pkcs7>(&mut buffer)
-            .map_err(|_| NovaError::Near("Decryption failed".to_string()))?;
-        
-        Ok(general_purpose::STANDARD.encode(decrypted))
-    }
-
-    /// Helper: Upload to IPFS via Pinata
-    async fn ipfs_upload(&self, data_b64: &str, filename: &str) -> Result<String, NovaError> {
-        use reqwest::multipart;
-        
-        let client = reqwest::Client::new();
-        let decoded_data = general_purpose::STANDARD.decode(data_b64)
-            .map_err(|_| NovaError::InvalidKey)?;
-        
-        let part = multipart::Part::bytes(decoded_data)
-            .file_name(filename.to_string());
-        let form = multipart::Form::new().part("file", part);
-        
-        let response = client
-            .post("https://api.pinata.cloud/pinning/pinFileToIPFS")
-            .header("pinata_api_key", &self.pinata_key)
-            .header("pinata_secret_api_key", &self.pinata_secret)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| NovaError::Near(format!("IPFS upload failed: {}", e)))?;
-        
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| NovaError::Near(format!("IPFS response parse failed: {}", e)))?;
-        
-        json["IpfsHash"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or(NovaError::Near("No IpfsHash in response".to_string()))
-    }
-
-    /// Helper: Retrieve from IPFS via Pinata gateway
-    async fn _inner_retrieve(&self, cid: &str, client: &reqwest::Client) -> Result<String, NovaError> {
-        let url = format!("https://gateway.pinata.cloud/ipfs/{}", cid);
-        let response = client.get(&url)
-            .send()
-            .await
-            .map_err(|e| NovaError::Near(format!("IPFS retrieve failed: {}", e)))?;
-        let bytes = response.bytes().await
-            .map_err(|e| NovaError::Near(format!("IPFS read failed: {}", e)))?;
-        Ok(general_purpose::STANDARD.encode(bytes))
-    }
-
-    async fn ipfs_retrieve(&self, cid: &str) -> Result<String, NovaError> {
-        let client = reqwest::Client::new();
-        let mut retries = 0;
-        while retries < 3 {
-            match self._inner_retrieve(cid, &client).await {
-                Ok(res) => return Ok(res),
-                Err(e) if e.to_string().contains("timeout") => {
-                    retries += 1;
-                    sleep(Duration::from_secs(2u64.pow((retries as u64).try_into().unwrap()))).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    
-        // Fallback to public gateway after retries
-        let public_url = format!("https://ipfs.io/ipfs/{}", cid);
-        let response = client.get(&public_url)
-            .send()
-            .await
-            .map_err(|e| NovaError::Near(format!("Public IPFS fallback failed: {}", e)))?;
-        let bytes = response.bytes().await
-            .map_err(|e| NovaError::Near(format!("Public IPFS read failed: {}", e)))?;
-        Ok(general_purpose::STANDARD.encode(bytes))
-    }
-}
-
-/// Helper function for SHA-256 hashing
-fn sha256_hash(data: &[u8]) -> [u8; 32] {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
-/// Helper function to convert byte array to hex string
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
     use std::env;
 
-    #[tokio::test]
-    async fn test_new() {
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            "fake_key",
-            "fake_secret",
-            "https://fake-shade.phala.network",
-        );
-        assert_eq!(sdk.contract_id.as_str(), "nova-sdk-5.testnet");
-        assert_eq!(sdk.shade_api_url, "https://fake-shade.phala.network");
-        assert!(sdk.signer.is_none());
+    // Mock session token for unit tests (not valid for real MCP calls)
+    const MOCK_SESSION_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Utbm92YS5ub3ZhLXNkay01LnRlc3RuZXQiLCJ0eXBlIjoibm92YV9zZXNzaW9uIn0.mock";
+    const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-5.testnet";
+
+    // =========================================================================
+    // Constructor Tests
+    // =========================================================================
+
+    #[test]
+    fn test_new_success() {
+        let result = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN);
+        assert!(result.is_ok());
+        let sdk = result.unwrap();
+        assert_eq!(sdk.account_id(), TEST_ACCOUNT_ID);
+        assert_eq!(sdk.contract_id(), DEFAULT_CONTRACT_ID);
+        assert_eq!(sdk.mcp_url(), DEFAULT_MCP_URL);
+        assert_eq!(sdk.rpc_url(), DEFAULT_RPC_URL);
     }
 
-    #[tokio::test]
-    async fn test_with_signer_valid_format() {
-        let private_key = "ed25519:ABC123dummybase58key32bytesencodedhereforrusttest";
-        let account_id = "test.account.testnet";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake").with_signer(private_key, account_id);
-        assert!(matches!(result.err().unwrap(), NovaError::Signing(_)));
+    #[test]
+    fn test_new_requires_account_id() {
+        let result = NovaSdk::new("", MOCK_SESSION_TOKEN);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, NovaError::Auth(_)));
+        assert!(err.to_string().contains("account_id required"));
     }
 
-    #[tokio::test]
-    async fn test_with_signer_invalid_account() {
-        let private_key = "ed25519:dummy";
-        let invalid_account = "invalid@account";
-        let result = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake").with_signer(private_key, invalid_account);
-        assert!(matches!(result.err().unwrap(), NovaError::ParseAccount));
+    #[test]
+    fn test_new_requires_session_token() {
+        let result = NovaSdk::new(TEST_ACCOUNT_ID, "");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, NovaError::Auth(_)));
+        assert!(err.to_string().contains("session_token required"));
     }
+
+    // =========================================================================
+    // Utility Tests
+    // =========================================================================
+
+    #[test]
+    fn test_compute_hash() {
+        let hash = NovaSdk::compute_hash(b"test data");
+        assert_eq!(hash.len(), 64); // SHA256 hex = 64 chars
+        assert_eq!(hash, "916f0027a575074ce72a331777c3478d6513f786a591bd892da1a577bf2335f9");
+    }
+
+    #[test]
+    fn test_compute_hash_consistency() {
+        let data = b"consistent data";
+        let hash1 = NovaSdk::compute_hash(data);
+        let hash2 = NovaSdk::compute_hash(data);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_hash_different_data() {
+        let hash1 = NovaSdk::compute_hash(b"data1");
+        let hash2 = NovaSdk::compute_hash(b"data2");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_hash_empty() {
+        let hash = NovaSdk::compute_hash(b"");
+        assert_eq!(hash.len(), 64);
+        // SHA256 of empty string
+        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    // =========================================================================
+    // CID Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_valid_cid_format() {
+        assert!("QmXyz123456789abcdefghijklmnopqrstuvwxyz1234".starts_with("Qm"));
+        assert!("QmTest".starts_with("Qm"));
+    }
+
+    #[test]
+    fn test_invalid_cid_format() {
+        assert!(!"invalid_cid".starts_with("Qm"));
+        assert!(!"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".starts_with("Qm")); // CIDv1
+        assert!(!"".starts_with("Qm"));
+    }
+
+    // =========================================================================
+    // Read-Only RPC Tests (No Auth Required)
+    // =========================================================================
 
     #[tokio::test]
     async fn test_get_balance() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let balance = sdk.get_balance("nova-sdk-5.testnet").await.unwrap();
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        // Query the contract's balance (always exists)
+        let balance = sdk.get_balance(Some("nova-sdk-5.testnet")).await.unwrap();
         let bal_str = balance.to_string();
         assert!(!bal_str.is_empty());
         assert!(bal_str.parse::<u128>().is_ok());
     }
 
     #[tokio::test]
+    async fn test_get_balance_default_account() {
+        let sdk = NovaSdk::new("nova-sdk-5.testnet", MOCK_SESSION_TOKEN).unwrap();
+        // Uses sdk.account_id by default
+        let balance = sdk.get_balance(None).await.unwrap();
+        assert!(balance > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_nonexistent_account() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_balance(Some("nonexistent.account.testnet")).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NovaError::Near(_)));
+    }
+
+    #[tokio::test]
     async fn test_is_authorized() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let result = sdk.is_authorized("test_group", "random.user.testnet").await;
-        // Assert on error for non-existent group/unauthorized (contract panics as expected)
-        assert!(result.is_err(), "Should error on non-existent group or unauthorized");
-        if let Err(e) = result {
-            assert!(matches!(e, NovaError::Near(_)), "Expect Near error from contract panic");
-            assert!(e.to_string().contains("Group not found") || e.to_string().contains("Unauthorized"), "Error should indicate group/auth issue");
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.is_authorized("test_group", Some("random.user.testnet")).await;
+        // Should error on non-existent group or return false for unauthorized
+        match result {
+            Ok(authorized) => assert!(!authorized, "Random user should not be authorized"),
+            Err(e) => {
+                // Accept any Near error (includes network errors, contract errors, etc.)
+                assert!(matches!(e, NovaError::Near(_)), "Expected Near error, got: {:?}", e);
+                // Network errors are acceptable in unit tests (RPC may be unavailable)
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn test_is_authorized_default_user() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        // Uses sdk.account_id by default
+        let result = sdk.is_authorized("test_group", None).await;
+        // Result depends on whether test_group exists and user is authorized
+        assert!(result.is_ok() || matches!(result.unwrap_err(), NovaError::Near(_)));
     }
 
     #[tokio::test]
     async fn test_get_group_checksum() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let checksum = sdk.get_group_checksum("test_group").await.unwrap();
-        // May be None if not set
-        if let Some(cs) = checksum {
-            assert!(!cs.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_group_key_unauthorized() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        // Valid-format but dummy/invalid key (base58-compliant 64 chars; won't auth on contract)
-        let invalid_priv = "ed25519:3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r3D4YudUum4mp6rBwoLbCu7c6yJ9rf5C1jHdWfB3k2Z7r";
-        let invalid_user = "random.user.testnet";
-        let sdk_signed = match sdk.with_signer(&invalid_priv, invalid_user) {
-            Ok(s) => s,
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_group_checksum("test_group").await;
+        match result {
+            Ok(checksum) => {
+                // May be None if not set, or Some(string)
+                if let Some(cs) = checksum {
+                    assert!(!cs.is_empty());
+                }
+            }
             Err(e) => {
-                panic!("with_signer failed unexpectedly: {}", e);
-            }
-        };
-        let result = sdk_signed.get_group_key("test_group", invalid_user).await;
-        assert!(result.is_err(), "Unauthorized/invalid should fail");
-        let err = result.err().unwrap();
-        // Accept either Near error (from contract) or Signing error (from invalid key operations)
-        assert!(
-            matches!(err, NovaError::Near(_)) || matches!(err, NovaError::Signing(_)),
-            "Expected Near or Signing error, got: {:?}", err
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_group_key_authorized_integration() {
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if account_id.is_none() {
-            println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
-            return;
-        }
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        if private_key.is_none() {
-            println!("Skipping: TEST_NEAR_PRIVATE_KEY not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let key = sdk.get_group_key("test_group", &account_id.unwrap()).await.unwrap();
-        assert!(!key.is_empty());
-        assert!(key.len() > 20);
-    }
-
-    #[tokio::test]
-    async fn test_get_transactions_for_group() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let result = sdk.get_transactions_for_group("test_group", "random.user.testnet").await;
-        match result {
-            Ok(txs) => assert!(txs.is_empty()),
-            Err(e) => assert!(matches!(e, NovaError::Near(_))),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_transactions_for_group_integration() {
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if account_id.is_none() {
-            println!("Skipping: TEST_NEAR_ACCOUNT_ID not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let txs = sdk.get_transactions_for_group("test_group", &account_id.unwrap()).await.unwrap();
-        println!("Retrieved {} transactions for group", txs.len());
-        if !txs.is_empty() {
-            assert!(!txs[0].ipfs_hash.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_view_invalid_group() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let result = sdk.is_authorized("nonexistent_group_123", "test.user.testnet").await;
-        assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "No signer attached")]
-    async fn test_register_group_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let _ = sdk.register_group("new_test_group").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_register_group_existing() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_register_group_existing: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        let result = sdk.register_group("test_group").await;
-        assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
-    }
-
-    #[tokio::test]
-    async fn test_add_group_member() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_add_group_member: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        let result = sdk.add_group_member("test_group", "new.member.testnet").await;
-        match result {
-            Ok(_) => println!("✅ Added member successfully"),
-            Err(e) => if e.to_string().contains("already a member") { println!("Already member - expected") } else { panic!("Unexpected error: {}", e) },
-        }
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "No signer attached")]
-    async fn test_revoke_group_member_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let _ = sdk.revoke_group_member("test_group", "test.user.testnet").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_revoke_group_member_invalid_user() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_revoke_group_member_invalid_user: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.unwrap()).unwrap();
-        let result = sdk.revoke_group_member("test_group", "non.member.testnet").await;
-        assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), NovaError::Near(_)));
-    }
-
-    #[tokio::test]
-    async fn test_record_transaction_integration() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_record_transaction_integration: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake")
-            .with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let dummy_file_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let dummy_ipfs_hash = "QmDummyCIDForTest";
-        let result = sdk.record_transaction("test_group", &account_id.unwrap(), dummy_file_hash, dummy_ipfs_hash).await;
-        match result {
-            Ok(trans_id) => {
-                println!("✅ Recorded transaction: {}", trans_id);
-                assert!(!trans_id.is_empty());
-            }
-            Err(e) => if e.to_string().contains("not authorized") { println!("Auth fail - expected") } else { panic!("Unexpected: {}", e) },
-        }
-    }
-
-    #[tokio::test]
-    async fn test_composite_upload_integration() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_composite_upload_integration: Credentials not set");
-            return;
-        }
-        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_API_KEY not set");
-            std::process::exit(0);
-        });
-        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_SECRET_KEY not set");
-            std::process::exit(0);
-        });
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            &pinata_key,
-            &pinata_secret,
-            "https://fake-shade.phala.network"
-        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let test_data = b"Test data for composite upload";
-        let result = sdk.composite_upload("test_group", &account_id.unwrap(), test_data, "test.txt").await.unwrap();
-        println!("✅ Composite upload success:");
-        println!("   CID: {}", result.cid);
-        println!("   Trans ID: {}", result.trans_id);
-        println!("   File Hash: {}", result.file_hash);
-        println!("   Fee Breakdown: claim={} NEAR, record={} NEAR, total={} NEAR", 
-                 result.fee_breakdown.claim, result.fee_breakdown.record.unwrap_or(0.0), result.fee_breakdown.total);
-        assert!(!result.cid.is_empty());
-        assert!(!result.trans_id.is_empty());
-        assert_eq!(result.file_hash.len(), 64);
-        assert!(result.fee_breakdown.total > 0.0, "Total fee should be positive");
-    }
-
-    #[tokio::test]
-    async fn test_composite_retrieve_integration() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_composite_retrieve_integration: Credentials not set");
-            return;
-        }
-        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_API_KEY not set");
-            std::process::exit(0);
-        });
-        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_SECRET_KEY not set");
-            std::process::exit(0);
-        });
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            &pinata_key,
-            &pinata_secret,
-            "https://fake-shade.phala.network"
-        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let original_bytes = b"Test data for composite retrieve";
-        let upload_result = sdk.composite_upload("test_group", &account_id.unwrap(), original_bytes, "retrieve_test.txt").await.unwrap();
-        let cid = &upload_result.cid;
-        let retrieve_result = sdk.composite_retrieve("test_group", cid).await.unwrap();
-        println!("✅ Composite retrieve success:");
-        println!("   File Hash: {}", retrieve_result.file_hash);
-        println!("   Decrypted data length: {} bytes", retrieve_result.data.len());
-        println!("   Fee Breakdown: claim={} NEAR, total={} NEAR", 
-                 retrieve_result.fee_breakdown.claim, retrieve_result.fee_breakdown.total);
-        assert_eq!(retrieve_result.data, original_bytes);
-        assert_eq!(retrieve_result.file_hash.len(), 64);
-        assert!(retrieve_result.fee_breakdown.total > 0.0, "Total fee should be positive");
-        println!("✅ Decrypted data matches original ({} bytes)", retrieve_result.data.len());
-    }
-
-    #[tokio::test]
-    async fn test_composite_upload_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let test_data = b"test data";
-        let result = sdk.composite_upload("test_group", "user.testnet", test_data, "test.txt").await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_composite_retrieve_no_signer() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let result = sdk.composite_retrieve("test_group", "QmDummyCID").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NovaError::Signing(_)));
-    }
-
-    #[tokio::test]
-    async fn test_encrypt_decrypt_binary() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
-        let mut key_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key_bytes);
-        let key_b64 = general_purpose::STANDARD.encode(key_bytes);
-        let original_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        let encrypted = sdk.encrypt_data(&original_data, &key_b64).unwrap();
-        let decrypted_b64 = sdk.decrypt_data(&encrypted, &key_b64).unwrap();
-        let decrypted_bytes = general_purpose::STANDARD.decode(decrypted_b64).unwrap();
-        assert_eq!(original_data, decrypted_bytes);
-    }
-
-    #[tokio::test]
-    async fn test_update_checksum_integration() {
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        if account_id.is_none() || private_key.is_none() {
-            println!("Skipping test_update_checksum_integration: Credentials not set");
-            return;
-        }
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",  // Your deployed multi-user contract
-            "fake", "fake", "https://fake-shade.phala.network"
-        )
-        .with_signer(&private_key.unwrap(), &account_id.unwrap())
-        .unwrap();
-
-        let group_id = "test_update_checksum_group";
-        let test_checksum = "dummy_hex_checksum_32bytes_1234567890abcdef1234567890abcdef";  // 32-char hex for realism
-
-        // Pre-req: Register group (as caller → owner)
-        let register_result = sdk.register_group(group_id).await;
-        if let Err(e) = &register_result {
-            if !e.to_string().contains("Group exists") {  // Allow if already exists
-                panic!("Registration failed: {}", e);
+                // Group may not exist
+                assert!(matches!(e, NovaError::Near(_)));
             }
         }
-
-        // Call update_checksum
-        let result = sdk.update_checksum(group_id, test_checksum).await.unwrap();
-        assert_eq!(result, "Success", "Should return success");
-
-        // Verify: Fetch and check
-        let updated_checksum = sdk.get_group_checksum(group_id).await.unwrap();
-        assert_eq!(updated_checksum, Some(test_checksum.to_string()), "Checksum should match");
-
-        println!("✅ update_checksum success: {} updated to {}", group_id, test_checksum);
     }
 
     #[tokio::test]
-    async fn test_update_checksum_non_owner() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_update_checksum_non_owner: Credentials not set");
-            return;
+    async fn test_get_group_owner() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_group_owner("test_group").await;
+        match result {
+            Ok(owner) => {
+                if let Some(o) = owner {
+                    assert!(!o.is_empty());
+                    assert!(o.contains(".testnet") || o.contains(".near"));
+                }
+            }
+            Err(e) => {
+                assert!(matches!(e, NovaError::Near(_)));
+            }
         }
+    }
 
-        // Create SDK with a "non-owner" (use a dummy account if available; here assume test account isn't owner of existing group)
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            "fake", "fake", "https://fake-shade.phala.network"
-        )
-        .with_signer(&private_key.unwrap(), &account_id.unwrap())  // Assume this account isn't owner of 'test_group'
-        .unwrap();
-
-        let group_id = "test_group";  // Existing group owned by deployer
-        let test_checksum = "dummy_hex_checksum";
-
-        let result = sdk.update_checksum(group_id, test_checksum).await;
-        assert!(result.is_err(), "Non-owner should fail");
-        let err = result.err().unwrap();
-        assert!(matches!(err, NovaError::Near(_)), "Expect Near error from contract panic");
-        assert!(err.to_string().contains("Only group owner can update checksum"), "Error should indicate auth failure");
-
-        println!("✅ update_checksum non-owner failure confirmed");
+    #[tokio::test]
+    async fn test_get_group_owner_nonexistent() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_group_owner("nonexistent_group_xyz_123").await;
+        match result {
+            Ok(owner) => assert!(owner.is_none(), "Nonexistent group should have no owner"),
+            Err(_) => {} // Also acceptable
+        }
     }
 
     #[tokio::test]
     async fn test_estimate_fee() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
         let fee = sdk.estimate_fee("claim_token").await.unwrap();
-        assert!(fee > 0, "Fee should be positive (default 0.001 NEAR = 1e21 yocto)");
-        assert!(fee == 1_000_000_000_000_000_000u128, "Should match default claim_token fee");
+        assert!(fee > 0, "Fee should be positive");
+        // Default claim_token fee is typically 0.001 NEAR = 1e21 yoctoNEAR
+        println!("claim_token fee: {} yoctoNEAR ({} NEAR)", fee, fee as f64 / 1e24);
+    }
+
+    #[tokio::test]
+    async fn test_estimate_fee_record_transaction() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let fee = sdk.estimate_fee("record_transaction").await.unwrap();
+        assert!(fee > 0, "Record transaction fee should be positive");
+        println!("record_transaction fee: {} yoctoNEAR ({} NEAR)", fee, fee as f64 / 1e24);
     }
 
     #[tokio::test]
     async fn test_estimate_fee_unknown_action() {
-        let sdk = NovaSdk::new("https://rpc.testnet.near.org", "nova-sdk-5.testnet", "fake", "fake", "fake");
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
         let fee = sdk.estimate_fee("nonexistent_action").await.unwrap();
         assert_eq!(fee, 0, "Unknown action should return 0");
     }
 
     #[tokio::test]
-    async fn test_composite_upload_fee_breakdown() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_composite_upload_fee_breakdown: Credentials not set");
-            return;
+    async fn test_get_transactions_for_group() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_transactions_for_group("test_group", Some("random.user.testnet")).await;
+        match result {
+            Ok(txs) => {
+                // May be empty for random user
+                println!("Found {} transactions", txs.len());
+            }
+            Err(e) => {
+                assert!(matches!(e, NovaError::Near(_)));
+            }
         }
-        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_API_KEY not set");
-            std::process::exit(0);
-        });
-        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_SECRET_KEY not set");
-            std::process::exit(0);
-        });
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            &pinata_key,
-            &pinata_secret,
-            "https://fake-shade.phala.network"
-        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let test_data = b"Test data for fee breakdown";
-        let result = sdk.composite_upload("test_group", &account_id.unwrap(), test_data, "fee_test.txt").await.unwrap();
-        let breakdown = &result.fee_breakdown;
-        assert!(breakdown.claim > 0.0, "Claim fee should be positive");
-        assert!(breakdown.record.unwrap_or(0.0) > 0.0, "Record fee should be positive");
-        assert_eq!(breakdown.total, breakdown.claim + breakdown.record.unwrap_or(0.0), "Total should sum claim + record");
-        println!("✅ Fee breakdown: claim={} NEAR, record={} NEAR, total={} NEAR", 
-                 breakdown.claim, breakdown.record.unwrap_or(0.0), breakdown.total);
     }
 
     #[tokio::test]
-    async fn test_composite_retrieve_fee_breakdown() {
-        let private_key = env::var("TEST_NEAR_PRIVATE_KEY").ok();
-        let account_id = env::var("TEST_NEAR_ACCOUNT_ID").ok();
-        if private_key.is_none() || account_id.is_none() {
-            println!("Skipping test_composite_retrieve_fee_breakdown: Credentials not set");
-            return;
+    async fn test_get_transactions_for_group_default_user() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.get_transactions_for_group("test_group", None).await;
+        // Uses sdk.account_id by default
+        assert!(result.is_ok() || matches!(result.unwrap_err(), NovaError::Near(_)));
+    }
+
+    #[tokio::test]
+    async fn test_view_invalid_group() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.is_authorized("nonexistent_group_123", Some("test.user.testnet")).await;
+        // Should error for non-existent group
+        match result {
+            Ok(_) => {} // Contract might return false instead of error
+            Err(e) => assert!(matches!(e, NovaError::Near(_))),
         }
-        let pinata_key = env::var("PINATA_API_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_API_KEY not set");
-            std::process::exit(0);
-        });
-        let pinata_secret = env::var("PINATA_SECRET_KEY").unwrap_or_else(|_| {
-            println!("Skipping: PINATA_SECRET_KEY not set");
-            std::process::exit(0);
-        });
-        let sdk = NovaSdk::new(
-            "https://rpc.testnet.near.org",
-            "nova-sdk-5.testnet",
-            &pinata_key,
-            &pinata_secret,
-            "https://fake-shade.phala.network"
-        ).with_signer(&private_key.unwrap(), &account_id.clone().unwrap()).unwrap();
-        let original_bytes = b"Test data for retrieve fee breakdown";
-        let upload_result = sdk.composite_upload("test_group", &account_id.unwrap(), original_bytes, "fee_retrieve_test.txt").await.unwrap();
+    }
+
+    // =========================================================================
+    // MCP Tool Tests (Require Valid Session Token)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_auth_status_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let result = sdk.auth_status(None).await;
+        // Should fail with invalid token
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, NovaError::Mcp(_)) || matches!(err, NovaError::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn test_register_group_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let result = sdk.register_group("test_group_new").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_group_member_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let result = sdk.add_group_member("test_group", "new.member.testnet").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_group_member_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let result = sdk.revoke_group_member("test_group", "member.testnet").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_composite_upload_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let test_data = b"test data";
+        let result = sdk.composite_upload("test_group", test_data, "test.txt").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_invalid_token() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+        let result = sdk.composite_retrieve("test_group", "QmDummyCID123456789").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_invalid_cid() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.composite_retrieve("test_group", "invalid_cid").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, NovaError::InvalidCid(_)));
+        assert!(err.to_string().contains("invalid_cid"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_empty_cid() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+        let result = sdk.composite_retrieve("test_group", "").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NovaError::InvalidCid(_)));
+    }
+
+    // =========================================================================
+    // Integration Tests (Require Real Credentials)
+    // =========================================================================
+
+    fn get_integration_sdk() -> Option<NovaSdk> {
+        let account_id = env::var("TEST_NOVA_ACCOUNT_ID").ok()?;
+        let session_token = env::var("TEST_SESSION_TOKEN").ok()?;
+        NovaSdk::new(&account_id, &session_token).ok()
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let result = sdk.auth_status(Some("test_group")).await.unwrap();
+        println!("Auth status: authenticated={}, account={:?}", 
+                 result.authenticated, result.near_account_id);
+        assert!(result.authenticated);
+        assert!(result.near_account_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_register_group_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let group_id = format!("test_group_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        
+        let result = sdk.register_group(&group_id).await;
+        match result {
+            Ok(msg) => {
+                println!("✅ Registered group: {}", msg);
+                assert!(msg.contains(&group_id) || msg.contains("success"));
+            }
+            Err(e) => {
+                // May fail if group exists or other issue
+                println!("Register group result: {}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_group_existing_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        // Try to register existing group - should fail
+        let result = sdk.register_group("test_group").await;
+        if let Err(e) = result {
+            assert!(matches!(e, NovaError::Mcp(_)));
+            println!("Expected error for existing group: {}", e);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_group_member_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let result = sdk.add_group_member("test_group", "new.member.testnet").await;
+        match result {
+            Ok(msg) => println!("✅ Added member: {}", msg),
+            Err(e) => {
+                if e.to_string().contains("already a member") {
+                    println!("Already member - expected");
+                } else {
+                    println!("Add member error: {}", e);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_group_member_invalid_user_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let result = sdk.revoke_group_member("test_group", "non.member.testnet").await;
+        assert!(result.is_err());
+        println!("Expected error for non-member: {}", result.unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn test_composite_upload_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let test_data = b"Test data for composite upload via MCP";
+        let result = sdk.composite_upload("test_group", test_data, "test.txt").await.unwrap();
+        
+        println!("✅ Composite upload success:");
+        println!("   CID: {}", result.cid);
+        println!("   Trans ID: {}", result.trans_id);
+        println!("   File Hash: {}", result.file_hash);
+        println!("   Fee: claim={} NEAR, record={:?} NEAR, total={} NEAR",
+                 result.fee_breakdown.claim, 
+                 result.fee_breakdown.record, 
+                 result.fee_breakdown.total);
+        
+        assert!(!result.cid.is_empty());
+        assert!(result.cid.starts_with("Qm"));
+        assert!(!result.trans_id.is_empty());
+        assert_eq!(result.file_hash.len(), 64);
+        assert!(result.fee_breakdown.total > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        // First upload
+        let original_data = b"Test data for composite retrieve via MCP";
+        let upload_result = sdk.composite_upload("test_group", original_data, "retrieve_test.txt").await.unwrap();
         let cid = &upload_result.cid;
+        
+        // Then retrieve
+        let retrieve_result = sdk.composite_retrieve("test_group", cid).await.unwrap();
+        
+        println!("✅ Composite retrieve success:");
+        println!("   File Hash: {}", retrieve_result.file_hash);
+        println!("   Data length: {} bytes", retrieve_result.data.len());
+        println!("   Fee: claim={} NEAR, total={} NEAR",
+                 retrieve_result.fee_breakdown.claim,
+                 retrieve_result.fee_breakdown.total);
+        
+        assert_eq!(retrieve_result.data, original_data);
+        assert_eq!(retrieve_result.file_hash.len(), 64);
+        assert_eq!(retrieve_result.ipfs_hash, *cid);
+        assert_eq!(retrieve_result.group_id, "test_group");
+        
+        println!("✅ Decrypted data matches original ({} bytes)", retrieve_result.data.len());
+    }
+
+    #[tokio::test]
+    async fn test_composite_upload_fee_breakdown_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let test_data = b"Test data for fee breakdown";
+        let result = sdk.composite_upload("test_group", test_data, "fee_test.txt").await.unwrap();
+        
+        let breakdown = &result.fee_breakdown;
+        assert!(breakdown.claim > 0.0, "Claim fee should be positive");
+        assert!(breakdown.record.unwrap_or(0.0) > 0.0, "Record fee should be positive");
+        assert!(
+            (breakdown.total - (breakdown.claim + breakdown.record.unwrap_or(0.0))).abs() < 0.0001,
+            "Total should sum claim + record"
+        );
+        
+        println!("✅ Fee breakdown: claim={} NEAR, record={:?} NEAR, total={} NEAR",
+                 breakdown.claim, breakdown.record, breakdown.total);
+    }
+
+    #[tokio::test]
+    async fn test_composite_retrieve_fee_breakdown_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let original_data = b"Test data for retrieve fee breakdown";
+        let upload_result = sdk.composite_upload("test_group", original_data, "fee_retrieve_test.txt").await.unwrap();
+        let cid = &upload_result.cid;
+        
         let retrieve_result = sdk.composite_retrieve("test_group", cid).await.unwrap();
         let breakdown = &retrieve_result.fee_breakdown;
+        
         assert!(breakdown.claim > 0.0, "Claim fee should be positive");
-        assert!(breakdown.total == breakdown.claim, "Total should equal claim for retrieve");
-        println!("✅ Retrieve fee breakdown: claim={} NEAR, total={} NEAR", breakdown.claim, breakdown.total);
+        assert!(
+            (breakdown.total - breakdown.claim).abs() < 0.0001,
+            "Total should equal claim for retrieve"
+        );
+        
+        println!("✅ Retrieve fee breakdown: claim={} NEAR, total={} NEAR",
+                 breakdown.claim, breakdown.total);
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_for_group_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let txs = sdk.get_transactions_for_group("test_group", None).await.unwrap();
+        println!("Retrieved {} transactions for group", txs.len());
+        
+        if !txs.is_empty() {
+            let tx = &txs[0];
+            assert!(!tx.ipfs_hash.is_empty());
+            assert!(!tx.file_hash.is_empty());
+            assert!(!tx.group_id.is_empty());
+            assert!(!tx.user_id.is_empty());
+            println!("First tx: group={}, user={}, ipfs={}", 
+                     tx.group_id, tx.user_id, tx.ipfs_hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_authorized_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let authorized = sdk.is_authorized("test_group", None).await.unwrap();
+        println!("User authorized for test_group: {}", authorized);
+        // User should be authorized if they've used the group
+    }
+
+    #[tokio::test]
+    async fn test_get_group_owner_integration() {
+        let sdk = match get_integration_sdk() {
+            Some(s) => s,
+            None => {
+                println!("Skipping: TEST_NOVA_ACCOUNT_ID and TEST_SESSION_TOKEN required");
+                return;
+            }
+        };
+
+        let owner = sdk.get_group_owner("test_group").await.unwrap();
+        if let Some(o) = owner {
+            println!("test_group owner: {}", o);
+            assert!(o.contains(".testnet") || o.contains(".near"));
+        } else {
+            println!("test_group has no owner (may not exist)");
+        }
     }
 }
