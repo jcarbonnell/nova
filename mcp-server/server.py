@@ -58,6 +58,7 @@ if not SESSION_TOKEN_SECRET:
     raise ValueError("SESSION_TOKEN_SECRET env var required")
 SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
 SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
+ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk-5.testnet")
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +99,37 @@ with get_db() as conn:
     cursor.execute('CREATE TABLE IF NOT EXISTS exports_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_session TEXT, fields_exported TEXT, exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
     cursor.execute('CREATE TABLE IF NOT EXISTS deletes_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email_hash TEXT, reason TEXT, deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
     conn.commit()
+
+def normalize_account_id(account_id: str) -> str:
+    """
+    Auto-append NOVA suffix if user provides just a username.
+    
+    Examples:
+        "john" → "john.nova-sdk-5.testnet"
+        "alice" → "alice.nova-sdk-5.testnet"
+        "bob.near" → "bob.near" (unchanged - external account)
+        "carol.testnet" → "carol.testnet" (unchanged - external account)
+        "dave.nova-sdk-5.testnet" → "dave.nova-sdk-5.testnet" (unchanged - already complete)
+    """
+    if not account_id:
+        raise ValueError("Account ID cannot be empty")
+    
+    # Clean up whitespace
+    account_id = account_id.strip().lower()
+    
+    # If it already contains a dot, assume it's a full account ID
+    if '.' in account_id:
+        return account_id
+    
+    # Validate username format (NEAR account rules)
+    if not re.match(r'^[a-z0-9_-]{2,64}$', account_id):
+        raise ValueError(f"Invalid username format: {account_id}")
+    
+    # Append the NOVA suffix
+    full_account_id = f"{account_id}{ACCOUNT_SUFFIX}"
+    logger.info(f"Auto-completed account ID: {account_id} → {full_account_id}")
+    
+    return full_account_id
 
 def store_user_email(email: str, session_token: str, near_account_id: Optional[str] = None, consent: bool = False) -> int:
     hashed_email = hashlib.sha256(email.encode()).hexdigest()
@@ -961,6 +993,9 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
+    # AUTO-COMPLETE USERNAME (in case the frontend chat fails to)
+    member_id = normalize_account_id(member_id)
+
     # Get signing account from Shade TEE
     acc = await get_user_signer(
         near_account_id=near_account_id,
@@ -999,11 +1034,14 @@ async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> st
     if not near_account_id:
         raise ValueError("No NEAR account; complete FastAuth signup.")
     
+    # AUTO-COMPLETE USERNAME (in case the frontend chat fails to)
+    member_id = normalize_account_id(member_id)
+    
     # get signer from shade tee
     acc = await get_user_signer(
         near_account_id=near_account_id,
         user_email=user_email,
-        wallet_id=wallet_id,
+        wallet_id=wallet_id,    
         access_token=access_token
     )
     
