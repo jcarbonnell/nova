@@ -1,4 +1,4 @@
-# NOVA for Law: Confidential Document Vaults Before TEE Review
+# NOVA for Governments: Confidential Document Vaults Before TEE Review
 
 Upload sensitive legal docs to NOVA; TEE processes (e.g., AI contract analysis) without visibility; revoke access post-review—complements Phala's privacy for e-discovery.
 

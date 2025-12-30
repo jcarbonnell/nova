@@ -1136,7 +1136,6 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
 async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str) -> dict:
     """
     Full upload: get_key → encrypt → IPFS pin → record tx.
-    
     Uses authenticated user context to fetch signing key from Shade TEE.
     """
     # Get authenticated user from headers
