@@ -26,6 +26,9 @@ pub struct Contract {
     shade_code_hash: Option<String>,
     workers: LookupMap<AccountId, String>,
     used_nonces: LookupMap<String, bool>,
+    owned_groups: LookupMap<AccountId, StoreVec<String>>,
+    member_groups: LookupMap<AccountId, StoreVec<String>>,
+    group_transactions: LookupMap<String, StoreVec<String>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -51,6 +54,9 @@ enum StorageKey {
     Workers,
     UsedNonces,
     Fees,
+    OwnedGroups,
+    MemberGroups,
+    GroupTransactions,
 }
 
 #[derive(Serialize)]
@@ -87,6 +93,9 @@ impl Contract {
             shade_code_hash: None,
             workers: LookupMap::new(StorageKey::Workers),
             used_nonces: LookupMap::new(StorageKey::UsedNonces),
+            owned_groups: LookupMap::new(StorageKey::OwnedGroups),
+            member_groups: LookupMap::new(StorageKey::MemberGroups),
+            group_transactions: LookupMap::new(StorageKey::GroupTransactions),
         }
     }
 
@@ -155,6 +164,37 @@ impl Contract {
         self.group_members.insert(group_id.clone(), members);
         log!("Group {} registered by {} (owner added as member; event emitted for Shade key init)", group_id, caller);
         
+        // add to owned_groups
+        {
+            let prefix = format!("owned:{}", caller);
+            let mut owned = StoreVec::new(prefix.as_bytes());
+            if let Some(existing) = self.owned_groups.get(&caller) {
+                for g in existing.iter() {
+                    owned.push(g.clone());
+                }
+            }
+            owned.push(group_id.clone());
+            self.owned_groups.insert(caller.clone(), owned);
+        }
+
+        // add to member_groups
+        {
+            let prefix = format!("member:{}", caller);
+            let mut member = StoreVec::new(prefix.as_bytes());
+            if let Some(existing) = self.member_groups.get(&caller) {
+                for g in existing.iter() {
+                    member.push(g.clone());
+                }
+            }
+            member.push(group_id.clone());
+            self.member_groups.insert(caller.clone(), member);
+        }
+
+        // initialize empty group_transactions
+        let tx_prefix = format!("group_tx:{}", group_id);
+        let transactions = StoreVec::new(tx_prefix.as_bytes());
+        self.group_transactions.insert(group_id.clone(), transactions);
+
         // Emit Event (parseable by indexer → trigger Shade /generate_key)
         let event = NovaEvent::Registered { group_id: group_id.clone(), owner: caller.clone() };
         let event_log = serde_json::to_string(&event).expect("Failed to serialize event");
@@ -169,11 +209,32 @@ impl Contract {
         self.groups.get(&group_id).map_or_else(|| env::panic_str("Group not found"), |g| g.owner.clone())
     }
 
+    // Returns list of group members (owner or member only)
     pub fn get_group_members(&self, group_id: String, user_id: AccountId) -> Vec<AccountId> {
         assert!(self.groups.contains_key(&group_id), "Group not found");
         assert!(self.is_authorized(group_id.clone(), user_id.clone()) || user_id == self.owner, "Unauthorized");
         let members = self.group_members.get(&group_id).expect("Group members not found");
         members.iter().cloned().collect::<Vec<AccountId>>()  // Clone and collect from iter (O(n) gas, safe for small groups)
+    }
+
+    // Returns list of groups owned by the user
+    pub fn get_owned_groups(&self, user_id: AccountId) -> Vec<String> {
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, user_id, "Only the wallet owner can query their owned groups");
+        self.owned_groups
+            .get(&user_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    // Returns list of groups where the user is a member (includes owned groups)
+    pub fn get_member_groups(&self, user_id: AccountId) -> Vec<String> {
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, user_id, "Only the wallet owner can query their membership groups");
+        self.member_groups
+            .get(&user_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     #[payable]
@@ -188,6 +249,19 @@ impl Contract {
         assert!(!members.iter().any(|x| *x == user_id), "User already a member");
         members.push(user_id.clone());
         log!("Added {} to group {}", user_id, group_id);
+
+        // add new member to member_groups index
+        {
+            let prefix = format!("member:{}", user_id);
+            let mut member_list = StoreVec::new(prefix.as_bytes());
+            if let Some(existing) = self.member_groups.get(&user_id) {
+                for g in existing.iter() {
+                    member_list.push(g.clone());
+                }
+            }
+            member_list.push(group_id.clone());
+            self.member_groups.insert(user_id.clone(), member_list);
+        }
     }
 
     #[payable]
@@ -202,6 +276,17 @@ impl Contract {
         if let Some(pos) = members.iter().position(|x| x == &user_id) {
             members.swap_remove(pos.try_into().unwrap());
             log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
+
+            // remove member from member_groups index
+            if let Some(member_list) = self.member_groups.get_mut(&user_id) {
+                if let Some(pos) = member_list.iter().position(|g| g == &group_id) {
+                    member_list.swap_remove(pos.try_into().unwrap());
+                    // If the member now has no groups, remove the key to reclaim storage
+                    if member_list.is_empty() {
+                        self.member_groups.remove(&user_id);
+                    }
+                }
+            }
 
             // Emit Event (indexer → Shade /api/key-management/rotate_key {group_id})
             let event = NovaEvent::Revoked { group_id: group_id.clone(), user_id: user_id.clone(), owner: caller.clone() };
@@ -225,22 +310,38 @@ impl Contract {
         
         assert!(self.groups.contains_key(&group_id), "Group not found");
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "User not authorized");
-        // removed owner only, now any caller in group can record
+
+        let gid = group_id.clone();
         let trans_id = hex::encode(env::sha256(&format!(
             "{}{}{}{}{}",
-            group_id,
+            gid,
             user_id,
             file_hash,
             ipfs_hash,
             env::block_timestamp()
         ).as_bytes()));
+
         let tx = Transaction {
             group_id,
             user_id: user_id.to_string(),
             file_hash,
             ipfs_hash,
         };
+
         self.transactions.insert(trans_id.clone(), tx);
+
+        // Append tx id to per-group transactions index (use gid here)
+        if let Some(mut gtx) = self.group_transactions.remove(&gid) {
+            gtx.push(trans_id.clone());
+            self.group_transactions.insert(gid.clone(), gtx);
+        } else {
+            // Robust fallback: create the StoreVec with the same prefix you used in register_group
+            let tx_prefix = format!("group_tx:{}", gid);
+            let mut gtx = StoreVec::new(tx_prefix.as_bytes());
+            gtx.push(trans_id.clone());
+            self.group_transactions.insert(gid.clone(), gtx);
+        }
+        
         log!("Transaction recorded: {}", trans_id);
         trans_id
     }
