@@ -209,14 +209,6 @@ impl Contract {
         self.groups.get(&group_id).map_or_else(|| env::panic_str("Group not found"), |g| g.owner.clone())
     }
 
-    // Returns list of group members (owner or member only)
-    pub fn get_group_members(&self, group_id: String, user_id: AccountId) -> Vec<AccountId> {
-        assert!(self.groups.contains_key(&group_id), "Group not found");
-        assert!(self.is_authorized(group_id.clone(), user_id.clone()) || user_id == self.owner, "Unauthorized");
-        let members = self.group_members.get(&group_id).expect("Group members not found");
-        members.iter().cloned().collect::<Vec<AccountId>>()  // Clone and collect from iter (O(n) gas, safe for small groups)
-    }
-
     // Returns list of groups owned by the user
     pub fn get_owned_groups(&self, user_id: AccountId) -> Vec<String> {
         let caller = env::predecessor_account_id();
@@ -303,6 +295,16 @@ impl Contract {
         members.iter().any(|x| *x == user_id)
     }
 
+    // Returns list of group members (owner or member only)
+    pub fn get_group_members(&self, group_id: String) -> Vec<AccountId> {
+        let caller = env::predecessor_account_id();
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+        assert!(self.is_authorized(group_id.clone(), caller.clone()) || caller == self.owner, "Unauthorized");
+        
+        let members = self.group_members.get(&group_id).expect("Group members not found");
+        members.iter().cloned().collect::<Vec<AccountId>>()
+    }
+
     #[payable]
     pub fn record_transaction(&mut self, group_id: String, user_id: AccountId, file_hash: String, ipfs_hash: String) -> String {
         let attached = env::attached_deposit().as_yoctonear();
@@ -346,14 +348,23 @@ impl Contract {
         trans_id
     }
 
-    pub fn get_transactions_for_group(&self, group_id: String, user_id: AccountId) -> Vec<Transaction> {
+    pub fn get_transactions_for_group(&self, group_id: String) -> Vec<Transaction> {
+        let caller = env::predecessor_account_id();
         assert!(self.groups.contains_key(&group_id), "Group not found");
-        assert!(self.is_authorized(group_id.clone(), user_id.clone()) || user_id == self.owner, "Unauthorized");
-        self.transactions
-            .values()
-            .filter(|tx| tx.group_id == group_id)
-            .cloned()
-            .collect()
+        assert!(self.is_authorized(group_id.clone(), caller.clone()) || caller == self.owner, "Unauthorized");
+        
+        // Use the per-group index to avoid scanning all transactions:
+        if let Some(tx_ids) = self.group_transactions.get(&group_id) {
+            let mut out: Vec<Transaction> = Vec::new();
+            for tx_id in tx_ids.iter() {
+                if let Some(tx) = self.transactions.get(tx_id.as_str()) {
+                    out.push(tx.clone());
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        }
     }
 
     #[payable]
@@ -666,7 +677,7 @@ mod tests {
             "file_hash".to_string(),
             "ipfs_hash".to_string(),
         );
-        let transactions = contract.get_transactions_for_group("test_group".to_string(), member.clone());
+        let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].group_id, "test_group");
         assert_eq!(transactions[0].user_id, member.to_string());
@@ -744,7 +755,7 @@ mod tests {
             "file_hash2".to_string(),
             "ipfs_hash2".to_string(),
         );
-        let transactions = contract.get_transactions_for_group("test_group".to_string(), member.clone());
+        let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 2);
         assert!(transactions.iter().any(|tx| tx.file_hash == "file_hash1" && tx.ipfs_hash == "ipfs_hash1"));
         assert!(transactions.iter().any(|tx| tx.file_hash == "file_hash2" && tx.ipfs_hash == "ipfs_hash2"));
@@ -763,7 +774,7 @@ mod tests {
         contract.register_group("test_group".to_string());
         let view_context = get_context(non_member.clone(), 0);  // View no deposit
         testing_env!(view_context.build());
-        contract.get_transactions_for_group("test_group".to_string(), non_member);
+        contract.get_transactions_for_group("test_group".to_string());
     }
 
     #[test]
@@ -778,7 +789,7 @@ mod tests {
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
         contract.register_group("test_group".to_string());
         contract.add_group_member("test_group".to_string(), member.clone());
-        let members = contract.get_group_members("test_group".to_string(), owner.clone());
+        let members = contract.get_group_members("test_group".to_string());
         assert_eq!(members.len(), 2);
         assert!(members.contains(&owner));
         assert!(members.contains(&member));
@@ -797,7 +808,7 @@ mod tests {
         contract.register_group("test_group".to_string());
         let view_context = get_context(non_member.clone(), 0);  // View no deposit
         testing_env!(view_context.build());
-        contract.get_group_members("test_group".to_string(), non_member);
+        contract.get_group_members("test_group".to_string());
     }
 
     #[test]
