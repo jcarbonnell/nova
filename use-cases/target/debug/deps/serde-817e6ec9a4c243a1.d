@@ -1,0 +1,14 @@
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/serde-817e6ec9a4c243a1.d: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/juliencarbonnell/near/nova/demos/target/debug/build/serde-1f259c737b352886/out/private.rs
+
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/libserde-817e6ec9a4c243a1.rlib: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/juliencarbonnell/near/nova/demos/target/debug/build/serde-1f259c737b352886/out/private.rs
+
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/libserde-817e6ec9a4c243a1.rmeta: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/juliencarbonnell/near/nova/demos/target/debug/build/serde-1f259c737b352886/out/private.rs
+
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/juliencarbonnell/near/nova/demos/target/debug/build/serde-1f259c737b352886/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/juliencarbonnell/near/nova/demos/target/debug/build/serde-1f259c737b352886/out

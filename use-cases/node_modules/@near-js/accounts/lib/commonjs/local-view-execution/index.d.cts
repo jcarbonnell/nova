@@ -1,0 +1,32 @@
+import { BlockReference } from '@near-js/types';
+import { I as IntoConnection, F as FunctionCallOptions } from '../connection-DFhOVWYM.cjs';
+import '@near-js/signers';
+import '@near-js/providers';
+
+interface ViewFunctionCallOptions extends FunctionCallOptions {
+    blockQuery?: BlockReference;
+}
+/**
+ * @deprecated Will be removed in the next major release
+ */
+declare class LocalViewExecution {
+    private readonly connection;
+    private readonly storage;
+    constructor(connection: IntoConnection);
+    private fetchContractCode;
+    private fetchContractState;
+    private fetch;
+    private loadOrFetch;
+    /**
+     * Calls a view function on a contract, fetching the contract code and state if needed.
+     * @param options Options for calling the view function.
+     * @param options.contractId The contract account ID.
+     * @param options.methodName The name of the view function to call.
+     * @param options.args The arguments to pass to the view function.
+     * @param options.blockQuery The block query options.
+     * @returns {Promise<any>} - A promise that resolves to the result of the view function.
+     */
+    viewFunction({ contractId, methodName, args, blockQuery }: ViewFunctionCallOptions): Promise<any>;
+}
+
+export { LocalViewExecution };

@@ -1,0 +1,10 @@
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/secp256k1_sys-357a15e75d892db8.d: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/macros.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/types.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/recovery.rs
+
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/libsecp256k1_sys-357a15e75d892db8.rlib: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/macros.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/types.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/recovery.rs
+
+/Users/juliencarbonnell/near/nova/demos/target/debug/deps/libsecp256k1_sys-357a15e75d892db8.rmeta: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/macros.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/types.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/recovery.rs
+
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/lib.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/macros.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/types.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.8.2/src/recovery.rs:
