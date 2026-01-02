@@ -81,6 +81,10 @@ impl Contract {
         fees.insert("update_checksum".to_string(), 100_000_000_000_000_000u128);       // 0.0001 NEAR
         fees.insert("approve_shade_code_hash".to_string(), 100_000_000_000_000_000u128); // 0.0001 NEAR
         fees.insert("claim_token".to_string(), 1_000_000_000_000_000_000u128);         // 0.001 NEAR
+        fees.insert("get_owned_groups".to_string(), 100_000_000_000_000_000u128);  // 0.0001 NEAR
+        fees.insert("get_member_groups".to_string(), 100_000_000_000_000_000u128);  // 0.0001 NEAR
+        fees.insert("get_group_members".to_string(), 100_000_000_000_000_000u128);  // 0.0001 NEAR
+        fees.insert("get_transactions_for_group".to_string(), 100_000_000_000_000_000u128);  // 0.0001 NEAR
 
         Self {
             owner,
@@ -124,13 +128,12 @@ impl Contract {
     }
 
     // Stub for future dynamic fees via Chainlink oracle (e.g., NEAR/USD + IPFS est)
-    // Integrate Chainlink CCIP on NEAR (confirmed mature in 2025 via searches; deploy oracle contract separately)
     pub fn get_dynamic_fee(&self, _action: String) -> u128 {
         // TODO: Call Chainlink oracle (e.g., Promise to oracle contract for feed)
-        // Example: near_usd_price = oracle::get_feed("NEAR/USD");
-        // ipfs_cost = oracle::get_feed("IPFS/GB"); // Custom feed if needed
+        // near_usd_price = oracle::get_feed("NEAR/USD");
+        // ipfs_cost = oracle::get_feed("IPFS/GB");
         // return base_fee(action) * near_usd_price + ipfs_cost * file_size_estimate;
-        0  // Placeholder: Use static for now
+        0  // Placeholder
     }
 
     // Internal fee transfer method
@@ -165,30 +168,26 @@ impl Contract {
         log!("Group {} registered by {} (owner added as member; event emitted for Shade key init)", group_id, caller);
         
         // add to owned_groups
-        {
-            let prefix = format!("owned:{}", caller);
-            let mut owned = StoreVec::new(prefix.as_bytes());
-            if let Some(existing) = self.owned_groups.get(&caller) {
-                for g in existing.iter() {
-                    owned.push(g.clone());
-                }
+        let prefix = format!("owned:{}", caller);
+        let mut owned = StoreVec::new(prefix.as_bytes());
+        if let Some(existing) = self.owned_groups.get(&caller) {
+            for g in existing.iter() {
+                owned.push(g.clone());
             }
-            owned.push(group_id.clone());
-            self.owned_groups.insert(caller.clone(), owned);
         }
+        owned.push(group_id.clone());
+        self.owned_groups.insert(caller.clone(), owned);
 
         // add to member_groups
-        {
-            let prefix = format!("member:{}", caller);
-            let mut member = StoreVec::new(prefix.as_bytes());
-            if let Some(existing) = self.member_groups.get(&caller) {
-                for g in existing.iter() {
-                    member.push(g.clone());
-                }
+        let prefix = format!("member:{}", caller);
+        let mut member = StoreVec::new(prefix.as_bytes());
+        if let Some(existing) = self.member_groups.get(&caller) {
+            for g in existing.iter() {
+                member.push(g.clone());
             }
-            member.push(group_id.clone());
-            self.member_groups.insert(caller.clone(), member);
         }
+        member.push(group_id.clone());
+        self.member_groups.insert(caller.clone(), member);
 
         // initialize empty group_transactions
         let tx_prefix = format!("group_tx:{}", group_id);
@@ -210,21 +209,29 @@ impl Contract {
     }
 
     // Returns list of groups owned by the user
-    pub fn get_owned_groups(&self, user_id: AccountId) -> Vec<String> {
+    #[payable]
+    pub fn get_owned_groups(&mut self) -> Vec<String> {
+        let attached = env::attached_deposit().as_yoctonear();
+        self.collect_fee("get_owned_groups", attached);
+        
         let caller = env::predecessor_account_id();
-        assert_eq!(caller, user_id, "Only the wallet owner can query their owned groups");
+        
         self.owned_groups
-            .get(&user_id)
+            .get(&caller)
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default()
     }
 
     // Returns list of groups where the user is a member (includes owned groups)
-    pub fn get_member_groups(&self, user_id: AccountId) -> Vec<String> {
+    #[payable]
+    pub fn get_member_groups(&mut self) -> Vec<String> {
+        let attached = env::attached_deposit().as_yoctonear();
+        self.collect_fee("get_member_groups", attached);
+        
         let caller = env::predecessor_account_id();
-        assert_eq!(caller, user_id, "Only the wallet owner can query their membership groups");
+        
         self.member_groups
-            .get(&user_id)
+            .get(&caller)
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default()
     }
@@ -242,18 +249,16 @@ impl Contract {
         members.push(user_id.clone());
         log!("Added {} to group {}", user_id, group_id);
 
-        // add new member to member_groups index
-        {
-            let prefix = format!("member:{}", user_id);
-            let mut member_list = StoreVec::new(prefix.as_bytes());
-            if let Some(existing) = self.member_groups.get(&user_id) {
-                for g in existing.iter() {
-                    member_list.push(g.clone());
-                }
+        // add to member_groups
+        let prefix = format!("member:{}", user_id);
+        let mut member_list = StoreVec::new(prefix.as_bytes());
+        if let Some(existing) = self.member_groups.get(&user_id) {
+            for g in existing.iter() {
+                member_list.push(g.clone());
             }
-            member_list.push(group_id.clone());
-            self.member_groups.insert(user_id.clone(), member_list);
         }
+        member_list.push(group_id.clone());
+        self.member_groups.insert(user_id.clone(), member_list);
     }
 
     #[payable]
@@ -269,7 +274,7 @@ impl Contract {
             members.swap_remove(pos.try_into().unwrap());
             log!("Revoked {} from group {} (rotated key in Shade)", user_id, group_id);
 
-            // remove member from member_groups index
+            // remove from member_groups
             if let Some(member_list) = self.member_groups.get_mut(&user_id) {
                 if let Some(pos) = member_list.iter().position(|g| g == &group_id) {
                     member_list.swap_remove(pos.try_into().unwrap());
@@ -295,10 +300,15 @@ impl Contract {
         members.iter().any(|x| *x == user_id)
     }
 
-    // Returns list of group members (owner or member only)
-    pub fn get_group_members(&self, group_id: String) -> Vec<AccountId> {
-        let caller = env::predecessor_account_id();
+    // Returns list of group members
+    #[payable]
+    pub fn get_group_members(&mut self, group_id: String) -> Vec<AccountId> {
+        let attached = env::attached_deposit().as_yoctonear();
+        self.collect_fee("get_group_members", attached);
+
         assert!(self.groups.contains_key(&group_id), "Group not found");
+
+        let caller = env::predecessor_account_id();
         assert!(self.is_authorized(group_id.clone(), caller.clone()) || caller == self.owner, "Unauthorized");
         
         let members = self.group_members.get(&group_id).expect("Group members not found");
@@ -348,9 +358,14 @@ impl Contract {
         trans_id
     }
 
-    pub fn get_transactions_for_group(&self, group_id: String) -> Vec<Transaction> {
-        let caller = env::predecessor_account_id();
+    #[payable]
+    pub fn get_transactions_for_group(&mut self, group_id: String) -> Vec<Transaction> {
+        let attached = env::attached_deposit().as_yoctonear();
+        self.collect_fee("get_transactions_for_group", attached);
+
         assert!(self.groups.contains_key(&group_id), "Group not found");
+        
+        let caller = env::predecessor_account_id();
         assert!(self.is_authorized(group_id.clone(), caller.clone()) || caller == self.owner, "Unauthorized");
         
         // Use the per-group index to avoid scanning all transactions:
@@ -772,7 +787,7 @@ mod tests {
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
         contract.register_group("test_group".to_string());
-        let view_context = get_context(non_member.clone(), 0);  // View no deposit
+        let view_context = get_context(non_member.clone(), 100_000_000_000_000_000u128);  // deposit
         testing_env!(view_context.build());
         contract.get_transactions_for_group("test_group".to_string());
     }
@@ -806,7 +821,7 @@ mod tests {
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
         contract.register_group("test_group".to_string());
-        let view_context = get_context(non_member.clone(), 0);  // View no deposit
+        let view_context = get_context(non_member.clone(), 100_000_000_000_000_000u128);  // deposit
         testing_env!(view_context.build());
         contract.get_group_members("test_group".to_string());
     }

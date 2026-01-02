@@ -5,7 +5,7 @@ edition = "2021"
 repository = "https://github.com/jcarbonnell/nova"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 near-sdk = "5.17.2"

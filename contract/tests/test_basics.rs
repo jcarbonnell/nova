@@ -226,13 +226,15 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
 
     // Test get_transactions_for_group
     let transactions: Vec<Value> = member_account
-        .view(contract.id(), "get_transactions_for_group")
-        .args_json(json!({
-            "group_id": "test_group_nova",
-            "user_id": member_account.id().to_string()
-        }))
+        .call(contract.id(), "get_transactions_for_group")
+        .args_json(json!({"group_id": "test_group_nova"}))
+        .deposit(NearToken::from_yoctonear(100_000_000_000_000_000u128))  // 0.0001 NEAR fee
+        .gas(Gas::from_tgas(50))
+        .transact()
         .await?
+        .into_result()?
         .json()?;
+    
     assert_eq!(transactions.len(), 1, "Should have one transaction");
     assert_eq!(transactions[0]["file_hash"], "file_hash_test");
     assert_eq!(transactions[0]["ipfs_hash"], "ipfs_hash_test");
