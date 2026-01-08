@@ -952,29 +952,58 @@ async def register_group(ctx: Context, group_id: str) -> str:
 
     # Call contract
     result = await acc.function_call(
-            contract_id=CONTRACT_ID,
-            method_name="register_group",
-            args={"group_id": group_id},
-            amount=fee,
-            gas=int("300000000000000")
-        )
+        contract_id=CONTRACT_ID,
+        method_name="register_group",
+        args={"group_id": group_id},
+        amount=fee,
+        gas=int("300000000000000")
+    )
         
-    logger.info(f"Group {group_id} registered by {near_account_id}")
+    logger.info(f"Group {group_id} registered on-chain by {near_account_id}")
 
     # Generate encryption key in Shade TEE
+    if not SHADE_API_URL:
+        logger.error("SHADE_API_URL not configured - cannot generate group key")
+        raise RuntimeError("Group registered but SHADE_API_URL not configured")
+    
+    # Build auth headers (same pattern as get_user_signer)
+    shade_headers = {"Content-Type": "application/json"}
+    if wallet_id:
+        shade_headers["Authorization"] = f"Bearer wallet:{wallet_id}"
+    elif access_token:
+        shade_headers["Authorization"] = f"Bearer {access_token}"
+    
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            logger.info(f"Generating encryption key in Shade TEE for group {group_id}")
             shade_response = await client.post(
                 f"{SHADE_API_URL}/api/key-management/generate_key",
-                json={"group_id": group_id, "owner": near_account_id},
-                timeout=15
+                json={
+                    "group_id": group_id,
+                    "owner": near_account_id,
+                    "account_id": near_account_id,
+                },
+                headers=shade_headers,
             )
+            
             if shade_response.status_code == 200:
                 logger.info(f"Encryption key generated in Shade for group {group_id}")
             else:
-                logger.warning(f"Shade key generation failed: {shade_response.text}")
+                error_text = shade_response.text[:200]
+                logger.error(f"Shade key generation failed ({shade_response.status_code}): {error_text}")
+                raise RuntimeError(f"Group registered but key generation failed: {error_text}")
+                
+    except httpx.TimeoutException:
+        logger.error(f"Shade key generation timed out for group {group_id}")
+        raise RuntimeError("Group registered but key generation timed out - try again")
+    except httpx.RequestError as e:
+        logger.error(f"Shade key generation request failed for group {group_id}: {e}")
+        raise RuntimeError(f"Group registered but couldn't connect to Shade: {e}")
+    except RuntimeError:
+        raise  # Re-raise our own errors
     except Exception as e:
-        logger.warning(f"Shade key generation error (group still registered): {e}")
+        logger.error(f"Unexpected Shade key generation error for group {group_id}: {e}")
+        raise RuntimeError(f"Group registered but key generation failed: {e}")
 
     return f"Group '{group_id}' registered successfully"
         
