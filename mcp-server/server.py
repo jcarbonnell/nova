@@ -79,25 +79,14 @@ with get_db() as conn:
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email_hash TEXT UNIQUE NOT NULL,  -- Always hashed for minimization
-            email TEXT,  -- Raw only if consented (set post-consent)
-            session_token TEXT NOT NULL,
+            email TEXT UNIQUE,
             near_account_id TEXT,
-            consent_given BOOLEAN DEFAULT FALSE,
+            unsubscribed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_session ON users(session_token)')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS consents (
-            user_id INTEGER PRIMARY KEY,
-            granted_at TIMESTAMP,
-            revoked_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-        )
-    ''')
-    cursor.execute('CREATE TABLE IF NOT EXISTS exports_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_session TEXT, fields_exported TEXT, exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS deletes_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email_hash TEXT, reason TEXT, deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_email ON users(email)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_near ON users(near_account_id)')
     conn.commit()
 
 def normalize_account_id(account_id: str) -> str:
@@ -131,30 +120,60 @@ def normalize_account_id(account_id: str) -> str:
     
     return full_account_id
 
-def store_user_email(email: str, session_token: str, near_account_id: Optional[str] = None, consent: bool = False) -> int:
-    hashed_email = hashlib.sha256(email.encode()).hexdigest()
+def store_user(email: str = None, near_account_id: str = None) -> int:
+    """Store user at account creation. Email is optional (wallet users may not have one)."""
+    if not email and not near_account_id:
+        raise ValueError("Need either email or near_account_id")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        if email:
+            # Upsert by email
+            cursor.execute("""
+                INSERT INTO users (email, near_account_id) 
+                VALUES (?, ?)
+                ON CONFLICT(email) DO UPDATE SET 
+                    near_account_id = COALESCE(excluded.near_account_id, users.near_account_id)
+            """, (email, near_account_id))
+        else:
+            # Insert wallet-only user
+            cursor.execute(
+                "INSERT OR IGNORE INTO users (near_account_id) VALUES (?)",
+                (near_account_id,)
+            )
+        
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_marketing_emails() -> list:
+    """Get all emails that haven't unsubscribed (for your marketing scripts)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO users (email_hash, email, session_token, near_account_id, consent_given) VALUES (?, ?, ?, ?, ?)",
-            (hashed_email, email if consent else None, session_token, near_account_id, consent)
+            "SELECT email FROM users WHERE email IS NOT NULL AND unsubscribed = FALSE"
         )
-        user_id = cursor.lastrowid
-        if consent:
-            cursor.execute("INSERT OR REPLACE INTO consents (user_id, granted_at) VALUES (?, CURRENT_TIMESTAMP)", (user_id,))
-            logger.info(f"Consent granted for hashed email {hashed_email[:16]}...")
-        conn.commit()
-        return user_id
+        return [row[0] for row in cursor.fetchall()]
 
-def get_user_session(session_token: str) -> Optional[Dict[str, Any]]:
+
+def unsubscribe_user(email: str) -> bool:
+    """Called from unsubscribe link in emails."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, email, near_account_id, consent_given FROM users WHERE session_token = ?", (session_token,))
-        row = cursor.fetchone()
-        if row:
-            return {"id": row[0], "email": row[1], "near_account_id": row[2], "consent_given": bool(row[3])}
-        return None
+        cursor.execute(
+            "UPDATE users SET unsubscribed = TRUE WHERE email = ?",
+            (email,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     
+def generate_unsubscribe_link(email: str) -> str:
+    """Generate a signed unsubscribe link for email footers."""
+    token = hashlib.sha256(f"{email}:{SESSION_TOKEN_SECRET}".encode()).hexdigest()[:16]
+    from urllib.parse import quote
+    return f"https://nova-mcp.fastmcp.app/unsubscribe?email={quote(email)}&token={token}"
+
 # Auth0 JWT Verifier (generic OIDC)
 token_verifier = JWTVerifier(
     jwks_uri=f"https://{AUTH0_DOMAIN}/.well-known/jwks.json" if AUTH0_DOMAIN else None,
@@ -219,6 +238,30 @@ mcp = FastMCP(name="nova-mcp")
 async def mcp_health(request: Request):
     return JSONResponse({"status": "MCP ready", "version": "0.3.0", "auth": "enabled"})
 
+# Simple unsubscribe endpoint (add to your MCP routes)
+@mcp.custom_route("/unsubscribe", methods=["GET"])
+async def unsubscribe_route(request: Request):
+    """Handles unsubscribe links from emails: /unsubscribe?email=user@example.com&token=xyz"""
+    email = request.query_params.get("email")
+    token = request.query_params.get("token")
+    
+    if not email:
+        return JSONResponse({"error": "Missing email"}, status_code=400)
+    
+    # Verify token (simple HMAC to prevent abuse)
+    expected_token = hashlib.sha256(f"{email}:{SESSION_TOKEN_SECRET}".encode()).hexdigest()[:16]
+    if token != expected_token:
+        return JSONResponse({"error": "Invalid token"}, status_code=403)
+    
+    if unsubscribe_user(email):
+        return JSONResponse({
+            "success": True, 
+            "message": "You've been unsubscribed. You won't receive any more emails from NOVA."
+        })
+    else:
+        return JSONResponse({"error": "Email not found"}, status_code=404)
+    
+
 @mcp.custom_route("/auth/callback", methods=["GET"])
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
@@ -246,14 +289,13 @@ async def auth_callback(request: Request):
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
     
     email = claims.get("email")
-    session_token = claims.get("sub")
-    near_account_id = claims.get("near_account_id")  # From FastAuth if pre-set
+    near_account_id = claims.get("near_account_id")
     
     if not email:
         raise HTTPException(status_code=400, detail="No email in claims")
     
-    store_user_email(email, session_token, near_account_id, consent=True)
-    logger.info(f"User authenticated: {hashlib.sha256(email.encode()).hexdigest()[:16]}...")
+    store_user(email=email, near_account_id=near_account_id)
+    logger.info(f"User stored: {email}")
     
     # Redirect back to frontend
     return RedirectResponse(
@@ -795,132 +837,6 @@ def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
     """Decrypts base64 encrypted data with AES-CBC key."""
     return _decrypt_data(encrypted, key)
 
-# Consent Tool (GDPR)
-@mcp.tool
-async def set_consent(ctx: Context, granted: bool = True) -> str:
-    user = get_authenticated_user()
-    if not user:
-        raise ValueError("Auth required.")
-    session_token = user["session_token"]
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE session_token = ?", (session_token,))
-        row = cursor.fetchone()
-        if not row:
-            raise ValueError("User session not found.")
-        user_id = row[0]
-        
-        cursor.execute("UPDATE users SET consent_given = ? WHERE session_token = ?", (granted, session_token))
-        updated = cursor.rowcount > 0
-        
-        if granted and updated:
-            cursor.execute("INSERT OR REPLACE INTO consents (user_id, granted_at) VALUES (?, CURRENT_TIMESTAMP)", (user_id,))
-            logger.info(f"Consent granted for user {user_id}")
-        elif not granted and updated:
-            cursor.execute("UPDATE consents SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL", (user_id,))
-            logger.info(f"Consent revoked for user {user_id}")
-        
-        conn.commit()
-    
-    return f"Consent {'granted' if granted else 'revoked'} successfully." if updated else "No changes (already set)."
-
-# Export/Delete from DB Tools
-@mcp.tool
-async def export_data(ctx: Context) -> dict:
-    user = get_authenticated_user()
-    if not user:
-        raise ValueError("Auth required.")
-
-    session_token = user["session_token"]
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT u.email, u.email_hash, u.near_account_id, u.created_at, u.consent_given,
-                   c.granted_at, c.revoked_at 
-            FROM users u LEFT JOIN consents c ON u.id = c.user_id 
-            WHERE u.session_token = ?
-        """, (session_token,))
-        row = cursor.fetchone()
-        if not row:
-            raise ValueError("No data found.")
-        
-        consent_given = bool(row[4])
-        export_data = {
-            "near_account_id": row[2] or None,
-            "created_at": row[3],
-            "consent_history": {"granted_at": row[5], "revoked_at": row[6]}
-        }
-        
-        # GDPR: Raw email only if consented
-        if consent_given:
-            export_data["email"] = row[0]  # Raw
-            logger.info(f"Full export for user {user['id'] if 'id' in user else 'unknown'} (consent: True)")
-        else:
-            export_data["email_hash"] = row[1]  # Hashed
-            logger.warning(f"Limited export for session {session_token[:16]}... (consent: False)")
-        
-        # Audit log (only if consented)
-        if consent_given:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS exports_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_session TEXT,
-                    fields_exported TEXT,
-                    exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            fields_exported = json.dumps(list(export_data.keys()))
-            cursor.execute("INSERT INTO exports_log (user_session, fields_exported) VALUES (?, ?)", (session_token, fields_exported))
-            conn.commit()
-    
-    return {"data": export_data}
-
-@mcp.tool
-async def delete_data(ctx: Context, reason: str = "user_request") -> str:
-    user = get_authenticated_user()
-    if not user:
-        raise ValueError("Auth required.")
-
-    session_token = user["session_token"]
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, email_hash FROM users WHERE session_token = ?", (session_token,))
-        row = cursor.fetchone()
-        if not row:
-            raise ValueError("No data found to delete.")
-        user_id, email_hash = row
-        
-        # Cascade delete
-        cursor.execute("DELETE FROM consents WHERE user_id = ?", (user_id,))
-        cursor.execute("DELETE FROM exports_log WHERE user_session = ?", (session_token,))
-        cursor.execute("DELETE FROM deletes_log WHERE user_session = ?", (session_token,))  # Clean prior deletes
-        cursor.execute("DELETE FROM users WHERE session_token = ?", (session_token,))
-        deleted_rows = cursor.rowcount
-        
-        conn.commit()
-        
-        if deleted_rows > 0:
-            # Audit log
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS deletes_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    email_hash TEXT,
-                    reason TEXT,
-                    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("INSERT INTO deletes_log (user_id, email_hash, reason) VALUES (?, ?, ?)", (user_id, email_hash, reason))
-            conn.commit()
-            
-            logger.warning(f"Data deleted for user {user_id} (hash: {email_hash[:16]}..., reason: {reason}) - GDPR erasure")
-            
-            return f"Data deleted successfully (GDPR compliance). Reason logged: {reason}. {deleted_rows} records removed."
-        raise ValueError("No data found to delete.")
-
 # Tools for NOVA contract interaction (requires valid auth)
 @mcp.tool
 async def register_group(ctx: Context, group_id: str) -> str:
@@ -1349,6 +1265,214 @@ async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract
     except Exception as e:
         print(f"Checksum query failed for {group_id}: {str(e)} (e.g., RPC error or contract not deployed)")
         return False
+    
+@mcp.tool
+async def get_owned_groups(ctx: Context) -> list:
+    """Returns list of groups owned by the authenticated user."""
+    user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
+    if not user:
+        raise ValueError("Auth required: Connect wallet first.")
+    if not near_account_id:
+        raise ValueError("No NEAR account; complete FastAuth signup.")
+    
+    # Get signing account from Shade TEE (these are payable methods)
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Estimate fee
+    fee = await _estimate_fee("get_owned_groups")
+    
+    logger.info(f"Fetching owned groups for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
+
+    # Call contract (payable method)
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="get_owned_groups",
+        args={},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    # Parse result
+    if hasattr(result, 'status') and isinstance(result.status, dict):
+        if "SuccessValue" in result.status:
+            import base64
+            success_value = result.status["SuccessValue"]
+            if success_value:
+                decoded = base64.b64decode(success_value).decode()
+                return json.loads(decoded)
+    
+    # Fallback: try to get result directly
+    if hasattr(result, 'result'):
+        return result.result
+    
+    return []
+
+
+@mcp.tool
+async def get_member_groups(ctx: Context) -> list:
+    """Returns list of groups where the authenticated user is a member (includes owned groups)."""
+    user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
+    if not user:
+        raise ValueError("Auth required: Connect wallet first.")
+    if not near_account_id:
+        raise ValueError("No NEAR account; complete FastAuth signup.")
+    
+    # Get signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Estimate fee
+    fee = await _estimate_fee("get_member_groups")
+    
+    logger.info(f"Fetching member groups for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
+
+    # Call contract (payable method)
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="get_member_groups",
+        args={},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    # Parse result
+    if hasattr(result, 'status') and isinstance(result.status, dict):
+        if "SuccessValue" in result.status:
+            import base64
+            success_value = result.status["SuccessValue"]
+            if success_value:
+                decoded = base64.b64decode(success_value).decode()
+                return json.loads(decoded)
+    
+    if hasattr(result, 'result'):
+        return result.result
+    
+    return []
+
+
+@mcp.tool
+async def get_group_members(ctx: Context, group_id: str) -> list:
+    """Returns list of members authorized for the specified group. Caller must be a member or contract owner."""
+    user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
+    if not user:
+        raise ValueError("Auth required: Connect wallet first.")
+    if not near_account_id:
+        raise ValueError("No NEAR account; complete FastAuth signup.")
+    if not group_id:
+        raise ValueError("group_id is required")
+    
+    # Get signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Estimate fee
+    fee = await _estimate_fee("get_group_members")
+    
+    logger.info(f"Fetching members of group '{group_id}' for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
+
+    # Call contract (payable method)
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="get_group_members",
+        args={"group_id": group_id},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    # Parse result
+    if hasattr(result, 'status') and isinstance(result.status, dict):
+        if "SuccessValue" in result.status:
+            import base64
+            success_value = result.status["SuccessValue"]
+            if success_value:
+                decoded = base64.b64decode(success_value).decode()
+                return json.loads(decoded)
+    
+    if hasattr(result, 'result'):
+        return result.result
+    
+    return []
+
+
+@mcp.tool
+async def get_group_transactions(ctx: Context, group_id: str) -> list:
+    """Returns list of file transactions for the specified group. Caller must be a member or contract owner."""
+    user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+
+    if not user:
+        raise ValueError("Auth required: Connect wallet first.")
+    if not near_account_id:
+        raise ValueError("No NEAR account; complete FastAuth signup.")
+    if not group_id:
+        raise ValueError("group_id is required")
+    
+    # Get signing account from Shade TEE
+    acc = await get_user_signer(
+        near_account_id=near_account_id,
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Estimate fee
+    fee = await _estimate_fee("get_transactions_for_group")
+    
+    logger.info(f"Fetching transactions for group '{group_id}' by {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
+
+    # Call contract (payable method)
+    result = await acc.function_call(
+        contract_id=CONTRACT_ID,
+        method_name="get_transactions_for_group",
+        args={"group_id": group_id},
+        amount=fee,
+        gas=100_000_000_000_000
+    )
+    
+    # Parse result
+    if hasattr(result, 'status') and isinstance(result.status, dict):
+        if "SuccessValue" in result.status:
+            import base64
+            success_value = result.status["SuccessValue"]
+            if success_value:
+                decoded = base64.b64decode(success_value).decode()
+                return json.loads(decoded)
+    
+    if hasattr(result, 'result'):
+        return result.result
+    
+    return []
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
