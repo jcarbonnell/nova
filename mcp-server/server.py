@@ -14,6 +14,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 import asyncio
 import base64
+import mimetypes
 
 # Crypto/NEAR imports
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -619,20 +620,50 @@ def _encrypt_data(data: str, key: str) -> str:
     encrypted = encryptor.update(padded) + encryptor.finalize()
     return base64.b64encode(iv + encrypted).decode('utf-8')
 
-def _decrypt_data(encrypted: str, key: str) -> str:
-    """Decrypts base64 encrypted data with AES-256-CBC."""
+def _decrypt_data(encrypted: str, key: str, filename: Optional[str] = None) -> dict:
+    """Decrypt + return {data_b64: str, mime: str} for rendering."""
     encrypted_bytes = base64.b64decode(encrypted)
     if len(encrypted_bytes) < 16:
-        raise ValueError(f"Invalid encrypted data length: {len(encrypted_bytes)} (must be >=16 for IV)")
+        raise ValueError(f"Invalid encrypted data length: {len(encrypted_bytes)}")
+    
     key_bytes = base64.b64decode(key)[:32]
     iv = encrypted_bytes[:16]
     ciphertext = encrypted_bytes[16:]
+    
     cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     decrypted_padded = decryptor.update(ciphertext) + decryptor.finalize()
     pad_len = decrypted_padded[-1]
     decrypted = decrypted_padded[:-pad_len]
-    return base64.b64encode(decrypted).decode('utf-8')
+    
+    data_b64 = base64.b64encode(decrypted).decode('utf-8')
+    
+    # MIME detection: magic bytes first, then filename fallback
+    mime = None
+    signatures = [
+        (b'\x89PNG\r\n\x1a\n', 'image/png'),
+        (b'\xff\xd8\xff', 'image/jpeg'),
+        (b'GIF8', 'image/gif'),
+        (b'%PDF', 'application/pdf'),
+        (b'RIFF', 'image/webp'),  # (check for WEBP after RIFF)
+    ]
+    for sig, mtype in signatures:
+        if decrypted.startswith(sig):
+            mime = mtype
+            break
+    
+    if not mime and filename:
+        mime, _ = mimetypes.guess_type(filename)
+    
+    # Final fallback: try UTF-8 decode to distinguish text from binary
+    if not mime:
+        try:
+            decrypted.decode('utf-8')
+            mime = 'text/plain'
+        except UnicodeDecodeError:
+            mime = 'application/octet-stream'
+    
+    return {'data_b64': data_b64, 'mime': mime}
 
 async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
     """Upload to IPFS via Pinata."""
