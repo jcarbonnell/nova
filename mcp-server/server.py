@@ -536,7 +536,8 @@ async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex:
     
     # Determine auth method: token-based or account_id-based
     use_token_auth = (
-        payload_b64 and sig_hex and 
+        payload_b64 and sig_hex and
+        payload_b64.lower() != "auto" and sig_hex.lower() != "auto" and
         payload_b64 != "None" and sig_hex != "None" and
         len(sig_hex) == 128 and 
         re.match(r'^[0-9a-fA-F]{128}$', sig_hex)
@@ -1056,9 +1057,11 @@ async def get_shade_key(ctx: Context, group_id: str, payload_b64: str, sig_hex: 
     if not effective_user_id:
         raise ValueError("No NEAR account configured")
     
-    # Validate signature format
-    if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
-        raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes)")
+    # Allow "auto" to skip signature validation (will use account_id auth in _get_shade_key)
+    if sig_hex.lower() != "auto":
+        # Validate signature format only if not "auto"
+        if len(sig_hex) != 128 or not re.match(r'^[0-9a-fA-F]{128}$', sig_hex):
+            raise ValueError("Invalid sig_hex: Must be 128-char hex (64 bytes) or 'auto'")
     
     key = await _get_shade_key(
         group_id=group_id,
@@ -1203,18 +1206,30 @@ async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payloa
     
     try:
         # Step 1: Fetch key (uses relayer for claim; client-signed)
-        key = await _get_shade_key(group_id=group_id, user_id=near_account_id, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
+        key = await _get_shade_key(
+            group_id=group_id, 
+            user_id=near_account_id, 
+            payload_b64=payload_b64, 
+            sig_hex=sig_hex, 
+            user_email=user_email, 
+            wallet_id=wallet_id, 
+            access_token=access_token
+        )
         # Step 2: Async IPFS fetch
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
         # Step 3: Decrypt (sync, fast)
-        decrypted_b64 = _decrypt_data(encrypted_b64, key)
+        decrypted = _decrypt_data(encrypted_b64, key)
+        decrypted_b64 = decrypted['data_b64']
+        mime = decrypted['mime']
         # Step 4: Hash for verification
         decrypted_data = base64.b64decode(decrypted_b64)
         file_hash = hashlib.sha256(decrypted_data).hexdigest()
+
         logger.info(f"Composite retrieve success for {near_account_id} from group {group_id}: {len(decrypted_data)} bytes, hash={file_hash}")
         
         return {
-            "decrypted_b64": decrypted_b64,
+            "decrypted_b64": decrypted['data_b64'],
+            "mime": mime,
             "file_hash": file_hash,
             "fee_breakdown": {"claim": est_claim_fee / 1e24},
             "ipfs_hash": ipfs_hash,
