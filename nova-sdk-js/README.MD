@@ -1,14 +1,19 @@
-# NOVA SDK for JavaScript
+# NOVA SDK for JavaScript/TypeScript
 
-A JavaScript/TypeScript SDK for interacting with the NOVA secure file-sharing on the NEAR blockchain. NOVA hybridizes on-chain group management with off-chain TEE-secured keys via Shade Agents, using nonce-based ed25519-signed tokens for ephemeral, verifiable access. This ensures keys never touch public state, making it ideal for high-value data like AI datasets.
+**Version:** 1.0.0 (Mainnet)  
+**License:** MIT  
+**Network:** NEAR Protocol Mainnet
+**Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
+
+A JavaScript/TypeScript SDK for NOVA's secure, decentralized file-sharing primitive on NEAR. NOVA hybridizes on-chain access control with off-chain TEE-secured keys via Shade Agents, using nonce-based ed25519-signed tokens for ephemeral, verifiable access. This ensures privacy-first data sharing for AI datasets, healthcare/financial records, and sensitive documents.
 
 
 ## Features
 
-- 🔐 **AES-256-CBC Encryption** - Client-side encryption for data privacy
+- 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
-- ⛓️ **NEAR Blockchain** - Immutable transaction records and group access control
-- 🛡️ **TEE/Shade Integration** - Keys generated/stored/rotated in verifiable Trusted Execution Environments (Phala); no on-chain exposure
+- ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
+- 🛡️ **Session-Based Auth** - OAuth flow (no private key handling)
 - 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
@@ -20,131 +25,226 @@ A JavaScript/TypeScript SDK for interacting with the NOVA secure file-sharing on
 npm install nova-sdk-js
 ```
 
+## ⚠️ Mainnet Notice
+
+**NOVA v1.0.0 operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
+
+Typical costs (mainnet):
+- **Register group**: ~0.05 NEAR (~$0.15 USD)
+- **Upload file**: ~0.01 NEAR (incl. IPFS storage)
+- **Retrieve file**: ~0.001 NEAR
+
+**For development, use testnet**
+
 ## Quick Start
 
+### 1. Get Your Credentials
+
+Visit **[nova-sdk.com](https://nova-sdk.com)** to:
+1. Login with email or social (Google/Apple/GitHub)
+2. Your NEAR account is created automatically (e.g., `alice.nova-sdk.near`)
+3. Get your session token at `/api/auth/session-token`
+
+### 2. Initialize SDK
 ```typescript
 import { NovaSdk } from 'nova-sdk-js';
 
-// 1. Get your session token from nova-sdk.com after login
-const sessionToken = 'eyJhbG...'; // JWT from nova-sdk.com/api/auth/session-token
+const sdk = new NovaSdk('alice.nova-sdk.near', {
+  sessionToken: process.env.NOVA_SESSION_TOKEN!,  // JWT from nova-sdk.com
+});
 
-// 2. Initialize SDK
-const sdk = new NovaSdk('alice-nova.nova-sdk-5.testnet', { sessionToken });
-
-// 3. Upload a file
-const data = Buffer.from('Hello, NOVA!');
-const result = await sdk.compositeUpload('my-group', data, 'hello.txt');
-console.log('CID:', result.cid);
+// Verify network
+console.log(sdk.getNetworkInfo());
+// { networkId: 'mainnet', contractId: 'nova-sdk.near', ... }
 ```
 
-## Getting Started
-
-1. **Create an account** at nova-sdk.com by connecting your NEAR wallet or email or social.
-
-2. **Get your session token** by calling the session-token API after login:
-```bash
-# For wallet users:
-   curl -X POST https://nova-sdk.com/api/auth/session-token \
-     -H "Content-Type: application/json" \
-     -d '{"wallet_id": "alice.near"}'
-   
-   # Response:
-   # { "token": "eyJhbG...", "account_id": "alice-nova.nova-sdk-5.testnet" }
-```
-
-3. **Use the SDK** with your account ID and session token
-
-## Core Operations
-
-### Upload a File
+### 3. Upload & Retrieve Files
 ```typescript
-const data = Buffer.from('Hello, NOVA!');
-const result = await sdk.compositeUpload('my-group', data, 'hello.txt');
+import fs from 'fs';
 
-console.log('CID:', result.cid);
-console.log('Transaction ID:', result.trans_id);
-console.log('Fee:', result.fee_breakdown.total, 'NEAR');
+// Register group (you become owner)
+await sdk.registerGroup('confidential-docs');
+
+// Upload encrypted file
+const fileData = fs.readFileSync('./report.pdf');
+const result = await sdk.compositeUpload(
+  'confidential-docs',  // group_id
+  fileData,             // Buffer
+  'report.pdf'          // filename
+);
+
+console.log('✅ Uploaded!');
+console.log('📦 IPFS CID:', result.cid);
+console.log('🔗 Transaction:', result.trans_id);
+console.log('💰 Cost:', result.fee_breakdown.total, 'NEAR');
+
+// Retrieve file
+const { data, file_hash } = await sdk.compositeRetrieve(
+  'confidential-docs',
+  result.cid
+);
+
+fs.writeFileSync('./decrypted-report.pdf', data);
+console.log('✅ File retrieved! Hash:', file_hash);
 ```
 
-### Retrive a File
-```typescript
-const result = await sdk.compositeRetrieve('my-group', 'QmXyz...');
-
-console.log('Data:', result.data.toString());
-console.log('File hash:', result.file_hash);
-```
+## 📖 Core Operations
 
 ### Group Management
 ```typescript
-// Create a new group (you become owner)
-await sdk.registerGroup('my-team');
+// Register new group (caller becomes owner)
+await sdk.registerGroup('research-team');
 
 // Add members
-await sdk.addGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
+await sdk.addGroupMember('research-team', 'bob.nova-sdk.near');
 
-// Revoke access (triggers key rotation)
-await sdk.revokeGroupMember('my-team', 'bob-nova.nova-sdk-5.testnet');
-```
+// Check authorization
+const authorized = await sdk.isAuthorized('research-team');
+console.log('Authorized:', authorized);
 
-### Check Authorization
-```typescript
-const isAuthorized = await sdk.isAuthorized('my-group');
-console.log('Authorized:', isAuthorized);
-
-const status = await sdk.authStatus('my-group');
+// Get auth status with details
+const status = await sdk.authStatus('research-team');
 console.log('Status:', status);
+// { authenticated: true, near_account_id: 'alice.nova-sdk.near', authorized_for_group: true }
+
+// Revoke member (triggers automatic key rotation in TEE)
+await sdk.revokeGroupMember('research-team', 'bob.nova-sdk.near');
 ```
 
-### Security Model
+### File Operations
+```typescript
+// Upload encrypted file
+const uploadResult = await sdk.compositeUpload(
+  'group-id',
+  fileBuffer,
+  'filename.ext'
+);
+// Returns: { cid, trans_id, file_hash, fee_breakdown }
 
-1. **Session token (JWT)** proves you own the account
-2. **MCP server** verifies token before any operation
-3. **Only the authenticated owner** can use their account
-4. **Encryption keys** managed securely in TEE
+// Retrieve encrypted file
+const retrieveResult = await sdk.compositeRetrieve(
+  'group-id',
+  'QmXYZ...'  // IPFS CID
+);
+// Returns: { data, file_hash, fee_breakdown, ipfs_hash, group_id }
+```
+
+### Read-Only Queries
+
+These methods use direct RPC calls (no MCP authentication needed):
+```typescript
+// Check account balance
+const balance = await sdk.getBalance();
+console.log('Balance:', balance, 'yoctoNEAR');
+
+// Get group owner
+const owner = await sdk.getGroupOwner('research-team');
+
+// Get group checksum (TEE attestation)
+const checksum = await sdk.getGroupChecksum('research-team');
+
+// Estimate fees
+const fee = await sdk.estimateFee('register_group');
+console.log('Fee:', fee, 'yoctoNEAR');
+
+// List group transactions
+const txs = await sdk.getTransactionsForGroup('research-team');
+txs.forEach(tx => {
+  console.log('File:', tx.file_hash, '| IPFS:', tx.ipfs_hash);
+});
+
+// Compute file hash (utility)
+const hash = sdk.computeHash(Buffer.from('data'));
+```
 
 ## Configuration
 
+### Mainnet (Default)
 ```typescript
-const sdk = new NovaSdk('alice-nova.nova-sdk.near', {
-  sessionToken: 'eyJhbG...',                 // Required: JWT from nova-sdk.com
-  rpcUrl: 'https://rpc.testnet.near.org',    // Optional: default testnet
-  contractId: 'nova-sdk.near',               // Optional: default nova-sdk-5.testnet
-  mcpUrl: 'https://nova-mcp.fastmcp.app',    // Optional: rarely change
+const sdk = new NovaSdk('alice.nova-sdk.near', {
+  sessionToken: process.env.NOVA_SESSION_TOKEN!,
+  // Optional overrides (rarely needed):
+  // rpcUrl: 'https://rpc.mainnet.near.org',
+  // contractId: 'nova-sdk.near',
+  // mcpUrl: 'https://nova-mcp.fastmcp.app',
 });
 ```
 
-## Token Refresh
+### Testnet (Development)
+```typescript
+const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+  sessionToken: process.env.TESTNET_SESSION_TOKEN!,
+  rpcUrl: 'https://rpc.testnet.near.org',
+  contractId: 'nova-sdk-5.testnet',
+});
+
+// SDK auto-detects testnet (no mainnet warnings)
+console.log(sdk.getNetworkInfo().networkId);  // 'testnet'
+```
+
+## 🔐 Security Model
+
+### How Authentication Works
+
+1. **User logs in** via OAuth at nova-sdk.com (Auth0)
+2. **Frontend receives JWT** with user's email + NEAR account ID
+3. **SDK sends JWT** with every request to MCP server
+4. **MCP verifies JWT** and retrieves user's credentials from Shade Agent (TEE)
+5. **MCP signs transactions** via NEAR Meta Relayer (chain signatures)
+6. **Keys never leave TEE** - SDK only holds session token
+
+### Why This Is Secure
+
+- ✅ **No private keys in SDK** - only session tokens (JWTs)
+- ✅ **Keys encrypted in TEE** - hardware-isolated Shade Agent
+- ✅ **Session tokens expire** - refresh every 24 hours
+- ✅ **Automatic key rotation** - on member revocation
+- ✅ **TEE attestation** - cryptographic proof of genuine hardware
+
+---
+
+## 🔄 Session Token Management
+
+### Getting a Token
+```bash
+# After logging in at nova-sdk.com
+curl https://nova-sdk.com/api/auth/session-token \
+  -H "Cookie: appSession=..." \
+  -X POST
+
+# Response: { "token": "eyJhbG...", "account_id": "alice.nova-sdk.near" }
+```
+
+### Refreshing Tokens
 
 Session tokens expire after 24 hours. Refresh by calling the session-token endpoint again:
 
 ```typescript
-async function refreshToken(walletId: string): Promise<string> {
+async function refreshToken(): Promise {
   const response = await fetch('https://nova-sdk.com/api/auth/session-token', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ wallet_id: walletId }),
+    credentials: 'include',  // Include cookies
   });
-  const data = await response.json();
-  return data.token;
+  
+  if (!response.ok) {
+    throw new Error('Failed to refresh token - please login again');
+  }
+  
+  const { token } = await response.json();
+  return token;
 }
-```
 
-## Read-Only Queries
-
-These don't require MCP authentication (direct RPC calls):
-
-```typescript
-// Check balance
-const balance = await sdk.getBalance();
-
-// Get group owner
-const owner = await sdk.getGroupOwner('my-group');
-
-// Get fee estimate
-const fee = await sdk.estimateFee('record_transaction');
-
-// List transactions
-const txs = await sdk.getTransactionsForGroup('my-group');
+// Usage
+try {
+  await sdk.compositeUpload(...);
+} catch (e) {
+  if (e.message.includes('expired') || e.message.includes('Unauthorized')) {
+    const newToken = await refreshToken();
+    // Reinitialize SDK with new token
+    sdk = new NovaSdk(accountId, { sessionToken: newToken });
+    await sdk.compositeUpload(...);  // Retry
+  }
+}
 ```
 
 ## Error Handling
@@ -156,12 +256,18 @@ try {
   await sdk.compositeUpload('my-group', data, 'file.txt');
 } catch (e) {
   if (e instanceof NovaError) {
-    if (e.message.includes('expired')) {
-      // Token expired - refresh and retry
-      const newToken = await refreshToken(walletId);
-      // Reinitialize SDK with new token
+    if (e.message.includes('expired') || e.message.includes('Unauthorized')) {
+      console.error('Session expired - please refresh token');
+      // Implement token refresh logic
+    } else if (e.message.includes('not authorized')) {
+      console.error('Not a member of this group');
+    } else if (e.message.includes('Insufficient funds')) {
+      console.error('Top up your NEAR balance at nova-sdk.com');
+    } else {
+      console.error('NOVA error:', e.message);
     }
-    console.error('NOVA error:', e.message);
+  } else {
+    console.error('Unexpected error:', e);
   }
 }
 ```
@@ -190,7 +296,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/LICENSE) file for details.
+MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 ## Resources
 

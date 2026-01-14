@@ -12,8 +12,8 @@ use reqwest::Client;
 
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL: &str = "https://nova-mcp.fastmcp.app";
-const DEFAULT_RPC_URL: &str = "https://rpc.testnet.near.org";
-const DEFAULT_CONTRACT_ID: &str = "nova-sdk-5.testnet";
+const DEFAULT_RPC_URL: &str = "https://rpc.mainnet.near.org";
+const DEFAULT_CONTRACT_ID: &str = "nova-sdk.near";
 
 #[derive(Error, Debug)]
 pub enum NovaError {
@@ -118,10 +118,11 @@ pub struct NovaSdk {
     contract_id: AccountId,
     mcp_url: String,
     rpc_url: String,
+    network_id: String,
 }
 
 impl NovaSdk {
-    /// Creates a new NovaSdk instance with `account_id` - Your NOVA-managed account (e.g., "alice-nova.nova-sdk-5.testnet"), `session_token` - JWT from nova-sdk.com/api/auth/session-token
+    /// Creates a new NovaSdk instance with `account_id` - Your NOVA-managed account (e.g., "alice.nova-sdk.near"), `session_token` - JWT from nova-sdk.com/api/auth/session-token
     pub fn new(account_id: &str, session_token: &str) -> Result<Self, NovaError> {
         Self::with_config(account_id, session_token, NovaSdkConfig::default())
     }
@@ -142,6 +143,24 @@ impl NovaSdk {
         let contract_id = AccountId::from_str(&config.contract_id)
             .map_err(|_| NovaError::ParseAccount)?;
 
+        // Auto-detect network
+        let network_id = Self::detect_network(&contract_id, &config.rpc_url);
+        
+        // Validate mainnet contract
+        if network_id == "mainnet" && !Self::is_valid_mainnet_contract(&contract_id) {
+            return Err(NovaError::Auth(format!(
+                "Invalid mainnet contract: {}. Must end with .near or .mainnet",
+                contract_id
+            )));
+        }
+        
+        // Mainnet warning
+        if network_id == "mainnet" {
+            eprintln!("⚠️  MAINNET MODE: Operations use real NEAR tokens.");
+            eprintln!("📋 Contract: {}", contract_id);
+            eprintln!("💰 Check costs at: https://nova-sdk.com/pricing");
+        }
+
         Ok(Self {
             client: JsonRpcClient::connect(&config.rpc_url),
             http_client: Client::new(),
@@ -150,7 +169,51 @@ impl NovaSdk {
             contract_id,
             mcp_url: config.mcp_url,
             rpc_url: config.rpc_url,
+            network_id,
         })
+    }
+
+    // Network detection
+    fn detect_network(contract_id: &AccountId, rpc_url: &str) -> String {
+        let contract_str = contract_id.as_str();
+        
+        // Heuristic 1: Contract ID suffix
+        if contract_str.ends_with(".testnet") {
+            return "testnet".to_string();
+        }
+        if contract_str.ends_with(".near") || contract_str.ends_with(".mainnet") {
+            return "mainnet".to_string();
+        }
+        
+        // Heuristic 2: RPC URL
+        if rpc_url.contains("testnet") {
+            return "testnet".to_string();
+        }
+        if rpc_url.contains("mainnet") {
+            return "mainnet".to_string();
+        }
+        
+        // Default to mainnet for safety (v1.0.0+)
+        eprintln!("⚠️  Network auto-detection failed, defaulting to mainnet");
+        "mainnet".to_string()
+    }
+
+    fn is_valid_mainnet_contract(contract_id: &AccountId) -> bool {
+        let contract_str = contract_id.as_str();
+        contract_str.ends_with(".near") || contract_str.ends_with(".mainnet")
+    }
+
+    // Get network info
+    pub fn get_network_info(&self) -> (String, String, String) {
+        (
+            self.network_id.clone(),
+            self.contract_id.to_string(),
+            self.rpc_url.clone(),
+        )
+    }
+
+    pub fn network_id(&self) -> &str {
+        &self.network_id
     }
 
     /// Returns the account ID
@@ -487,7 +550,7 @@ mod tests {
 
     // Mock session token for unit tests (not valid for real MCP calls)
     const MOCK_SESSION_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Utbm92YS5ub3ZhLXNkay01LnRlc3RuZXQiLCJ0eXBlIjoibm92YV9zZXNzaW9uIn0.mock";
-    const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-5.testnet";
+    const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
 
     // =========================================================================
     // Constructor Tests
@@ -581,7 +644,7 @@ mod tests {
     async fn test_get_balance() {
         let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
         // Query the contract's balance (always exists)
-        let balance = sdk.get_balance(Some("nova-sdk-5.testnet")).await.unwrap();
+        let balance = sdk.get_balance(Some("nova-sdk-6.testnet")).await.unwrap();
         let bal_str = balance.to_string();
         assert!(!bal_str.is_empty());
         assert!(bal_str.parse::<u128>().is_ok());
@@ -589,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_balance_default_account() {
-        let sdk = NovaSdk::new("nova-sdk-5.testnet", MOCK_SESSION_TOKEN).unwrap();
+        let sdk = NovaSdk::new("nova-sdk-6.testnet", MOCK_SESSION_TOKEN).unwrap();
         // Uses sdk.account_id by default
         let balance = sdk.get_balance(None).await.unwrap();
         assert!(balance > 0);

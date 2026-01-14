@@ -6,11 +6,11 @@ import { Buffer } from 'buffer';
 
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
-const DEFAULT_RPC_URL = 'https://rpc.testnet.near.org';
-const DEFAULT_CONTRACT_ID = 'nova-sdk-5.testnet';
+const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
+const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
 
 export interface NovaSdkConfig {
-  sessionToken: string;  // Required: JWT from nova-sdk.com
+  sessionToken: string;
   rpcUrl?: string;
   contractId?: string;
   mcpUrl?: string;
@@ -72,6 +72,7 @@ export class NovaSdk {
   public readonly contractId: string;
   public readonly mcpUrl: string;
   public readonly rpcUrl: string;
+  public readonly networkId: string;
 
   constructor(accountId: string, config: NovaSdkConfig) {
     if (!accountId || typeof accountId !== 'string') {
@@ -87,6 +88,58 @@ export class NovaSdk {
     this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
     this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
     this.provider = new JsonRpcProvider({ url: this.rpcUrl });
+  
+    // Auto-detect network
+    this.networkId = this.detectNetwork();
+    
+    // Validate mainnet contract
+    if (this.networkId === 'mainnet' && !this.isValidMainnetContract()) {
+      throw new NovaError(
+        `Invalid mainnet contract: ${this.contractId}. Must end with .near or .mainnet`
+      );
+    }
+
+    if (this.networkId === 'mainnet') {
+      console.warn('⚠️  MAINNET MODE: Operations use real NEAR tokens.');
+      console.warn('📋 Contract:', this.contractId);
+      console.warn('💰 Check costs at: https://nova-sdk.com/pricing');
+    }
+  }
+
+  // Network detection
+  private detectNetwork(): string {
+    // Heuristic 1: Contract ID suffix
+    if (this.contractId.endsWith('.testnet')) return 'testnet';
+    if (this.contractId.endsWith('.near') || this.contractId.endsWith('.mainnet')) {
+      return 'mainnet';
+    }
+    
+    // Heuristic 2: RPC URL
+    if (this.rpcUrl.includes('testnet')) return 'testnet';
+    if (this.rpcUrl.includes('mainnet')) return 'mainnet';
+    
+    // Default to mainnet for safety (v1.0.0+)
+    console.warn('⚠️  Network auto-detection failed, defaulting to mainnet');
+    return 'mainnet';
+  }
+
+  private isValidMainnetContract(): boolean {
+    return this.contractId.endsWith('.near') || this.contractId.endsWith('.mainnet');
+  }
+
+  // Get network info (for debugging)
+  public getNetworkInfo(): { 
+    networkId: string; 
+    contractId: string; 
+    rpcUrl: string;
+    mcpUrl: string;
+  } {
+    return {
+      networkId: this.networkId,
+      contractId: this.contractId,
+      rpcUrl: this.rpcUrl,
+      mcpUrl: this.mcpUrl,
+    };
   }
 
   // Build HTTP headers for MCP server authentication. 

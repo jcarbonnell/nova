@@ -45,7 +45,16 @@ export declare class NovaSdk {
     readonly contractId: string;
     readonly mcpUrl: string;
     readonly rpcUrl: string;
+    readonly networkId: string;
     constructor(accountId: string, config: NovaSdkConfig);
+    private detectNetwork;
+    private isValidMainnetContract;
+    getNetworkInfo(): {
+        networkId: string;
+        contractId: string;
+        rpcUrl: string;
+        mcpUrl: string;
+    };
     private getMcpHeaders;
     private callMcpTool;
     authStatus(groupId?: string): Promise<AuthStatusResult>;

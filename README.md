@@ -88,37 +88,136 @@ nova-sdk-rs = "0.1.0"
 
 ## Quick Start Examples
 
-### Chat in natural language at [https://nova-sdk.com](https://nova-sdk.com)
+### Web Interface 
+
+Visit **[nova-sdk.com](https://nova-sdk.com)** to:
+1. **Login** with email or social (Google/Apple/GitHub)
+2. **Create your NEAR account** automatically (no wallet needed!)
+3. **Upload files** through natural language chat
 ```
-You: "Create a group called 'research_team' and upload this data securely"
-Claude: [uses NOVA MCP tools to claim token, fetch TEE key, encrypt, upload to IPFS, and record on NEAR]
+You: "Create a group called 'research_team' and upload my dataset securely"
+NOVA chat: ✅ Group created! Uploading... 
+        📦 File encrypted and uploaded to IPFS
+        🔗 Transaction recorded: https://nearblocks.io/txns/ABC123...
 ```
 
-### JavaScript SDK
+### JavaScript/Typescript SDK
 ```typescript
 import { NovaSdk } from 'nova-sdk-js';
+import fs from 'fs';
 
-const sdk = new NovaSdk(rpcUrl, contractId, pinataKey, pinataSecret);
-await sdk.withSigner(privateKey, accountId);
-
-const result = await sdk.compositeUpload(
-  'my_group', 'user.testnet', fileData, 'data.txt'
+// Initialize SDK with your account and session token
+// Get these from https://nova-sdk.com after login
+const sdk = new NovaSdk(
+  'alice.nova-sdk.near',  // Your NEAR account
+  {
+    sessionToken: process.env.NOVA_SESSION_TOKEN,  // From nova-sdk.com/api/auth/session-token
+  }
 );
-console.log('Uploaded:', result.cid);
+
+// Check your network (mainnet by default)
+console.log(sdk.getNetworkInfo());
+// { networkId: 'mainnet', contractId: 'nova-sdk.near', ... }
+
+// Register a new group (you become owner)
+await sdk.registerGroup('my-private-files');
+
+// Upload encrypted file
+const fileData = fs.readFileSync('./sensitive-doc.pdf');
+const result = await sdk.compositeUpload(
+  'my-private-files',   // group_id
+  fileData,             // file data (Buffer)
+  'sensitive-doc.pdf'   // filename
+);
+
+console.log('✅ Uploaded!');
+console.log('📦 IPFS CID:', result.cid);
+console.log('🔗 Transaction:', result.trans_id);
+console.log('💰 Cost:', result.fee_breakdown);
+
+// Retrieve and decrypt file
+const { data, file_hash } = await sdk.compositeRetrieve(
+  'my-private-files',
+  result.cid  // IPFS hash from upload
+);
+
+fs.writeFileSync('./decrypted-doc.pdf', data);
+console.log('✅ File decrypted! Hash:', file_hash);
 ```
 
 ### Rust SDK
 ```rust
-use nova_sdk_rs::NovaSdk;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
+use std::fs;
 
-let sdk = NovaSdk::new(rpc_url, contract_id, pinata_key, pinata_secret)
-    .with_signer(private_key, account_id)?;
+#[tokio::main]
+async fn main() -> Result> {
+    // Initialize SDK (mainnet by default)
+    let sdk = NovaSdk::new(
+        "alice.nova-sdk.near",
+        &std::env::var("NOVA_SESSION_TOKEN")?
+    )?;
 
-let result = sdk.composite_upload(
-    "my_group", "user.testnet", "data", "file.txt"
-).await?;
-println!("Uploaded: {}", result.cid);
+    // Check network
+    let (network, contract, _) = sdk.get_network_info();
+    println!("Network: {} | Contract: {}", network, contract);
+
+    // Register group
+    sdk.register_group("my-secure-files").await?;
+
+    // Upload file
+    let file_data = fs::read("./confidential.pdf")?;
+    let result = sdk.composite_upload(
+        "my-secure-files",
+        &file_data,
+        "confidential.pdf"
+    ).await?;
+
+    println!("✅ Uploaded!");
+    println!("📦 IPFS CID: {}", result.cid);
+    println!("🔗 Transaction: {}", result.trans_id);
+
+    // Retrieve file
+    let retrieved = sdk.composite_retrieve(
+        "my-secure-files",
+        &result.cid
+    ).await?;
+
+    fs::write("./decrypted.pdf", retrieved.data)?;
+    println!("✅ File decrypted! Hash: {}", retrieved.file_hash);
+
+    Ok(())
+}
 ```
+
+### 🧪 Testnet Usage
+
+For development, use **testnet** explicitly:
+
+**JavaScript:**
+```typescript
+const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
+  sessionToken: process.env.TESTNET_SESSION_TOKEN,
+  rpcUrl: 'https://rpc.testnet.near.org',
+  contractId: 'nova-sdk-6.testnet',
+});
+```
+
+**Rust:**
+```rust
+let config = NovaSdkConfig {
+    rpc_url: "https://rpc.testnet.near.org".to_string(),
+    contract_id: "nova-sdk-6.testnet".to_string(),
+    mcp_url: "https://nova-mcp.fastmcp.app".to_string(),
+};
+
+let sdk = NovaSdk::with_config(
+    "alice.nova-sdk-6.testnet",
+    &session_token,
+    config
+)?;
+```
+
 
 ## Architecture
 
@@ -127,26 +226,33 @@ println!("Uploaded: {}", result.cid);
 │   Your dApp     │
 │  (MCP/JS/Rust)  │
 └────────┬────────┘
-         │
+         │ Session Token (JWT)
     ┌────┴────┐
     │  NOVA   │
-    │   SDK   │
+    │   SDK   │  ← No private keys!
     └────┬────┘
          │
-    ┌────┴─────────────┐─────────────────┐
-    │                  │                 │
-┌───▼────┐      ┌─────▼─────┐        ┌───▼───────┐
+    ┌────┴─────────────────────────────┐
+    │         MCP Server               │
+    │  (Auth + Signing Proxy)          │
+    └─┬───────────────┬────────────────┘
+      │               │                │
+┌─────▼──┐      ┌─────▼─────┐        ┌─▼─────────┐
 │  IPFS  │      │   NEAR    │        │ Shade/TEE │
-│(Pinata)│      │ Blockchain│        │           │
+│(Pinata)│      │ Blockchain│        │ (key ops) │
 └────────┘      └───────────┘        └───────────┘
- Encrypted       Access Control        Key 
-   Storage        & Group Metadata      Management
+ Encrypted       Access Control        Keys Never
+   Storage        & Group Metadata      Exposed
 ```
 
-1. **Client-Side Encryption**: Files encrypted locally before upload
-2. **IPFS Storage**: Encrypted files stored on decentralized IPFS
-3. **NEAR Blockchain**: Access control groups and transaction logs
-4. **Key Management**: Group keys managed off-chain in verifiable TEEs via Shade Agents—never exposed on-chain, distributed via nonce-based access tokens with attestation proofs.
+**Flow:**
+1. **User authenticates** via OAuth (Auth0) → gets JWT
+2. **SDK sends request** to MCP server with JWT
+3. **MCP verifies JWT** → retrieves user's NEAR account from Shade TEE
+4. **MCP submits unsigned tx** to NEAR Meta Relayer (chain signatures)
+5. **Shade Agent** manages keys in TEE (never exposed)
+6. **IPFS stores** encrypted files
+7. **NEAR records** transaction metadata
 
 
 ## Use Cases
@@ -154,7 +260,7 @@ println!("Uploaded: {}", result.cid);
 ### 🤖 AI & Machine Learning
 - **Dataset Sharing**: Securely share training data between researchers
 - **Model Fine-Tuning**: Store and access sensitive data for AI agent training
-- **TEE Integration**: Provide encrypted inputs/outputs to confidential compute environments
+- **TEE Integration**: Encrypted inputs/outputs to confidential compute environments
 
 ### 🏢 Enterprise & Collaboration
 - **Document Sharing**: Secure file sharing within organizations
@@ -168,13 +274,13 @@ println!("Uploaded: {}", result.cid);
 
 ## NEAR Token Requirements
 
-Operations require small NEAR token deposits for storage:
+Operations require small NEAR deposits:
 
 - Register group: ~0.1 NEAR
 - Add member: ~0.0005 NEAR
 - Revoke member: ~0.0005 NEAR
-- Claim token: ~0.001 NEAR
-- Record transaction: ~0.002 NEAR
+- Retrieve file: ~0.001 NEAR
+- Upload file: ~0.01 NEAR
 
 Ensure your NEAR account has sufficient balance before operations.
 
@@ -208,9 +314,11 @@ Comprehensive documentation is available on GitBook:
 ## Future Roadmap
 
 ### Potential Enhancements
-- **AI Metadata Extraction**: Automate metadata extraction with AI for optimized IPFS indexing.
-- **Dataset Monetization**: Add pricing at file upload so file owners can monetize their datasets.
+- **AI Metadata Extraction**: Automate metadata extraction for optimized IPFS indexing.
+- **Dataset Monetization**: Add pricing for file access/downloads.
 - **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
+- **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + IPFS storage costs)
+- **Multi-Chain Support**: Expand to other NEAR-compatible chains
 
 ## Contributing
 
@@ -266,7 +374,7 @@ Need help? We're here for you:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 ## Acknowledgments
 

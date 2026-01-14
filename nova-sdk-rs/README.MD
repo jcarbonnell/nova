@@ -1,83 +1,94 @@
 # NOVA SDK for Rust
 
-A Rust SDK for interacting with NOVA secure file-sharing on NEAR blockchain. NOVA hybridizes IPFS storage with Shade Agents and TEEs (via Phala) for verifiable privacy, using ephemeral nonce-based tokens for key access. Files are encrypted client-side and stored off-chain, with on-chain metadata ensuring auditable, group-based controls. In the current SDK, users authenticate with JWT session tokens obtained from nova-sdk.com.
+**Version:** 1.0.0 (Mainnet)  
+**License:** MIT  
+**Network:** NEAR Protocol Mainnet
+**Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
+
+A Rust SDK for NOVA's secure, decentralized file-sharing primitive on NEAR. NOVA hybridizes on-chain access control with off-chain TEE-secured keys via Shade Agents, using nonce-based ed25519-signed tokens for ephemeral, verifiable access. This ensures privacy-first data sharing for AI datasets, healthcare/financial records, and sensitive documents.
 
 ## Features
 
-- 🔐 **AES-256-CBC Encryption** - Client-side encryption for data privacy
+- 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
-- ⛓️ **NEAR Blockchain** - Immutable transaction records and access control
-- 🛡️ **TEE-Verified Keys** - Off-chain keys stored encrypted in Shade Agents (Phala TEEs); no on-chain exposure
-- 🔑 **Ephemeral Token Auth** - Ed25519-signed payloads with nonces/timestamps for replay-proof, time-bound key access
-- 👥 **Group Management** - Fine-grained access control with event-driven key generation/rotation
-- 🔄 **Key Rotation** - Automatic TEE-side rotation on revocation, with on-chain checksum verification
-- 🚀 **Composite Operations** - End-to-end workflows: Encrypt → Upload → Authenticate → Retrieve
+- ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
+- 🛡️ **Session-Based Auth** - OAuth flow (no private key handling)
+- 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
+- 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
+- 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "0.4.1"
+nova-sdk-rs = "1.0.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
+## ⚠️ Mainnet Notice
+
+**NOVA v1.0.0 operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
+
+**Typical costs:**
+- Register group: ~0.05 NEAR (~$0.15 USD)
+- Upload file: ~0.01 NEAR + IPFS storage
+- Retrieve file: ~0.001 NEAR
+
+For development, use [testnet configuration](#-testnet-usage).
+
 ## Quick Start
 
+### 1. Get Credentials
+
+Visit **[nova-sdk.com](https://nova-sdk.com)** to:
+1. Create your NEAR account (e.g., `alice.nova-sdk.near`)
+2. Get session token at `/api/auth/session-token`
+
+### 2. Basic Usage
 ```rust
-use nova_sdk_rs::NovaSdk;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
+use std::fs;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Get your session token from nova-sdk.com/api/auth/session-token
-    let session_token = "eyJhbGciOiJIUzI1NiJ9..."; // JWT from nova-sdk.com
-    
-    // 2. Initialize SDK with your NOVA account and session token
+async fn main() -> Result> {
+    // Initialize SDK (mainnet by default)
     let sdk = NovaSdk::new(
-        "alice-nova.nova-sdk-5.testnet",  // Your NOVA-managed account
-        session_token,
+        "alice.nova-sdk.near",
+        &std::env::var("NOVA_SESSION_TOKEN")?
     )?;
 
-    // 3. Upload encrypted file (MCP handles: get key → encrypt → IPFS → record tx)
+    // Verify network
+    let (network, contract, _) = sdk.get_network_info();
+    println!("Network: {} | Contract: {}", network, contract);
+
+    // Register group
+    sdk.register_group("my-secure-files").await?;
+
+    // Upload file
+    let file_data = fs::read("./confidential.pdf")?;
     let result = sdk.composite_upload(
-        "secure_project",
-        b"Confidential AI dataset",
-        "dataset.bin"
+        "my-secure-files",
+        &file_data,
+        "confidential.pdf"
     ).await?;
 
-    println!("✅ Uploaded to IPFS: {}", result.cid);
-    println!("📝 Transaction ID: {}", result.trans_id);
-    println!("🔒 File Hash: {}", result.file_hash);
-    println!("💰 Fee: {} NEAR", result.fee_breakdown.total);
+    println!("✅ Uploaded: {}", result.cid);
+    println!("💰 Cost: {:?}", result.fee_breakdown);
 
-    // 4. Retrieve and decrypt (MCP handles: get key → fetch IPFS → decrypt)
+    // Retrieve file
     let retrieved = sdk.composite_retrieve(
-        "secure_project",
+        "my-secure-files",
         &result.cid
     ).await?;
 
-    println!("📄 Retrieved {} bytes", retrieved.data.len());
-    println!("✅ Hash matches: {}", retrieved.file_hash == result.file_hash);
+    fs::write("./decrypted.pdf", retrieved.data)?;
+    println!("✅ Decrypted! Hash: {}", retrieved.file_hash);
 
     Ok(())
 }
 ```
-
-## Getting Your Session Token
-
-Before using the SDK, obtain a session token from nova-sdk.com:
-
-```bash
-# For wallet users
-curl -X POST https://nova-sdk.com/api/auth/session-token \
-  -H "Content-Type: application/json" \
-  -d '{"wallet_id": "your-wallet.near"}'
-
-# Response: { "token": "eyJhbG...", "account_id": "you-nova.nova-sdk-5.testnet", "expires_in": 86400 }
-```
-
-The session token is valid for 24 hours. Store it securely and refresh before expiry.
 
 ## Core Concepts
 
@@ -96,21 +107,6 @@ NOVA uses signed tokens for key access:
 - Sign with ed25519 (from account keypair).
 - Claim on-chain (claim_token): Verifies sig/membership/nonce (5min window), returns token.
 - Present to Shade: TEE decrypts key, verifies checksum, responds transiently.
-
-
-```rust
-// Register new group (owner only)
-sdk.register_group("secure_vault").await?;
-
-// Add members
-sdk.add_group_member("secure_vault", "bob.testnet").await?;
-
-// Check authorization (direct RPC - no MCP needed)
-let authorized = sdk.is_authorized("secure_vault", Some("bob.testnet")).await?;
-
-// Revoke member (automatically rotates key in TEE)
-sdk.revoke_group_member("secure_vault", "bob.testnet").await?;
-```
 
 ### Encryption
 
@@ -132,52 +128,42 @@ for tx in txs {
 }
 ```
 
-## API Overview
+## API Reference
 
 ### Initialization
 
-- `NovaSdk::new(account_id, session_token)` - Create SDK instance
+```rust
+// Default (mainnet)
+let sdk = NovaSdk::new(account_id, session_token)?;
+
+// Custom config
+let sdk = NovaSdk::with_config(account_id, session_token, config)?;
+```
 
 ### Group Management
 
-- `register_group(group_id)` - Create new group (triggers TEE key gen via events).
-- `add_group_member(group_id, user_id)` - Grant access to user.
-- `revoke_group_member(group_id, user_id)` - Revoke access and auto-rotate key in TEE.
-- `is_authorized(group_id, user_id)` - Check user authorization.
+```rust
+// Check authorization
+sdk.auth_status(Some("my-group")).await?;
+
+// Register group
+sdk.register_group("my-group").await?;
+
+// Add member
+sdk.add_group_member("my-group", "bob.near").await?;
+
+// Revoke member
+sdk.revoke_group_member("my-group", "bob.near").await?;
+```
 
 ### File Operations
 
-- `composite_upload(group_id, user_id, data: &[u8], filename)` - Encrypt, upload to IPFS, record transaction (uses TEE key).
-- `composite_retrieve(group_id, cid)` - Fetch from IPFS, decrypt (uses TEE key).
-- `record_transaction()` - Log metadata (group-member callable).
-- `get_transactions_for_group()` - Query transaction history
+```rust
+// Upload
+let result = sdk.composite_upload(group_id, &data, filename).await?;
 
-### Utilities
-
-- `get_balance(account_id)` - Check NEAR account balance
-- `transfer_tokens(to_account, amount_yocto)` - Transfer NEAR tokens
-
-## Environment Setup
-
-For testing and development, set these environment variables in a `.env` file:
-
-```bash
-# Required for integration tests
-TEST_NOVA_ACCOUNT_ID=alice-nova.nova-sdk-5.testnet
-TEST_SESSION_TOKEN=eyJhbGciOiJIUzI1NiJ9...  # Get from nova-sdk.com
-```
-
-## Testing
-
-```bash
-# Run unit tests
-cargo test
-
-# Run with integration tests (requires .env setup)
-cargo test -- --include-ignored
-
-# Run specific test
-cargo test test_composite_upload
+// Retrieve
+let retrieved = sdk.composite_retrieve(group_id, ipfs_hash).await?;
 ```
 
 ## Error Handling
@@ -198,18 +184,13 @@ match sdk.composite_upload("my_group", b"data", "file.txt").await {
 }
 ```
 
-## Security Considerations
+## 🔐 Security Considerations
 
-⚠️ **Important Security Notes:**
-
-1. **No On-Chain Keys** - Keys encrypted in TEEs (Phala Shade); only checksums public—RPC scans reveal nothing decryptable.
-2. **Ephemeral Tokens** - Ed25519-signed (nonce/timestamp); 5min expiry, replay-proof (used_nonces map).
-3. **TEE Verification** - Shade workers attested (code hash); multi-instance sync via shared TEE_SECRET.
-4. **Layered Auth** - On-chain membership + token sig + TEE decrypt/checksum—defense against key theft.
-5. **Private Keys** - Never commit; use for signing only (ed25519 seed extraction secure).
-6. **IPFS**: Public CIDs; rely on encryption—avoid unencrypted uploads.
-
-⚠️ General: Validate checksums in prod; monitor Shade attestations.
+1. **Never commit session tokens** - Use environment variables
+2. **Verify network** - Check `sdk.network_id()` before operations
+3. **Validate file hashes** - Compare after retrieval
+4. **Use TLS** - Always connect over secure connections
+5. **Rotate tokens** - Refresh JWT tokens regularly
 
 ## Examples
 
@@ -230,7 +211,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/nova/LICENSE) file for details.
+MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 ## Resources
 
