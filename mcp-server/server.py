@@ -1029,7 +1029,6 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
             user_id=effective_user_id,
             file_hash=file_hash,
             ipfs_hash=ipfs_hash,
-            contract_id=contract_id,
             user_email=user_email,
             wallet_id=wallet_id,
             access_token=access_token
