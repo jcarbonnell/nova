@@ -603,69 +603,6 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     )
     return result.result
 
-def _encrypt_data(data: str, key: str) -> str:
-    """Encrypts base64 data with AES-256-CBC."""
-    # Try to decode as base64 first (for binary files or pre-encoded data)
-    try:
-        data_bytes = base64.b64decode(data, validate=True)
-    except Exception:
-        # Fall back to UTF-8 encoding for raw text
-        data_bytes = data.encode('utf-8')
-
-    key_bytes = base64.b64decode(key)[:32]
-    iv = os.urandom(16)
-    cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    pad_len = 16 - (len(data_bytes) % 16)
-    padded = data_bytes + bytes([pad_len] * pad_len)
-    encrypted = encryptor.update(padded) + encryptor.finalize()
-    return base64.b64encode(iv + encrypted).decode('utf-8')
-
-def _decrypt_data(encrypted: str, key: str, filename: Optional[str] = None) -> dict:
-    """Decrypt + return {data_b64: str, mime: str} for rendering."""
-    encrypted_bytes = base64.b64decode(encrypted)
-    if len(encrypted_bytes) < 16:
-        raise ValueError(f"Invalid encrypted data length: {len(encrypted_bytes)}")
-    
-    key_bytes = base64.b64decode(key)[:32]
-    iv = encrypted_bytes[:16]
-    ciphertext = encrypted_bytes[16:]
-    
-    cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-    decrypted_padded = decryptor.update(ciphertext) + decryptor.finalize()
-    pad_len = decrypted_padded[-1]
-    decrypted = decrypted_padded[:-pad_len]
-    
-    data_b64 = base64.b64encode(decrypted).decode('utf-8')
-    
-    # MIME detection: magic bytes first, then filename fallback
-    mime = None
-    signatures = [
-        (b'\x89PNG\r\n\x1a\n', 'image/png'),
-        (b'\xff\xd8\xff', 'image/jpeg'),
-        (b'GIF8', 'image/gif'),
-        (b'%PDF', 'application/pdf'),
-        (b'RIFF', 'image/webp'),  # (check for WEBP after RIFF)
-    ]
-    for sig, mtype in signatures:
-        if decrypted.startswith(sig):
-            mime = mtype
-            break
-    
-    if not mime and filename:
-        mime, _ = mimetypes.guess_type(filename)
-    
-    # Final fallback: try UTF-8 decode to distinguish text from binary
-    if not mime:
-        try:
-            decrypted.decode('utf-8')
-            mime = 'text/plain'
-        except UnicodeDecodeError:
-            mime = 'application/octet-stream'
-    
-    return {'data_b64': data_b64, 'mime': mime}
-
 async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
     """Upload to IPFS via Pinata."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
@@ -858,16 +795,6 @@ async def ipfs_upload(data: str, filename: str) -> str:
 async def ipfs_retrieve(cid: str) -> str:  # Returns base64 bytes (now async)
     """Retrieves data from IPFS via Pinata gateway."""
     return await _ipfs_retrieve(cid)
-
-@mcp.tool
-def encrypt_data(data: str, key: str) -> str:  # Input b64 data/key; return b64 encrypted
-    """Encrypts base64 data with AES-CBC key (32 bytes padded)."""
-    return _encrypt_data(data, key)
-
-@mcp.tool
-def decrypt_data(encrypted: str, key: str) -> str:  # b64 in/out
-    """Decrypts base64 encrypted data with AES-CBC key."""
-    return _decrypt_data(encrypted, key)
 
 # Tools for NOVA contract interaction (requires valid auth)
 @mcp.tool
@@ -1112,138 +1039,98 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
         raise ValueError(f"Record failed: {str(e)}")
 
 @mcp.tool
-async def composite_upload(ctx: Context, group_id: str, user_id: str, data: str, filename: str, payload_b64: str, sig_hex: str) -> dict:
+async def composite_upload(ctx: Context, group_id: str, user_id: str, encrypted_data: str, filename: str, file_hash: str) -> dict:
     """
-    Full upload: get_key → encrypt → IPFS pin → record tx.
-    Uses authenticated user context to fetch signing key from Shade TEE.
+    Upload pre-encrypted data to IPFS and record transaction.
+    Client handles encryption - this tool receives already-encrypted base64 data.
+    
+    Args:
+        encrypted_data: Base64-encoded encrypted file (from client-side encryption)
+        file_hash: SHA-256 hex hash of the PLAINTEXT (computed client-side)
     """
     # Get authenticated user from headers
     user = get_authenticated_user()
-    if not user:
-        raise ValueError("Auth required: Connect wallet first.")
-    
-    session_token = user["session_token"]
     user_email = user.get("email")
     wallet_id = user.get("wallet_id")
     access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
     
+    if not user:
+        raise ValueError("Auth required: Connect wallet first.")
     if not near_account_id:
         raise ValueError("No NEAR account; complete account setup first.")
     
     effective_user_id = user_id or near_account_id
-    contract_id = CONTRACT_ID
     
-    # Estimate fees
-    claim_fee = await _estimate_fee("claim_token")
-    record_fee = await _estimate_fee("record_transaction")
-    total_fee = claim_fee + record_fee
-    gas_margin = 400_000_000_000_000
-    total_attach = total_fee + gas_margin  # Logged for relayer budgeting
+    # Validate file_hash format
+    if not re.match(r'^[a-f0-9]{64}$', file_hash, re.IGNORECASE):
+        raise ValueError("file_hash must be 64-char hex (SHA-256)")
     
-    logger.info(f"Starting composite upload for {effective_user_id} (est total fee: {total_fee / 1e24:.4f} NEAR)")
-    
-    # Normalize data to bytes
-    try:
-        data_bytes = base64.b64decode(data, validate=True)
-    except Exception:
-        data_bytes = data.encode('utf-8')
+    logger.info(f"Uploading pre-encrypted data for {effective_user_id} to group {group_id}")
 
     try:
-        # Step 1: Fetch key from shade
-        key = await _get_shade_key(group_id=group_id, user_id=near_account_id, payload_b64=payload_b64, sig_hex=sig_hex, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
-        # Step 2: Encrypt (sync, fast)
-        encrypted_b64 = _encrypt_data(data, key)
-        # Step 3: Async IPFS upload
-        cid = await _ipfs_upload(encrypted_b64, filename)
-        # Step 4: Hash original data
-        file_hash = hashlib.sha256(data_bytes).hexdigest()
-        # Step 5: Record tx (uses relayer)
-        trans_id = await _record_near_transaction(group_id=group_id, user_id=near_account_id, file_hash=file_hash, ipfs_hash=cid, user_email=user_email, wallet_id=wallet_id, access_token=access_token)
-        logger.info(f"Composite upload success: CID={cid}, Trans={trans_id}")
+        # Step 1: upload client-side-encrypted data to IPFS
+        cid = await _ipfs_upload(encrypted_data, filename)
+
+        # Step 2: Record transaction on-chain
+        trans_id = await _record_near_transaction(
+            group_id=group_id,
+            user_id=effective_user_id,
+            file_hash=file_hash,
+            ipfs_hash=cid,
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+
+        logger.info(f"Upload success: CID={cid}, Trans={trans_id}")
         return {
             "cid": cid,
             "trans_id": trans_id,
             "file_hash": file_hash,
-            "fee_breakdown": {
-                "claim": claim_fee / 1e24,
-                "record": record_fee / 1e24,
-                "total": total_fee / 1e24
-            }
         }
     
-    except ValueError as e:
-        logger.warning(f"Composite upload auth/param error for {effective_user_id}: {e}")
-        raise ValueError(f"Upload auth/param error: {str(e)}")
-    except RuntimeError as e:
-        logger.error(f"Composite upload runtime error for {effective_user_id}: {e}")
-        raise RuntimeError(f"Upload failed (relayer/IPFS/Shade): {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected composite upload error for {effective_user_id}: {e}")
-        raise RuntimeError(f"Composite upload failed: {str(e)}")
+        logger.error(f"Upload error for {effective_user_id}: {e}")
+        raise RuntimeError(f"Upload failed: {str(e)}")
     
 @mcp.tool
-async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str, payload_b64: str, sig_hex: str) -> dict:
-    """Full retrieve: get_key → fetch IPFS → decrypt (uses session). Client provides signed payload_b64/sig_hex for key."""
-    contract_id = CONTRACT_ID
+async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str) -> dict:
+    """
+    Retrieve encrypted data from IPFS.
+    Client handles decryption - this tool returns encrypted base64 data.
+    
+    Returns:
+        encrypted_b64: Base64-encoded encrypted data (client decrypts)
+        ipfs_hash: The CID retrieved
+        group_id: For client to fetch key via get_shade_key
+    """
     user = get_authenticated_user()
-    user_email = user.get("email")
-    wallet_id = user.get("wallet_id")
-    access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
-    session_token = user.get("session_token")
     
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     if not near_account_id:
-        raise ValueError("No NEAR account configured; complete FastAuth signup.")
+        raise ValueError("No NEAR account configured; complete signup until account creation.")
     if not ipfs_hash.startswith('Qm'):
         raise ValueError(f"Invalid CID: {ipfs_hash}")
     
-    est_claim_fee = await _estimate_fee("claim_token")
-    
-    logger.info(f"Starting composite retrieve for {near_account_id} from group {group_id}, (est fee: {est_claim_fee / 1e24:.4f} NEAR)")
+    logger.info(f"Retrieving encrypted data for {near_account_id} from IPFS: {ipfs_hash}")
     
     try:
-        # Step 1: Fetch key (uses relayer for claim; client-signed)
-        key = await _get_shade_key(
-            group_id=group_id, 
-            user_id=near_account_id, 
-            payload_b64=payload_b64, 
-            sig_hex=sig_hex, 
-            user_email=user_email, 
-            wallet_id=wallet_id, 
-            access_token=access_token
-        )
-        # Step 2: Async IPFS fetch
+        # Step 1: Fetch encrypted data from IPFS
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
-        # Step 3: Decrypt (sync, fast)
-        decrypted = _decrypt_data(encrypted_b64, key)
-        decrypted_b64 = decrypted['data_b64']
-        mime = decrypted['mime']
-        # Step 4: Hash for verification
-        decrypted_data = base64.b64decode(decrypted_b64)
-        file_hash = hashlib.sha256(decrypted_data).hexdigest()
 
-        logger.info(f"Composite retrieve success for {near_account_id} from group {group_id}: {len(decrypted_data)} bytes, hash={file_hash}")
+        logger.info(f"Retrieved {len(encrypted_b64)} bytes from group {group_id} for {near_account_id}")
         
         return {
-            "decrypted_b64": decrypted['data_b64'],
-            "mime": mime,
-            "file_hash": file_hash,
-            "fee_breakdown": {"claim": est_claim_fee / 1e24},
+            "encrypted_b64": encrypted_b64,
             "ipfs_hash": ipfs_hash,
             "group_id": group_id
         }
     
-    except ValueError as e:
-        logger.warning(f"Composite retrieve auth/param error for {near_account_id}: {e}")
-        raise ValueError(f"Retrieve auth/param error: {str(e)}")
-    except RuntimeError as e:
-        logger.error(f"Composite retrieve runtime error for {near_account_id}: {e}")
-        raise RuntimeError(f"Retrieve failed (relayer/IPFS/Shade): {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected composite retrieve error for {near_account_id}: {e}")
+        logger.error(f"Retrieve error: {e}")
         raise RuntimeError(f"Composite retrieve failed: {str(e)}")
 
 @mcp.tool
