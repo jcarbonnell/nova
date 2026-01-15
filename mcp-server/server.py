@@ -5,7 +5,6 @@ import json
 import hashlib
 import re
 import time
-from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 from contextlib import contextmanager
@@ -14,7 +13,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 import asyncio
 import base64
-import mimetypes
+from uuid import uuid4
 
 # Crypto/NEAR imports
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -64,6 +63,18 @@ ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk-5.testnet")
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Temporary storage for pending uploads
+PENDING_UPLOADS: Dict[str, Dict[str, Any]] = {}
+UPLOAD_EXPIRY_SECONDS = 300  # 5 minutes
+
+def cleanup_expired_uploads():
+    """Remove expired upload IDs."""
+    now = time.time()
+    expired = [uid for uid, data in PENDING_UPLOADS.items() if data.get("expires_at", 0) < now]
+    for uid in expired:
+        del PENDING_UPLOADS[uid]
+
 
 # SQLite context manager
 @contextmanager
@@ -1036,53 +1047,123 @@ async def record_near_transaction(ctx: Context, group_id: str, user_id: str, fil
     except Exception as e:
         logger.error(f"Record tx error for {near_account_id}: {e}")
         raise ValueError(f"Record failed: {str(e)}")
-
-@mcp.tool
-async def composite_upload(ctx: Context, group_id: str, user_id: str, encrypted_data: str, filename: str, file_hash: str) -> dict:
-    """
-    Upload pre-encrypted data to IPFS and record transaction.
-    Client handles encryption - this tool receives already-encrypted base64 data.
     
-    Args:
-        encrypted_data: Base64-encoded encrypted file (from client-side encryption)
-        file_hash: SHA-256 hex hash of the PLAINTEXT (computed client-side)
+@mcp.tool
+async def prepare_upload(ctx: Context, group_id: str, filename: str) -> dict:
     """
-    # Get authenticated user from headers
+    Step 1 of upload: Returns encryption key and upload_id.
+    Client encrypts locally, then calls finalize_upload with encrypted data.
+    
+    Returns:
+        upload_id: Temporary ID for finalize_upload (expires in 5 min)
+        key: Base64-encoded AES-256 encryption key
+        group_id: Echo back for client convenience
+        filename: Echo back for client convenience
+    """
     user = get_authenticated_user()
     user_email = user.get("email")
     wallet_id = user.get("wallet_id")
     access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
-    
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     if not near_account_id:
         raise ValueError("No NEAR account; complete account setup first.")
     
-    effective_user_id = user_id or near_account_id
+    # Clean up expired uploads
+    cleanup_expired_uploads()
+    
+    # Get encryption key from Shade TEE
+    key = await _get_shade_key(
+        group_id=group_id,
+        user_id=near_account_id,
+        payload_b64="auto",
+        sig_hex="auto",
+        user_email=user_email,
+        wallet_id=wallet_id,
+        access_token=access_token
+    )
+    
+    # Generate upload_id and store context
+    upload_id = str(uuid4())
+    PENDING_UPLOADS[upload_id] = {
+        "group_id": group_id,
+        "filename": filename,
+        "user_id": near_account_id,
+        "user_email": user_email,
+        "wallet_id": wallet_id,
+        "access_token": access_token,
+        "expires_at": time.time() + UPLOAD_EXPIRY_SECONDS,
+    }
+    
+    logger.info(f"Prepared upload {upload_id} for {filename} to group {group_id}")
+    
+    return {
+        "upload_id": upload_id,
+        "key": key,
+        "group_id": group_id,
+        "filename": filename,
+    }
+
+
+@mcp.tool
+async def finalize_upload(ctx: Context, upload_id: str, encrypted_data: str, file_hash: str) -> dict:
+    """
+    Step 2 of upload: Receives encrypted data, uploads to IPFS, records on NEAR.
+    
+    Args:
+        upload_id: From prepare_upload
+        encrypted_data: Base64-encoded encrypted file (client encrypted with key from prepare_upload)
+        file_hash: SHA-256 hex hash of the PLAINTEXT (64 chars)
+    
+    Returns:
+        cid: IPFS content ID
+        trans_id: NEAR transaction ID
+        file_hash: Echo back for verification
+    """
+    # Clean up expired uploads
+    cleanup_expired_uploads()
+    
+    # Validate upload_id
+    if upload_id not in PENDING_UPLOADS:
+        raise ValueError("Invalid or expired upload_id. Call prepare_upload first.")
+    
+    upload_ctx = PENDING_UPLOADS[upload_id]
     
     # Validate file_hash format
     if not re.match(r'^[a-f0-9]{64}$', file_hash, re.IGNORECASE):
         raise ValueError("file_hash must be 64-char hex (SHA-256)")
     
-    logger.info(f"Uploading pre-encrypted data for {effective_user_id} to group {group_id}")
-
+    group_id = upload_ctx["group_id"]
+    filename = upload_ctx["filename"]
+    user_id = upload_ctx["user_id"]
+    user_email = upload_ctx["user_email"]
+    wallet_id = upload_ctx["wallet_id"]
+    access_token = upload_ctx["access_token"]
+    
+    logger.info(f"Finalizing upload {upload_id}: {filename} to group {group_id}")
+    
     try:
-        # Step 1: upload client-side-encrypted data to IPFS
+        # Step 1: Upload encrypted data to IPFS
         cid = await _ipfs_upload(encrypted_data, filename)
-
-        # Step 2: Record transaction on-chain
+        
+        # Step 2: Record transaction on NEAR
         trans_id = await _record_near_transaction(
             group_id=group_id,
-            user_id=effective_user_id,
+            user_id=user_id,
             file_hash=file_hash,
             ipfs_hash=cid,
             user_email=user_email,
             wallet_id=wallet_id,
             access_token=access_token
         )
-
-        logger.info(f"Upload success: CID={cid}, Trans={trans_id}")
+        
+        # Clean up - remove used upload_id
+        del PENDING_UPLOADS[upload_id]
+        
+        logger.info(f"Upload complete: CID={cid}, Trans={trans_id}")
+        
         return {
             "cid": cid,
             "trans_id": trans_id,
@@ -1090,47 +1171,154 @@ async def composite_upload(ctx: Context, group_id: str, user_id: str, encrypted_
         }
     
     except Exception as e:
-        logger.error(f"Upload error for {effective_user_id}: {e}")
+        logger.error(f"Finalize upload error: {e}")
         raise RuntimeError(f"Upload failed: {str(e)}")
-    
+
+
 @mcp.tool
-async def composite_retrieve(ctx: Context, group_id: str, ipfs_hash: str) -> dict:
+async def prepare_retrieve(ctx: Context, group_id: str, ipfs_hash: str) -> dict:
     """
-    Retrieve encrypted data from IPFS.
-    Client handles decryption - this tool returns encrypted base64 data.
+    One-step retrieve: Returns encryption key and encrypted data.
+    Client decrypts locally.
+    
+    Args:
+        group_id: Group the file belongs to
+        ipfs_hash: IPFS CID of the encrypted file
     
     Returns:
-        encrypted_b64: Base64-encoded encrypted data (client decrypts)
-        ipfs_hash: The CID retrieved
-        group_id: For client to fetch key via get_shade_key
+        key: Base64-encoded AES-256 decryption key
+        encrypted_b64: Base64-encoded encrypted file data
+        ipfs_hash: Echo back for verification
+        group_id: Echo back for verification
     """
     user = get_authenticated_user()
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
     near_account_id = user.get("near_account_id")
-    
+
     if not user:
         raise ValueError("Auth required: Connect wallet first.")
     if not near_account_id:
-        raise ValueError("No NEAR account configured; complete signup until account creation.")
-    if not ipfs_hash.startswith('Qm'):
-        raise ValueError(f"Invalid CID: {ipfs_hash}")
+        raise ValueError("No NEAR account; complete account setup first.")
     
-    logger.info(f"Retrieving encrypted data for {near_account_id} from IPFS: {ipfs_hash}")
+    # Validate CID format
+    if not ipfs_hash.startswith('Qm') and not ipfs_hash.startswith('bafy'):
+        raise ValueError(f"Invalid CID format: {ipfs_hash}")
+    
+    logger.info(f"Preparing retrieve for {ipfs_hash} from group {group_id}")
     
     try:
-        # Step 1: Fetch encrypted data from IPFS
+        # Get encryption key from Shade TEE
+        key = await _get_shade_key(
+            group_id=group_id,
+            user_id=near_account_id,
+            payload_b64="auto",
+            sig_hex="auto",
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Fetch encrypted data from IPFS
         encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
-
-        logger.info(f"Retrieved {len(encrypted_b64)} bytes from group {group_id} for {near_account_id}")
+        
+        logger.info(f"Retrieved {len(encrypted_b64)} bytes for {ipfs_hash}")
         
         return {
+            "key": key,
             "encrypted_b64": encrypted_b64,
             "ipfs_hash": ipfs_hash,
-            "group_id": group_id
+            "group_id": group_id,
         }
     
     except Exception as e:
-        logger.error(f"Retrieve error: {e}")
-        raise RuntimeError(f"Composite retrieve failed: {str(e)}")
+        logger.error(f"Prepare retrieve error: {e}")
+        raise RuntimeError(f"Retrieve failed: {str(e)}")
+
+
+# Also add the HTTP endpoint for finalize_upload (frontend calls this directly)
+@mcp.custom_route("/api/finalize-upload", methods=["POST"])
+async def finalize_upload_endpoint(request: Request):
+    """
+    Direct HTTP endpoint for finalize_upload.
+    Frontend calls this after encrypting locally.
+    """
+    headers = dict(request.headers)
+    account_id = headers.get("x-account-id")
+    wallet_id = headers.get("x-wallet-id")
+    user_email = headers.get("x-user-email")
+    
+    if not account_id:
+        return JSONResponse({"error": "Missing x-account-id"}, status_code=400)
+    
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    upload_id = body.get("upload_id")
+    encrypted_data = body.get("encrypted_data")
+    file_hash = body.get("file_hash")
+    
+    if not all([upload_id, encrypted_data, file_hash]):
+        return JSONResponse({"error": "Required: upload_id, encrypted_data, file_hash"}, status_code=400)
+    
+    # Clean up expired uploads
+    cleanup_expired_uploads()
+    
+    # Validate upload_id
+    if upload_id not in PENDING_UPLOADS:
+        return JSONResponse({"error": "Invalid or expired upload_id"}, status_code=400)
+    
+    upload_ctx = PENDING_UPLOADS[upload_id]
+    
+    # Security check: verify account matches
+    if upload_ctx["user_id"] != account_id:
+        return JSONResponse({"error": "Account mismatch"}, status_code=403)
+    
+    # Validate file_hash format
+    if not re.match(r'^[a-f0-9]{64}$', file_hash, re.IGNORECASE):
+        return JSONResponse({"error": "file_hash must be 64-char hex (SHA-256)"}, status_code=400)
+    
+    group_id = upload_ctx["group_id"]
+    filename = upload_ctx["filename"]
+    user_id = upload_ctx["user_id"]
+    user_email_ctx = upload_ctx["user_email"]
+    wallet_id_ctx = upload_ctx["wallet_id"]
+    access_token = upload_ctx["access_token"]
+    
+    logger.info(f"HTTP finalize upload {upload_id}: {filename} to group {group_id}")
+    
+    try:
+        # Step 1: Upload encrypted data to IPFS
+        cid = await _ipfs_upload(encrypted_data, filename)
+        
+        # Step 2: Record transaction on NEAR
+        trans_id = await _record_near_transaction(
+            group_id=group_id,
+            user_id=user_id,
+            file_hash=file_hash,
+            ipfs_hash=cid,
+            user_email=user_email_ctx,
+            wallet_id=wallet_id_ctx,
+            access_token=access_token
+        )
+        
+        # Clean up
+        del PENDING_UPLOADS[upload_id]
+        
+        logger.info(f"HTTP upload complete: CID={cid}, Trans={trans_id}")
+        
+        return JSONResponse({
+            "cid": cid,
+            "trans_id": trans_id,
+            "file_hash": file_hash,
+        })
+    
+    except Exception as e:
+        logger.error(f"HTTP finalize upload error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.tool
 async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
