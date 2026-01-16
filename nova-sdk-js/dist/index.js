@@ -1,37 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -40,7 +7,6 @@ exports.NovaSdk = exports.NovaError = void 0;
 // nova/nova-sdk-js/src/index.ts
 const providers_1 = require("@near-js/providers");
 const axios_1 = __importDefault(require("axios"));
-const crypto = __importStar(require("crypto"));
 const buffer_1 = require("buffer");
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
@@ -55,6 +21,80 @@ class NovaError extends Error {
     }
 }
 exports.NovaError = NovaError;
+// encryption helpers
+async function encryptData(data, keyB64) {
+    // For Node.js environment
+    if (typeof globalThis.crypto?.subtle === 'undefined') {
+        // Node.js: use native crypto
+        const crypto = await import('crypto');
+        const keyBytes = buffer_1.Buffer.from(keyB64, 'base64');
+        const iv = crypto.randomBytes(12); // GCM uses 12-byte IV
+        const cipher = crypto.createCipheriv('aes-256-gcm', keyBytes, iv);
+        const encrypted = buffer_1.Buffer.concat([cipher.update(data), cipher.final()]);
+        const authTag = cipher.getAuthTag();
+        // Format: IV (12) + ciphertext + authTag (16)
+        const result = buffer_1.Buffer.concat([iv, encrypted, authTag]);
+        return result.toString('base64');
+    }
+    // Browser/Deno: use SubtleCrypto
+    const keyBytes = new Uint8Array(buffer_1.Buffer.from(keyB64, 'base64'));
+    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
+    // Create a plain ArrayBuffer copy to avoid TypeScript issues with Buffer's ArrayBufferLike
+    const dataArrayBuffer = new ArrayBuffer(data.length);
+    const dataView = new Uint8Array(dataArrayBuffer);
+    for (let i = 0; i < data.length; i++) {
+        dataView[i] = data[i];
+    }
+    const encrypted = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, dataArrayBuffer);
+    // Combine IV + ciphertext (which includes auth tag in SubtleCrypto)
+    const result = new Uint8Array(iv.length + encrypted.byteLength);
+    result.set(iv, 0);
+    result.set(new Uint8Array(encrypted), iv.length);
+    return buffer_1.Buffer.from(result).toString('base64');
+}
+async function decryptData(encryptedB64, keyB64) {
+    const encryptedBytes = buffer_1.Buffer.from(encryptedB64, 'base64');
+    const keyBytes = buffer_1.Buffer.from(keyB64, 'base64');
+    // For Node.js environment
+    if (typeof globalThis.crypto?.subtle === 'undefined') {
+        const crypto = await import('crypto');
+        const iv = encryptedBytes.subarray(0, 12);
+        const authTag = encryptedBytes.subarray(encryptedBytes.length - 16);
+        const ciphertext = encryptedBytes.subarray(12, encryptedBytes.length - 16);
+        const decipher = crypto.createDecipheriv('aes-256-gcm', keyBytes, iv);
+        decipher.setAuthTag(authTag);
+        const decrypted = buffer_1.Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+        return decrypted;
+    }
+    // Browser/Deno: use SubtleCrypto
+    const iv = encryptedBytes.subarray(0, 12);
+    const ciphertext = encryptedBytes.subarray(12); // Includes auth tag
+    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+    const decrypted = await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertext);
+    return buffer_1.Buffer.from(decrypted);
+}
+function computeSha256(data) {
+    // For Node.js - synchronous
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(data).digest('hex');
+}
+async function computeSha256Async(data) {
+    if (typeof globalThis.crypto?.subtle !== 'undefined') {
+        // Create a plain ArrayBuffer copy to avoid TypeScript issues with Buffer's ArrayBufferLike
+        const dataArrayBuffer = new ArrayBuffer(data.length);
+        const dataView = new Uint8Array(dataArrayBuffer);
+        for (let i = 0; i < data.length; i++) {
+            dataView[i] = data[i];
+        }
+        const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', dataArrayBuffer);
+        return buffer_1.Buffer.from(hashBuffer).toString('hex');
+    }
+    // Node.js fallback
+    const crypto = await import('crypto');
+    return crypto.createHash('sha256').update(data).digest('hex');
+}
 class NovaSdk {
     provider;
     sessionToken;
@@ -118,7 +158,6 @@ class NovaSdk {
         };
     }
     // Build HTTP headers for MCP server authentication. 
-    // Includes JWT session token for ownership verification.
     getMcpHeaders() {
         return {
             'Content-Type': 'application/json',
@@ -131,7 +170,7 @@ class NovaSdk {
         try {
             const response = await axios_1.default.post(`${this.mcpUrl}/tools/${toolName}`, args, {
                 headers: this.getMcpHeaders(),
-                timeout: 60000, // 60s for composite operations
+                timeout: 60000,
             });
             return response.data;
         }
@@ -141,6 +180,23 @@ class NovaSdk {
                 throw new NovaError(`MCP tool '${toolName}' failed: ${errorMsg}`, e);
             }
             throw new NovaError(`MCP tool '${toolName}' failed: ${e}`, e);
+        }
+    }
+    // HTTP endpoint call (for finalize_upload)
+    async callHttpEndpoint(endpoint, body) {
+        try {
+            const response = await axios_1.default.post(`${this.mcpUrl}${endpoint}`, body, {
+                headers: this.getMcpHeaders(),
+                timeout: 60000,
+            });
+            return response.data;
+        }
+        catch (e) {
+            if (axios_1.default.isAxiosError(e)) {
+                const errorMsg = e.response?.data?.error || e.response?.data?.message || e.message;
+                throw new NovaError(`HTTP endpoint '${endpoint}' failed: ${errorMsg}`, e);
+            }
+            throw new NovaError(`HTTP endpoint '${endpoint}' failed: ${e}`, e);
         }
     }
     // Core NOVA Operations (via MCP)
@@ -171,44 +227,81 @@ class NovaSdk {
         });
         return result.message || `Revoked ${memberId} from group '${groupId}'`;
     }
-    // Upload encrypted file to IPFS and record on NEAR blockchain.
-    // MCP server handles: key retrieval, encryption, IPFS upload, transaction signing.
-    async compositeUpload(groupId, data, filename, payloadB64, sigHex) {
-        const dataB64 = data.toString('base64');
-        // For MCP v3, the server handles signing internally
-        const finalPayloadB64 = payloadB64 || '';
-        const finalSigHex = sigHex || '';
-        return this.callMcpTool('composite_upload', {
+    /**
+     * Upload a file to IPFS with encryption and blockchain recording.
+     *
+     * Flow:
+     * 1. Call prepare_upload to get encryption key
+     * 2. Encrypt data locally (client-side)
+     * 3. Call finalize_upload with encrypted data
+     *
+     * @param groupId - The group to upload to
+     * @param data - Raw file data as Buffer
+     * @param filename - Name of the file
+     * @returns Upload result with CID and transaction ID
+     */
+    async upload(groupId, data, filename) {
+        // Step 1: Get encryption key from MCP
+        const prepareResult = await this.callMcpTool('prepare_upload', {
             group_id: groupId,
-            user_id: this.accountId,
-            data: dataB64,
             filename,
-            payload_b64: finalPayloadB64,
-            sig_hex: finalSigHex,
         });
-    }
-    // Retrieve and decrypt file from IPFS.
-    // MCP server handles: key retrieval, IPFS fetch, decryption.
-    async compositeRetrieve(groupId, ipfsHash, payloadB64, sigHex) {
-        if (!ipfsHash.startsWith('Qm')) {
-            throw new NovaError(`Invalid CID: ${ipfsHash}`);
-        }
-        // For MCP, server handles signing
-        const finalPayloadB64 = payloadB64 || '';
-        const finalSigHex = sigHex || '';
-        const result = await this.callMcpTool('composite_retrieve', {
-            group_id: groupId,
-            ipfs_hash: ipfsHash,
-            payload_b64: finalPayloadB64,
-            sig_hex: finalSigHex,
+        const { upload_id, key } = prepareResult;
+        // Step 2: Encrypt data locally
+        const encryptedB64 = await encryptData(data, key);
+        // Step 3: Compute hash of plaintext
+        const fileHash = await computeSha256Async(data);
+        // Step 4: Finalize upload
+        const finalizeResult = await this.callHttpEndpoint('/api/finalize-upload', {
+            upload_id,
+            encrypted_data: encryptedB64,
+            file_hash: fileHash,
         });
         return {
-            data: buffer_1.Buffer.from(result.decrypted_b64, 'base64'),
-            file_hash: result.file_hash,
-            fee_breakdown: result.fee_breakdown,
-            ipfs_hash: result.ipfs_hash,
-            group_id: result.group_id,
+            cid: finalizeResult.cid,
+            trans_id: finalizeResult.trans_id,
+            file_hash: finalizeResult.file_hash,
         };
+    }
+    /**
+     * Retrieve and decrypt a file from IPFS.
+     *
+     * Flow:
+     * 1. Call prepare_retrieve to get key and encrypted data
+     * 2. Decrypt data locally (client-side)
+     *
+     * @param groupId - The group the file belongs to
+     * @param ipfsHash - The IPFS CID of the file
+     * @returns Decrypted file data
+     */
+    async retrieve(groupId, ipfsHash) {
+        if (!ipfsHash.startsWith('Qm') && !ipfsHash.startsWith('bafy')) {
+            throw new NovaError(`Invalid CID: ${ipfsHash}`);
+        }
+        // Step 1: Get key and encrypted data from MCP
+        const prepareResult = await this.callMcpTool('prepare_retrieve', {
+            group_id: groupId,
+            ipfs_hash: ipfsHash,
+        });
+        const { key, encrypted_b64, ipfs_hash, group_id } = prepareResult;
+        // Step 2: Decrypt data locally
+        const decryptedData = await decryptData(encrypted_b64, key);
+        return {
+            data: decryptedData,
+            ipfs_hash,
+            group_id,
+        };
+    }
+    // Legacy method names for backwards compatibility (deprecated)
+    /** @deprecated Use upload() instead */
+    async compositeUpload(groupId, data, filename) {
+        console.warn('compositeUpload() is deprecated, use upload() instead');
+        return this.upload(groupId, data, filename);
+    }
+    /** @deprecated Use retrieve() instead */
+    async compositeRetrieve(groupId, ipfsHash) {
+        console.warn('compositeRetrieve() is deprecated, use retrieve() instead');
+        return this.retrieve(groupId, ipfsHash);
     }
     // Read-Only Contract Queries (Direct RPC - no auth needed)
     async getBalance(accountId) {
@@ -308,9 +401,13 @@ class NovaSdk {
             throw new NovaError(`Transactions query error: ${e}`, e);
         }
     }
-    // Utility Method: Compute SHA256 hash of data.
+    /** Compute SHA256 hash of data (synchronous, Node.js only) */
     computeHash(data) {
-        return crypto.createHash('sha256').update(data).digest('hex');
+        return computeSha256(data);
+    }
+    /** Compute SHA256 hash of data (async, works everywhere) */
+    async computeHashAsync(data) {
+        return computeSha256Async(data);
     }
 }
 exports.NovaSdk = NovaSdk;

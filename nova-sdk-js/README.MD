@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.0.0 (Mainnet)  
+**Version:** 1.0.1 (Mainnet)  
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -27,7 +27,7 @@ npm install nova-sdk-js
 
 ## ⚠️ Mainnet Notice
 
-**NOVA v1.0.0 operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
+**NOVA v1.0.1 operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
 
 Typical costs (mainnet):
 - **Register group**: ~0.05 NEAR (~$0.15 USD)
@@ -67,7 +67,7 @@ await sdk.registerGroup('confidential-docs');
 
 // Upload encrypted file
 const fileData = fs.readFileSync('./report.pdf');
-const result = await sdk.compositeUpload(
+const result = await sdk.upload(
   'confidential-docs',  // group_id
   fileData,             // Buffer
   'report.pdf'          // filename
@@ -76,16 +76,16 @@ const result = await sdk.compositeUpload(
 console.log('✅ Uploaded!');
 console.log('📦 IPFS CID:', result.cid);
 console.log('🔗 Transaction:', result.trans_id);
-console.log('💰 Cost:', result.fee_breakdown.total, 'NEAR');
+console.log('#️⃣ File Hash:', result.file_hash);
 
 // Retrieve file
-const { data, file_hash } = await sdk.compositeRetrieve(
+const { data, ipfs_hash, group_id } = await sdk.retrieve(
   'confidential-docs',
   result.cid
 );
 
 fs.writeFileSync('./decrypted-report.pdf', data);
-console.log('✅ File retrieved! Hash:', file_hash);
+console.log('✅ File retrieved from group:', group_id);
 ```
 
 ## 📖 Core Operations
@@ -113,20 +113,20 @@ await sdk.revokeGroupMember('research-team', 'bob.nova-sdk.near');
 
 ### File Operations
 ```typescript
-// Upload encrypted file
-const uploadResult = await sdk.compositeUpload(
+// Upload encrypted file (encryption happens client-side)
+const uploadResult = await sdk.upload(
   'group-id',
   fileBuffer,
   'filename.ext'
 );
-// Returns: { cid, trans_id, file_hash, fee_breakdown }
+// Returns: { cid, trans_id, file_hash }
 
-// Retrieve encrypted file
-const retrieveResult = await sdk.compositeRetrieve(
+// Retrieve and decrypt file (decryption happens client-side)
+const retrieveResult = await sdk.retrieve(
   'group-id',
   'QmXYZ...'  // IPFS CID
 );
-// Returns: { data, file_hash, fee_breakdown, ipfs_hash, group_id }
+// Returns: { data, ipfs_hash, group_id }
 ```
 
 ### Read-Only Queries
@@ -153,8 +153,10 @@ txs.forEach(tx => {
   console.log('File:', tx.file_hash, '| IPFS:', tx.ipfs_hash);
 });
 
-// Compute file hash (utility)
-const hash = sdk.computeHash(Buffer.from('data'));
+// Compute file hash (utility - async for browser compatibility)
+const hash = await sdk.computeHashAsync(Buffer.from('data'));
+// Or synchronous (Node.js only):
+const hashSync = sdk.computeHash(Buffer.from('data'));
 ```
 
 ## Configuration
@@ -200,6 +202,25 @@ console.log(sdk.getNetworkInfo().networkId);  // 'testnet'
 - ✅ **Session tokens expire** - refresh every 24 hours
 - ✅ **Automatic key rotation** - on member revocation
 - ✅ **TEE attestation** - cryptographic proof of genuine hardware
+
+---
+
+## 🔒 Client-Side Encryption
+
+NOVA v1.1.0 performs all encryption and decryption client-side using AES-256-GCM:
+
+1. **Upload flow:**
+   - SDK calls `prepare_upload` → receives encryption key from TEE
+   - SDK encrypts data locally with AES-256-GCM
+   - SDK calls `finalize_upload` with encrypted data
+   - Key never travels with encrypted data
+
+2. **Retrieve flow:**
+   - SDK calls `prepare_retrieve` → receives key + encrypted data
+   - SDK decrypts data locally
+   - Plaintext never exists on server
+
+This ensures **true end-to-end encryption** - the MCP server never sees plaintext data.
 
 ---
 
@@ -279,10 +300,21 @@ Some operations require NEAR token deposits (paid from user's NOVA account):
 - `registerGroup()` - ~0.05 NEAR
 - `addGroupMember()` - ~0.001 NEAR
 - `revokeGroupMember()` - ~0.001 NEAR
-- `compositeUpload()` - ~0.003 NEAR (claim token + record Tx)
-- `compositeRetrieve()` - 0.001 NEAR (claim only)
+- `upload()` - ~0.003 NEAR (claim token + record Tx)
+- `retrieve()` - 0.001 NEAR (claim only)
 
 Ensure your NOVA account has sufficient balance before calling these methods.
+
+## ⚠️ Deprecated Methods
+
+The following methods are deprecated and will be removed in v2.0.0:
+
+| Deprecated | Replacement |
+|------------|-------------|
+| `compositeUpload()` | `upload()` |
+| `compositeRetrieve()` | `retrieve()` |
+
+The deprecated methods still work but emit console warnings.
 
 ## Contributing
 
