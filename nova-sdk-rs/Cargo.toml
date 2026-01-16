@@ -1,6 +1,6 @@
 [package]
 name = "nova-sdk-rs"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Lightweight Rust SDK for NOVA: Secure group-based file sharing on NEAR Protocol with Shade/TEE + fees model."
 license = "MIT"
@@ -21,6 +21,8 @@ sha2 = "0.10"
 reqwest = { version = "0.12", features = ["multipart", "json"] }
 tokio = { version = "1.47.1", features = ["full"] }
 hex = "0.4.3"
+aes-gcm = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["full"] }

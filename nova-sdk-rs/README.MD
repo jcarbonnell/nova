@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.0.0 (Mainnet)  
+**Version:** 1.0.1 (Mainnet)  
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -23,7 +23,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.0.0"
+nova-sdk-rs = "1.0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -48,11 +48,11 @@ Visit **[nova-sdk.com](https://nova-sdk.com)** to:
 
 ### 2. Basic Usage
 ```rust
-use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
+use nova_sdk_rs::NovaSdk;
 use std::fs;
 
 #[tokio::main]
-async fn main() -> Result> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize SDK (mainnet by default)
     let sdk = NovaSdk::new(
         "alice.nova-sdk.near",
@@ -66,25 +66,25 @@ async fn main() -> Result> {
     // Register group
     sdk.register_group("my-secure-files").await?;
 
-    // Upload file
+    // Upload file (client-side encryption)
     let file_data = fs::read("./confidential.pdf")?;
-    let result = sdk.composite_upload(
+    let result = sdk.upload(
         "my-secure-files",
         &file_data,
         "confidential.pdf"
     ).await?;
 
     println!("✅ Uploaded: {}", result.cid);
-    println!("💰 Cost: {:?}", result.fee_breakdown);
+    println!("📝 Transaction: {}", result.trans_id);
 
-    // Retrieve file
-    let retrieved = sdk.composite_retrieve(
+    // Retrieve file (client-side decryption)
+    let retrieved = sdk.retrieve(
         "my-secure-files",
         &result.cid
     ).await?;
 
-    fs::write("./decrypted.pdf", retrieved.data)?;
-    println!("✅ Decrypted! Hash: {}", retrieved.file_hash);
+    fs::write("./decrypted.pdf", &retrieved.data)?;
+    println!("✅ Decrypted!");
 
     Ok(())
 }
@@ -110,11 +110,12 @@ NOVA uses signed tokens for key access:
 
 ### Encryption
 
-All data is encrypted client-side using AES-256-CBC:
-- 256-bit symmetric keys
-- Random IV per encryption
-- PKCS7 padding
-- SHA256 hashing for integrity
+All data is encrypted **client-side** using AES-256-GCM:
+- 256-bit symmetric keys (retrieved from Shade TEE)
+- 12-byte random IV per encryption
+- Authenticated encryption with integrity verification
+- SHA256 hashing for file integrity
+- **Keys never leave the client unencrypted**
 
 ### Transaction Recording
 
@@ -159,11 +160,22 @@ sdk.revoke_group_member("my-group", "bob.near").await?;
 ### File Operations
 
 ```rust
-// Upload
-let result = sdk.composite_upload(group_id, &data, filename).await?;
+// Upload (encrypts locally, uploads to IPFS, records on NEAR)
+let result = sdk.upload(group_id, &data, filename).await?;
+// Returns: UploadResult { cid, trans_id, file_hash }
 
-// Retrieve
-let retrieved = sdk.composite_retrieve(group_id, ipfs_hash).await?;
+// Retrieve (fetches from IPFS, decrypts locally)
+let retrieved = sdk.retrieve(group_id, ipfs_hash).await?;
+// Returns: RetrieveResult { data, ipfs_hash, group_id }
+```
+
+**Deprecated methods** (still work, but emit warnings):
+```rust
+// Use upload() instead
+sdk.composite_upload(group_id, &data, filename).await?;
+
+// Use retrieve() instead  
+sdk.composite_retrieve(group_id, ipfs_hash).await?;
 ```
 
 ## Error Handling
@@ -173,7 +185,7 @@ The SDK uses a custom `NovaError` enum:
 ```rust
 use nova_sdk_rs::NovaError;
 
-match sdk.composite_upload("my_group", b"data", "file.txt").await {
+match sdk.upload("my_group", b"data", "file.txt").await {
     Ok(result) => println!("CID: {}", result.cid),
     Err(NovaError::Near(msg)) => eprintln!("RPC error: {}", msg),
     Err(NovaError::Mcp(msg)) => eprintln!("MCP server error: {}", msg),
@@ -181,7 +193,8 @@ match sdk.composite_upload("my_group", b"data", "file.txt").await {
     Err(NovaError::InvalidCid(cid)) => eprintln!("Invalid CID: {}", cid),
     Err(NovaError::ParseAccount) => eprintln!("Invalid account ID"),
     Err(NovaError::Http(msg)) => eprintln!("HTTP error: {}", msg),
-}
+    Err(NovaError::Encryption(msg)) => eprintln!("Encryption error: {}", msg),
+    Err(NovaError::Decryption(msg)) => eprintln!("Decryption error: {}", msg),
 ```
 
 ## 🔐 Security Considerations
@@ -191,6 +204,7 @@ match sdk.composite_upload("my_group", b"data", "file.txt").await {
 3. **Validate file hashes** - Compare after retrieval
 4. **Use TLS** - Always connect over secure connections
 5. **Rotate tokens** - Refresh JWT tokens regularly
+6. **Client-side encryption** - Keys are fetched from TEE and used locally; encrypted data travels separately from keys
 
 ## Examples
 

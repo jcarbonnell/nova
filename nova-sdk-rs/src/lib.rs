@@ -9,6 +9,11 @@ use serde_json::json;
 use serde::{Deserialize};
 use sha2::{Sha256, Digest};
 use reqwest::Client;
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce,
+};
+use rand::RngCore;
 
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL: &str = "https://nova-mcp.fastmcp.app";
@@ -29,6 +34,10 @@ pub enum NovaError {
     Auth(String),
     #[error("HTTP error: {0}")]
     Http(String),
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    #[error("Decryption error: {0}")]
+    Decryption(String),
 }
 
 impl From<reqwest::Error> for NovaError {
@@ -37,7 +46,13 @@ impl From<reqwest::Error> for NovaError {
     }
 }
 
-#[derive(serde::Deserialize, Debug)]
+impl From<aes_gcm::Error> for NovaError {
+    fn from(e: aes_gcm::Error) -> Self {
+        NovaError::Encryption(format!("AES-GCM error: {:?}", e))
+    }
+}
+
+#[derive(Deserialize, Debug)]
 pub struct Transaction {
     pub group_id: String,
     pub user_id: String,
@@ -45,38 +60,18 @@ pub struct Transaction {
     pub ipfs_hash: String,
 }
 
-/// Result structs for composites
-#[derive(Deserialize, Debug, Clone)]
-pub struct FeeBreakdown {
-    pub claim: f64,
-    pub record: Option<f64>,
-    pub total: f64,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct CompositeUploadResult {
+#[derive(Debug, Clone)]
+pub struct UploadResult {
     pub cid: String,
     pub trans_id: String,
     pub file_hash: String,
-    pub fee_breakdown: FeeBreakdown,
 }
 
 #[derive(Debug)]
-pub struct CompositeRetrieveResult {
+pub struct RetrieveResult {
     pub data: Vec<u8>,
-    pub file_hash: String,
-    pub fee_breakdown: FeeBreakdown,
     pub ipfs_hash: String,
     pub group_id: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct McpRetrieveResponse {
-    decrypted_b64: String,
-    file_hash: String,
-    fee_breakdown: FeeBreakdown,
-    ipfs_hash: String,
-    group_id: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -84,6 +79,30 @@ pub struct AuthStatusResult {
     pub authenticated: bool,
     pub near_account_id: Option<String>,
     pub authorized_for_group: Option<bool>,
+}
+
+// Internal response types
+#[derive(Deserialize, Debug)]
+struct PrepareUploadResponse {
+    upload_id: String,
+    key: String,
+    group_id: String,
+    filename: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct FinalizeUploadResponse {
+    cid: String,
+    trans_id: String,
+    file_hash: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct PrepareRetrieveResponse {
+    key: String,
+    encrypted_b64: String,
+    ipfs_hash: String,
+    group_id: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -107,6 +126,77 @@ impl Default for NovaSdkConfig {
             mcp_url: DEFAULT_MCP_URL.to_string(),
         }
     }
+}
+
+// encryption/decryption helpers
+fn encrypt_data(data: &[u8], key_b64: &str) -> Result<String, NovaError> {
+    use base64::Engine;
+    
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_b64)
+        .map_err(|e| NovaError::Encryption(format!("Invalid key: {}", e)))?;
+    
+    if key_bytes.len() != 32 {
+        return Err(NovaError::Encryption(format!(
+            "Key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+    
+    // Generate random 12-byte IV
+    let mut iv = [0u8; 12];
+    OsRng.fill_bytes(&mut iv);
+    let nonce = Nonce::from_slice(&iv);
+    
+    // Create cipher and encrypt
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+        .map_err(|e| NovaError::Encryption(format!("Cipher init failed: {:?}", e)))?;
+    
+    let ciphertext = cipher
+        .encrypt(nonce, data)
+        .map_err(|e| NovaError::Encryption(format!("Encryption failed: {:?}", e)))?;
+    
+    // Combine: IV (12 bytes) + ciphertext (includes auth tag)
+    let mut result = Vec::with_capacity(12 + ciphertext.len());
+    result.extend_from_slice(&iv);
+    result.extend_from_slice(&ciphertext);
+    
+    Ok(base64::engine::general_purpose::STANDARD.encode(&result))
+}
+
+fn decrypt_data(encrypted_b64: &str, key_b64: &str) -> Result<Vec<u8>, NovaError> {
+    use base64::Engine;
+    
+    let encrypted_bytes = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_b64)
+        .map_err(|e| NovaError::Decryption(format!("Invalid encrypted data: {}", e)))?;
+    
+    if encrypted_bytes.len() < 28 {
+        // 12 (IV) + 16 (min auth tag)
+        return Err(NovaError::Decryption("Encrypted data too short".to_string()));
+    }
+    
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_b64)
+        .map_err(|e| NovaError::Decryption(format!("Invalid key: {}", e)))?;
+    
+    if key_bytes.len() != 32 {
+        return Err(NovaError::Decryption(format!(
+            "Key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+    
+    let iv = &encrypted_bytes[0..12];
+    let ciphertext = &encrypted_bytes[12..];
+    let nonce = Nonce::from_slice(iv);
+    
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+        .map_err(|e| NovaError::Decryption(format!("Cipher init failed: {:?}", e)))?;
+    
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| NovaError::Decryption(format!("Decryption failed: {:?}", e)))
 }
 
 #[derive(Debug)]
@@ -282,6 +372,40 @@ impl NovaSdk {
             .map_err(|e| NovaError::Mcp(format!("Failed to parse MCP response: {}", e)))
     }
 
+    /// Calls an HTTP endpoint (for finalize operations)
+    async fn call_http_endpoint<T: for<'de> Deserialize<'de>>(
+        &self,
+        endpoint: &str,
+        body: serde_json::Value,
+    ) -> Result<T, NovaError> {
+        let url = format!("{}{}", self.mcp_url, endpoint);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.session_token))
+            .header("X-Account-Id", &self.account_id)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(NovaError::Http(format!(
+                "HTTP endpoint '{}' failed ({}): {}",
+                endpoint, status, error_text
+            )));
+        }
+
+        response
+            .json::<T>()
+            .await
+            .map_err(|e| NovaError::Http(format!("Failed to parse response: {}", e)))
+    }
+
     /// NOVA core operations via MCP server
     /// Check authentication status and group authorization.
     pub async fn auth_status(&self, group_id: Option<&str>) -> Result<AuthStatusResult, NovaError> {
@@ -318,58 +442,116 @@ impl NovaSdk {
         Ok(response.message.unwrap_or_else(|| format!("Revoked {} from group '{}'", member_id, group_id)))
     }
 
-    /// Upload encrypted file to IPFS and record on NEAR blockchain.
-    /// MCP server handles: key retrieval, encryption, IPFS upload, transaction signing.
+    /// Upload a file to IPFS with encryption and blockchain recording.
+    ///
+    /// Flow:
+    /// 1. Call prepare_upload to get encryption key
+    /// 2. Encrypt data locally (client-side)
+    /// 3. Call finalize_upload with encrypted data
+    ///
+    /// # Arguments
+    /// * `group_id` - The group to upload to
+    /// * `data` - Raw file data
+    /// * `filename` - Name of the file
+    ///
+    /// # Returns
+    /// Upload result with CID and transaction ID
+    pub async fn upload(
+        &self,
+        group_id: &str,
+        data: &[u8],
+        filename: &str,
+    ) -> Result<UploadResult, NovaError> {
+        // Step 1: Get encryption key from MCP
+        let args = json!({
+            "group_id": group_id,
+            "filename": filename
+        });
+        let prepare_result: PrepareUploadResponse =
+            self.call_mcp_tool("prepare_upload", args).await?;
+
+        let upload_id = prepare_result.upload_id;
+        let key = prepare_result.key;
+
+        // Step 2: Encrypt data locally
+        let encrypted_b64 = encrypt_data(data, &key)?;
+
+        // Step 3: Compute hash of plaintext
+        let file_hash = Self::compute_hash(data);
+
+        // Step 4: Finalize upload
+        let body = json!({
+            "upload_id": upload_id,
+            "encrypted_data": encrypted_b64,
+            "file_hash": file_hash
+        });
+        let finalize_result: FinalizeUploadResponse =
+            self.call_http_endpoint("/api/finalize-upload", body).await?;
+
+        Ok(UploadResult {
+            cid: finalize_result.cid,
+            trans_id: finalize_result.trans_id,
+            file_hash: finalize_result.file_hash,
+        })
+    }
+
+    /// Retrieve and decrypt a file from IPFS.
+    ///
+    /// Flow:
+    /// 1. Call prepare_retrieve to get key and encrypted data
+    /// 2. Decrypt data locally (client-side)
+    ///
+    /// # Arguments
+    /// * `group_id` - The group the file belongs to
+    /// * `ipfs_hash` - The IPFS CID of the file
+    ///
+    /// # Returns
+    /// Decrypted file data
+    pub async fn retrieve(
+        &self,
+        group_id: &str,
+        ipfs_hash: &str,
+    ) -> Result<RetrieveResult, NovaError> {
+        if !ipfs_hash.starts_with("Qm") && !ipfs_hash.starts_with("bafy") {
+            return Err(NovaError::InvalidCid(ipfs_hash.to_string()));
+        }
+
+        // Step 1: Get key and encrypted data from MCP
+        let args = json!({
+            "group_id": group_id,
+            "ipfs_hash": ipfs_hash
+        });
+        let prepare_result: PrepareRetrieveResponse =
+            self.call_mcp_tool("prepare_retrieve", args).await?;
+
+        // Step 2: Decrypt data locally
+        let decrypted_data = decrypt_data(&prepare_result.encrypted_b64, &prepare_result.key)?;
+
+        Ok(RetrieveResult {
+            data: decrypted_data,
+            ipfs_hash: prepare_result.ipfs_hash,
+            group_id: prepare_result.group_id,
+        })
+    }
+
+    // Legacy method names for backwards compatibility (deprecated)
+    #[deprecated(since = "1.0.1", note = "Use upload() instead")]
     pub async fn composite_upload(
         &self,
         group_id: &str,
         data: &[u8],
         filename: &str,
-    ) -> Result<CompositeUploadResult, NovaError> {
-        let data_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
-
-        let args = json!({
-            "group_id": group_id,
-            "user_id": self.account_id,
-            "data": data_b64,
-            "filename": filename,
-            "payload_b64": "",
-            "sig_hex": ""
-        });
-
-        self.call_mcp_tool("composite_upload", args).await
+    ) -> Result<UploadResult, NovaError> {
+        self.upload(group_id, data, filename).await
     }
 
-    /// Retrieve and decrypt file from IPFS.
-    /// MCP server handles: key retrieval, IPFS fetch, decryption.
+    #[deprecated(since = "1.0.1", note = "Use retrieve() instead")]
     pub async fn composite_retrieve(
         &self,
         group_id: &str,
         ipfs_hash: &str,
-    ) -> Result<CompositeRetrieveResult, NovaError> {
-        if !ipfs_hash.starts_with("Qm") {
-            return Err(NovaError::InvalidCid(ipfs_hash.to_string()));
-        }
-
-        let args = json!({
-            "group_id": group_id,
-            "ipfs_hash": ipfs_hash,
-            "payload_b64": "",
-            "sig_hex": ""
-        });
-
-        let response: McpRetrieveResponse = self.call_mcp_tool("composite_retrieve", args).await?;
-
-        let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &response.decrypted_b64)
-            .map_err(|e| NovaError::Mcp(format!("Failed to decode data: {}", e)))?;
-
-        Ok(CompositeRetrieveResult {
-            data,
-            file_hash: response.file_hash,
-            fee_breakdown: response.fee_breakdown,
-            ipfs_hash: response.ipfs_hash,
-            group_id: response.group_id,
-        })
+    ) -> Result<RetrieveResult, NovaError> {
+        self.retrieve(group_id, ipfs_hash).await
     }
 
     /// Read-Only Contract Queries (Direct RPC - no auth needed)
