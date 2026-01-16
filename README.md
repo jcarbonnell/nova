@@ -16,7 +16,7 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 - **Group Creation & Management**: Owners (NEAR AccountIds) create groups via smart contracts, supporting collaborative AI training with multi-group membership. Anyone can create groups (per future update—currently owner-gated for MVP stability).
 - **Access Control**: Smart contracts maintain a mapping table for members and attestations, ensuring only authorized users access files via ephemeral tokens. Vital for user-owned AI privacy.
 - **Secure Storage**: Files are encrypted with group keys and pinned to IPFS, optimized for AI dApps (e.g., datasets for fine-tuning).
-- **Access Workflow**: Authorized users claim nonce-based tokens (ed25519-signed payloads) from on-chain, then fetch keys from TEEs for local decryption, ensuring verifiable access.
+- **Access Workflow**: SDKs retrieve encryption keys from TEE via secure tokens, then perform client-side encryption/decryption —plaintext data never leaves your device or server.
 - **Revocation & Key Rotation**: Remove members and rotate keys in TEEs with lazy re-encryption to minimize latency/gas costs for large groups.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
@@ -77,7 +77,7 @@ For high-performance applications, blockchain integration, and system-level deve
 
 ```toml
 [dependencies]
-nova-sdk-rs = "0.1.0"
+nova-sdk-rs = "1.0.1"
 ```
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
@@ -122,9 +122,9 @@ console.log(sdk.getNetworkInfo());
 // Register a new group (you become owner)
 await sdk.registerGroup('my-private-files');
 
-// Upload encrypted file
+// Upload encrypted file (client-side encryption)
 const fileData = fs.readFileSync('./sensitive-doc.pdf');
-const result = await sdk.compositeUpload(
+const result = await sdk.upload(
   'my-private-files',   // group_id
   fileData,             // file data (Buffer)
   'sensitive-doc.pdf'   // filename
@@ -133,25 +133,24 @@ const result = await sdk.compositeUpload(
 console.log('✅ Uploaded!');
 console.log('📦 IPFS CID:', result.cid);
 console.log('🔗 Transaction:', result.trans_id);
-console.log('💰 Cost:', result.fee_breakdown);
 
-// Retrieve and decrypt file
-const { data, file_hash } = await sdk.compositeRetrieve(
+// Retrieve and decrypt file (client-side decryption)
+const { data } = await sdk.retrieve(
   'my-private-files',
   result.cid  // IPFS hash from upload
 );
 
 fs.writeFileSync('./decrypted-doc.pdf', data);
-console.log('✅ File decrypted! Hash:', file_hash);
+console.log('✅ File decrypted!');
 ```
 
 ### Rust SDK
 ```rust
-use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
+use nova_sdk_rs::NovaSdk;
 use std::fs;
 
 #[tokio::main]
-async fn main() -> Result> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize SDK (mainnet by default)
     let sdk = NovaSdk::new(
         "alice.nova-sdk.near",
@@ -165,9 +164,9 @@ async fn main() -> Result> {
     // Register group
     sdk.register_group("my-secure-files").await?;
 
-    // Upload file
+    // Upload file (client-side encryption)
     let file_data = fs::read("./confidential.pdf")?;
-    let result = sdk.composite_upload(
+    let result = sdk.upload(
         "my-secure-files",
         &file_data,
         "confidential.pdf"
@@ -177,14 +176,14 @@ async fn main() -> Result> {
     println!("📦 IPFS CID: {}", result.cid);
     println!("🔗 Transaction: {}", result.trans_id);
 
-    // Retrieve file
-    let retrieved = sdk.composite_retrieve(
+    // Retrieve file (client-side decryption)
+    let retrieved = sdk.retrieve(
         "my-secure-files",
         &result.cid
     ).await?;
 
-    fs::write("./decrypted.pdf", retrieved.data)?;
-    println!("✅ File decrypted! Hash: {}", retrieved.file_hash);
+    fs::write("./decrypted.pdf", &retrieved.data)?;
+    println!("✅ File decrypted!");
 
     Ok(())
 }
@@ -248,11 +247,12 @@ let sdk = NovaSdk::with_config(
 **Flow:**
 1. **User authenticates** via OAuth (Auth0) → gets JWT
 2. **SDK sends request** to MCP server with JWT
-3. **MCP verifies JWT** → retrieves user's NEAR account from Shade TEE
-4. **MCP submits unsigned tx** to NEAR Meta Relayer (chain signatures)
-5. **Shade Agent** manages keys in TEE (never exposed)
-6. **IPFS stores** encrypted files
-7. **NEAR records** transaction metadata
+3. **MCP verifies JWT** → retrieves encryption key from Shade TEE
+4. **SDK encrypts locally** using AES-256-GCM (key never leaves client unencrypted)
+5. **MCP uploads encrypted data** to IPFS and records transaction on NEAR
+6. **Shade Agent** manages keys in TEE (never exposed on-chain)
+7. **IPFS stores** encrypted files (ciphertext only)
+8. **NEAR records** transaction metadata (CID, file hash)
 
 
 ## Use Cases
@@ -307,7 +307,7 @@ Comprehensive documentation is available on GitBook:
 3. **IPFS Privacy** - IPFS content is addressable by CID; encryption is essential
 4. **Access Control** - Always verify user authorization before operations
 5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
-6. **Client-Side Encryption** - Files are encrypted locally, never exposing plaintext to IPFS
+6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to IPFS or MCP server
 7. **Token Ephemerality** - Nonces and timestamps prevent replay; refresh tokens frequently
 
 
