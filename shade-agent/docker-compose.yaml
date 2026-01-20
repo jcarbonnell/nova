@@ -20,6 +20,12 @@ services:
     environment:
       NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
       JWT_SECRET: ${JWT_SECRET}
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
+      NOVA_CONTRACT_ID: ${NOVA_CONTRACT_ID}
+      TEE_KEY_SECRET: ${TEE_KEY_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image
     image: jcarbonnell/nova-shade-agent:v3

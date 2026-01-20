@@ -1,6 +1,6 @@
 // Shade agent manages keys for NOVA groups in a TEE-secure manner
 import { Hono } from 'hono';
-import { agentInfo, agentCall, agentView } from '@neardefi/shade-agent-js';
+import { agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import axios from 'axios';
