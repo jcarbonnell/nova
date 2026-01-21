@@ -290,6 +290,31 @@ userKeys.post('/retrieve', async (c) => {
 userKeys.post('/check', async (c) => {
   try {
     const { email, auth_token, wallet_id, account_id } = await c.req.json();
+
+    // Check by account_id only (for SDK session token verification)
+    if (account_id && !wallet_id && !email) {
+      const row = userKeysDb.prepare(`
+        SELECT account_id, public_key, network, created_at 
+        FROM user_account_keys 
+        WHERE account_id = ?
+      `).get(account_id) as any;
+      
+      if (!row) {
+        return c.json({ exists: false });
+      }
+      
+      console.log('Account verified by account_id:', account_id);
+      
+      // NOTE: Intentionally NOT returning wallet_id here
+      return c.json({
+        exists: true,
+        account_id: row.account_id,
+        public_key: row.public_key,
+        network: row.network,
+        created_at: row.created_at
+        // wallet_id is NOT included
+      });
+    }
     
     // Wallet users: Check by wallet_id
     if (wallet_id) {
