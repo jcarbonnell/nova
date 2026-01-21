@@ -1,12 +1,14 @@
-// nova-sdk-rs v0.4.0 - Multi-user architecture via MCP server
+// nova-sdk-rs v1.0.1 - NOVA SDK for Rust
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
 use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
 use near_primitives::views::QueryRequest;
 use thiserror::Error;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use serde_json::json;
-use serde::{Deserialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use reqwest::Client;
 use aes_gcm::{
@@ -19,6 +21,7 @@ use rand::RngCore;
 const DEFAULT_MCP_URL: &str = "https://nova-mcp.fastmcp.app";
 const DEFAULT_RPC_URL: &str = "https://rpc.mainnet.near.org";
 const DEFAULT_CONTRACT_ID: &str = "nova-sdk.near";
+const DEFAULT_AUTH_URL: &str = "https://nova-sdk.com";
 
 #[derive(Error, Debug)]
 pub enum NovaError {
@@ -38,6 +41,8 @@ pub enum NovaError {
     Encryption(String),
     #[error("Decryption error: {0}")]
     Decryption(String),
+    #[error("Token error: {0}")]
+    Token(String),
 }
 
 impl From<reqwest::Error> for NovaError {
@@ -52,7 +57,8 @@ impl From<aes_gcm::Error> for NovaError {
     }
 }
 
-#[derive(Deserialize, Debug)]
+// Public types
+#[derive(Deserialize, Debug, Clone)]
 pub struct Transaction {
     pub group_id: String,
     pub user_id: String,
@@ -81,7 +87,7 @@ pub struct AuthStatusResult {
     pub authorized_for_group: Option<bool>,
 }
 
-// Internal response types
+// Internal types
 #[derive(Deserialize, Debug)]
 struct PrepareUploadResponse {
     upload_id: String,
@@ -110,9 +116,25 @@ struct McpMessageResponse {
     message: Option<String>,
 }
 
-/// Configuration for NovaSdk
+#[derive(Deserialize, Debug)]
+struct SessionTokenResponse {
+    token: String,
+    account_id: String,
+    expires_in: String,
+}
+
+// Token cache
+#[derive(Debug, Clone)]
+struct TokenCache {
+    token: String,
+    expires_at: u64, // Unix timestamp in milliseconds
+}
+
+// Configuration for NovaSdk
 #[derive(Clone)]
 pub struct NovaSdkConfig {
+    pub session_token: Option<String>,
+    pub auth_url: String,
     pub rpc_url: String,
     pub contract_id: String,
     pub mcp_url: String,
@@ -121,10 +143,36 @@ pub struct NovaSdkConfig {
 impl Default for NovaSdkConfig {
     fn default() -> Self {
         Self {
+            session_token: None,
+            auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: DEFAULT_RPC_URL.to_string(),
             contract_id: DEFAULT_CONTRACT_ID.to_string(),
             mcp_url: DEFAULT_MCP_URL.to_string(),
         }
+    }
+}
+
+impl NovaSdkConfig {
+    /// Create config for testnet
+    pub fn testnet() -> Self {
+        Self {
+            session_token: None,
+            auth_url: DEFAULT_AUTH_URL.to_string(),
+            rpc_url: "https://rpc.testnet.near.org".to_string(),
+            contract_id: "nova-sdk-5.testnet".to_string(),
+            mcp_url: DEFAULT_MCP_URL.to_string(),
+        }
+    }
+
+    /// Create config for mainnet
+    pub fn mainnet() -> Self {
+        Self::default()
+    }
+
+    /// Set a pre-fetched session token
+    pub fn with_token(mut self, token: &str) -> Self {
+        self.session_token = Some(token.to_string());
+        self
     }
 }
 
@@ -199,35 +247,60 @@ fn decrypt_data(encrypted_b64: &str, key_b64: &str) -> Result<Vec<u8>, NovaError
         .map_err(|e| NovaError::Decryption(format!("Decryption failed: {:?}", e)))
 }
 
+/// NOVA SDK - Secure file sharing on NEAR Protocol
+/// 
+/// # Example
+/// ```no_run
+/// use nova_sdk_rs::NovaSdk;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     // Simplest usage - automatic token management
+///     let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+///     
+///     // Upload a file
+///     let result = sdk.upload("my-group", b"Hello NOVA!", "hello.txt").await?;
+///     println!("Uploaded: {}", result.cid);
+///     
+///     // Retrieve the file
+///     let retrieved = sdk.retrieve("my-group", &result.cid).await?;
+///     println!("Retrieved: {} bytes", retrieved.data.len());
+///     
+///     Ok(())
+/// }
+/// ```
+
 #[derive(Debug)]
 pub struct NovaSdk {
     client: JsonRpcClient,
     http_client: Client,
     account_id: String,
-    session_token: String,
     contract_id: AccountId,
+    auth_url: String,
     mcp_url: String,
     rpc_url: String,
     network_id: String,
+    token_cache: Arc<RwLock<Option<TokenCache>>>,
 }
 
 impl NovaSdk {
-    /// Creates a new NovaSdk instance with `account_id` - Your NOVA-managed account (e.g., "alice.nova-sdk.near"), `session_token` - JWT from nova-sdk.com/api/auth/session-token
-    pub fn new(account_id: &str, session_token: &str) -> Result<Self, NovaError> {
-        Self::with_config(account_id, session_token, NovaSdkConfig::default())
+    /// Creates a new NovaSdk instance with `account_id` - automatic token management.
+    pub fn new(account_id: &str) -> Result<Self, NovaError> {
+        Self::with_config(account_id, NovaSdkConfig::default())
+    }
+
+    /// Creates a new NovaSdk instance for testnet.
+    pub fn testnet(account_id: &str) -> Result<Self, NovaError> {
+        Self::with_config(account_id, NovaSdkConfig::testnet())
     }
 
     /// Creates a new NovaSdk instance with custom configuration.
     pub fn with_config(
         account_id: &str,
-        session_token: &str,
         config: NovaSdkConfig,
     ) -> Result<Self, NovaError> {
         if account_id.is_empty() {
             return Err(NovaError::Auth("account_id required: get yours at nova-sdk.com".to_string()));
-        }
-        if session_token.is_empty() {
-            return Err(NovaError::Auth("session_token required: get yours at nova-sdk.com/api/auth/session-token".to_string()));
         }
 
         let contract_id = AccountId::from_str(&config.contract_id)
@@ -239,7 +312,7 @@ impl NovaSdk {
         // Validate mainnet contract
         if network_id == "mainnet" && !Self::is_valid_mainnet_contract(&contract_id) {
             return Err(NovaError::Auth(format!(
-                "Invalid mainnet contract: {}. Must end with .near or .mainnet",
+                "Invalid mainnet contract: {}. Must end with .near",
                 contract_id
             )));
         }
@@ -248,34 +321,164 @@ impl NovaSdk {
         if network_id == "mainnet" {
             eprintln!("⚠️  MAINNET MODE: Operations use real NEAR tokens.");
             eprintln!("📋 Contract: {}", contract_id);
-            eprintln!("💰 Check costs at: https://nova-sdk.com/pricing");
+            eprintln!("💰 Check costs at: https://github.com/jcarbonnell/nova");
         }
+
+        // Initialize token cache
+        let token_cache = if let Some(token) = config.session_token {
+            // Pre-fetched token provided - assume ~23h remaining
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            Some(TokenCache {
+                token,
+                expires_at: now_ms + 23 * 60 * 60 * 1000,
+            })
+        } else {
+            None
+        };
 
         Ok(Self {
             client: JsonRpcClient::connect(&config.rpc_url),
             http_client: Client::new(),
             account_id: account_id.to_string(),
-            session_token: session_token.to_string(),
             contract_id,
+            auth_url: config.auth_url,
             mcp_url: config.mcp_url,
             rpc_url: config.rpc_url,
             network_id,
+            token_cache: Arc::new(RwLock::new(token_cache)),
         })
+    }
+
+    // Token Management
+    /// Get a valid session token, fetching or refreshing if needed.
+    async fn get_session_token(&self) -> Result<String, NovaError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Check cached token (with 5 minute buffer)
+        {
+            let cache = self.token_cache.read().await;
+            if let Some(ref tc) = *cache {
+                if tc.expires_at > now_ms + 5 * 60 * 1000 {
+                    return Ok(tc.token.clone());
+                }
+            }
+        }
+
+        // Fetch new token
+        println!("🔑 Fetching session token for: {}", self.account_id);
+
+        let response = self
+            .http_client
+            .post(format!("{}/api/auth/session-token", self.auth_url))
+            .header("Content-Type", "application/json")
+            .json(&json!({ "account_id": self.account_id }))
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            
+            if status.as_u16() == 404 {
+                return Err(NovaError::Token(format!(
+                    "Account '{}' not found. Create one at nova-sdk.com first.",
+                    self.account_id
+                )));
+            }
+            
+            // Try to parse error message
+            let error_msg = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
+                json.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&error_text)
+                    .to_string()
+            } else {
+                error_text
+            };
+
+            return Err(NovaError::Token(format!(
+                "Failed to get session token ({}): {}",
+                status, error_msg
+            )));
+        }
+
+        let token_response: SessionTokenResponse = response
+            .json()
+            .await
+            .map_err(|e| NovaError::Token(format!("Failed to parse token response: {}", e)))?;
+
+        // Verify account_id matches
+        if token_response.account_id != self.account_id {
+            eprintln!(
+                "⚠️  Account ID mismatch: requested {}, got {}",
+                self.account_id, token_response.account_id
+            );
+        }
+
+        // Parse expires_in and cache token
+        let expires_ms = Self::parse_expiry(&token_response.expires_in);
+        
+        {
+            let mut cache = self.token_cache.write().await;
+            *cache = Some(TokenCache {
+                token: token_response.token.clone(),
+                expires_at: now_ms + expires_ms,
+            });
+        }
+
+        println!("✅ Session token obtained, expires in: {}", token_response.expires_in);
+        Ok(token_response.token)
+    }
+
+    fn parse_expiry(expires_in: &str) -> u64 {
+        // Parse "24h", "30m", "7d" etc.
+        let chars: Vec<char> = expires_in.chars().collect();
+        if chars.is_empty() {
+            return 23 * 60 * 60 * 1000; // Default 23h
+        }
+
+        let unit = chars.last().unwrap();
+        let value_str: String = chars[..chars.len()-1].iter().collect();
+        let value: u64 = value_str.parse().unwrap_or(23);
+
+        match unit {
+            'h' => value * 60 * 60 * 1000,
+            'm' => value * 60 * 1000,
+            'd' => value * 24 * 60 * 60 * 1000,
+            _ => 23 * 60 * 60 * 1000,
+        }
+    }
+
+    /// Force refresh the session token.
+    /// 
+    /// Useful if you get auth errors and want to retry with a fresh token.
+    pub async fn refresh_token(&self) -> Result<(), NovaError> {
+        {
+            let mut cache = self.token_cache.write().await;
+            *cache = None;
+        }
+        self.get_session_token().await?;
+        Ok(())
     }
 
     // Network detection
     fn detect_network(contract_id: &AccountId, rpc_url: &str) -> String {
         let contract_str = contract_id.as_str();
         
-        // Heuristic 1: Contract ID suffix
         if contract_str.ends_with(".testnet") {
             return "testnet".to_string();
         }
-        if contract_str.ends_with(".near") || contract_str.ends_with(".mainnet") {
+        if contract_str.ends_with(".near") {
             return "mainnet".to_string();
         }
         
-        // Heuristic 2: RPC URL
         if rpc_url.contains("testnet") {
             return "testnet".to_string();
         }
@@ -283,62 +486,64 @@ impl NovaSdk {
             return "mainnet".to_string();
         }
         
-        // Default to mainnet for safety (v1.0.0+)
+        // Default to mainnet
         eprintln!("⚠️  Network auto-detection failed, defaulting to mainnet");
         "mainnet".to_string()
     }
 
     fn is_valid_mainnet_contract(contract_id: &AccountId) -> bool {
-        let contract_str = contract_id.as_str();
-        contract_str.ends_with(".near") || contract_str.ends_with(".mainnet")
+        contract_id.as_str().ends_with(".near")
     }
 
-    // Get network info
-    pub fn get_network_info(&self) -> (String, String, String) {
-        (
-            self.network_id.clone(),
-            self.contract_id.to_string(),
-            self.rpc_url.clone(),
-        )
+    // Public accessors
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    pub fn contract_id(&self) -> &str {
+        self.contract_id.as_str()
+    }
+
+    pub fn mcp_url(&self) -> &str {
+        &self.mcp_url
+    }
+
+    pub fn rpc_url(&self) -> &str {
+        &self.rpc_url
     }
 
     pub fn network_id(&self) -> &str {
         &self.network_id
     }
 
-    /// Returns the account ID
-    pub fn account_id(&self) -> &str {
-        &self.account_id
+    pub fn auth_url(&self) -> &str {
+        &self.auth_url
     }
 
-    /// Returns the contract ID
-    pub fn contract_id(&self) -> &str {
-        self.contract_id.as_str()
+    // Get network info for debugging
+    pub fn get_network_info(&self) -> (String, String, String, String) {
+        (
+            self.network_id.clone(),
+            self.contract_id.to_string(),
+            self.rpc_url.clone(),
+            self.auth_url.clone(),
+        )
     }
 
-    /// Returns the MCP URL
-    pub fn mcp_url(&self) -> &str {
-        &self.mcp_url
-    }
-
-    /// Returns the RPC URL
-    pub fn rpc_url(&self) -> &str {
-        &self.rpc_url
-    }
-
-    /// Calls an MCP tool with the given arguments.
+    // MCP Communication
     async fn call_mcp_tool<T: for<'de> Deserialize<'de>>(
         &self,
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<T, NovaError> {
+        let token = self.get_session_token().await?;
         let url = format!("{}/tools/{}", self.mcp_url, tool_name);
 
         let response = self
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.session_token))
+            .header("Authorization", format!("Bearer {}", token))
             .header("X-Account-Id", &self.account_id)
             .json(&args)
             .timeout(std::time::Duration::from_secs(60))
@@ -378,13 +583,14 @@ impl NovaSdk {
         endpoint: &str,
         body: serde_json::Value,
     ) -> Result<T, NovaError> {
+        let token = self.get_session_token().await?;
         let url = format!("{}{}", self.mcp_url, endpoint);
 
         let response = self
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.session_token))
+            .header("Authorization", format!("Bearer {}", token))
             .header("X-Account-Id", &self.account_id)
             .json(&body)
             .timeout(std::time::Duration::from_secs(60))
@@ -406,7 +612,7 @@ impl NovaSdk {
             .map_err(|e| NovaError::Http(format!("Failed to parse response: {}", e)))
     }
 
-    /// NOVA core operations via MCP server
+    /// core NOVA operations
     /// Check authentication status and group authorization.
     pub async fn auth_status(&self, group_id: Option<&str>) -> Result<AuthStatusResult, NovaError> {
         let args = json!({
@@ -442,12 +648,13 @@ impl NovaSdk {
         Ok(response.message.unwrap_or_else(|| format!("Revoked {} from group '{}'", member_id, group_id)))
     }
 
-    /// Upload a file to IPFS with encryption and blockchain recording.
+    /// Upload a file with end-to-end encryption.
     ///
     /// Flow:
-    /// 1. Call prepare_upload to get encryption key
-    /// 2. Encrypt data locally (client-side)
-    /// 3. Call finalize_upload with encrypted data
+    /// 1. SDK calls prepare_upload to get encryption key
+    /// 2. SDK encrypts data locally (AES-256-GCM)
+    /// 3. SDK calls finalize_upload with encrypted data
+    /// 4. MCP uploads to IPFS and records on NEAR
     ///
     /// # Arguments
     /// * `group_id` - The group to upload to
@@ -495,7 +702,7 @@ impl NovaSdk {
         })
     }
 
-    /// Retrieve and decrypt a file from IPFS.
+    /// Retrieve and decrypt a file.
     ///
     /// Flow:
     /// 1. Call prepare_retrieve to get key and encrypted data
@@ -534,28 +741,9 @@ impl NovaSdk {
         })
     }
 
-    // Legacy method names for backwards compatibility (deprecated)
-    #[deprecated(since = "1.0.1", note = "Use upload() instead")]
-    pub async fn composite_upload(
-        &self,
-        group_id: &str,
-        data: &[u8],
-        filename: &str,
-    ) -> Result<UploadResult, NovaError> {
-        self.upload(group_id, data, filename).await
-    }
-
-    #[deprecated(since = "1.0.1", note = "Use retrieve() instead")]
-    pub async fn composite_retrieve(
-        &self,
-        group_id: &str,
-        ipfs_hash: &str,
-    ) -> Result<RetrieveResult, NovaError> {
-        self.retrieve(group_id, ipfs_hash).await
-    }
-
     /// Read-Only Contract Queries (Direct RPC - no auth needed)
-    /// Queries the balance of an account on NEAR.
+    
+    /// Get account balance in yoctoNEAR
     pub async fn get_balance(&self, account_id: Option<&str>) -> Result<Balance, NovaError> {
         let id = account_id.unwrap_or(&self.account_id);
         let account_id_acc = AccountId::from_str(id).map_err(|_| NovaError::ParseAccount)?;
@@ -601,7 +789,7 @@ impl NovaSdk {
         }
     }
 
-    /// Fetches the group checksum 
+    /// Get group checksum (Shade TEE attestation)
     pub async fn get_group_checksum(&self, group_id: &str) -> Result<Option<String>, NovaError> {
         let args = json!({"group_id": group_id}).to_string().into_bytes();
         
@@ -630,7 +818,7 @@ impl NovaSdk {
         }
     }
 
-    /// Fetches the group owner.
+    /// Get group owner.
     pub async fn get_group_owner(&self, group_id: &str) -> Result<Option<String>, NovaError> {
         let args = json!({"group_id": group_id}).to_string().into_bytes();
         
@@ -685,7 +873,7 @@ impl NovaSdk {
         }
     }
 
-    /// Fetches transactions for a group.
+    /// get transactions for a group.
     pub async fn get_transactions_for_group(
         &self,
         group_id: &str,

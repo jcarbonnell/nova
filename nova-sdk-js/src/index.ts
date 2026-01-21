@@ -7,9 +7,16 @@ import { Buffer } from 'buffer';
 const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
 const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
 const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
+const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
 
 export interface NovaSdkConfig {
-  sessionToken: string;
+  // Option 1: Manually-fetched token (old behavior, still available)
+  sessionToken?: string;
+  
+  // Option 2: Auto-fetch token (new behavior: provide accountId, SDK handles token fetch)
+  authUrl?: string;  // Default: https://nova-sdk.com
+  
+  // Network config
   rpcUrl?: string;
   contractId?: string;
   mcpUrl?: string;
@@ -30,12 +37,6 @@ export interface Transaction {
   ipfs_hash: string;
 }
 
-export interface FeeBreakdown {
-  claim: number;
-  record?: number;
-  total: number;
-}
-
 export interface UploadResult {
   cid: string;
   trans_id: string;
@@ -54,7 +55,12 @@ export interface AuthStatusResult {
   authorized_for_group?: boolean;
 }
 
-// Internal types for MCP responses
+// Internal types
+interface TokenCache {
+  token: string;
+  expiresAt: number;
+}
+
 interface PrepareUploadResponse {
   upload_id: string;
   key: string;
@@ -82,14 +88,13 @@ export class NovaError extends Error {
   }
 }
 
-// encryption helpers
+// encryption helpers (AES-256-GCM)
 async function encryptData(data: Buffer, keyB64: string): Promise<string> {
-  // For Node.js environment
+  // Node.js environment
   if (typeof globalThis.crypto?.subtle === 'undefined') {
-    // Node.js: use native crypto
     const crypto = await import('crypto');
     const keyBytes = Buffer.from(keyB64, 'base64');
-    const iv = crypto.randomBytes(12); // GCM uses 12-byte IV
+    const iv = crypto.randomBytes(12);
     
     const cipher = crypto.createCipheriv('aes-256-gcm', keyBytes, iv);
     const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
@@ -174,7 +179,6 @@ async function decryptData(encryptedB64: string, keyB64: string): Promise<Buffer
 }
 
 function computeSha256(data: Buffer): string {
-  // For Node.js - synchronous
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const crypto = require('crypto');
   return crypto.createHash('sha256').update(data).digest('hex');
@@ -192,35 +196,66 @@ async function computeSha256Async(data: Buffer): Promise<string> {
     const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', dataArrayBuffer);
     return Buffer.from(hashBuffer).toString('hex');
   }
-  
   // Node.js fallback
   const crypto = await import('crypto');
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+// Main SDK Class
 export class NovaSdk {
   private provider: JsonRpcProvider;
-  private sessionToken: string;
+  private tokenCache: TokenCache | null = null;
+  private authUrl: string;
+
   public readonly accountId: string;
   public readonly contractId: string;
   public readonly mcpUrl: string;
   public readonly rpcUrl: string;
   public readonly networkId: string;
 
-  constructor(accountId: string, config: NovaSdkConfig) {
+  /**
+   * Create a new NOVA SDK instance.
+   * 
+   * @param accountId - Your NOVA account (e.g., "alice.nova-sdk.near")
+   * @param config - Optional configuration. If sessionToken is not provided,
+   *                 the SDK will automatically fetch and refresh tokens.
+   * 
+   * @example
+   * // Simplest usage - auto token management
+   * const sdk = new NovaSdk('alice.nova-sdk.near');
+   * 
+   * @example
+   * // With pre-fetched token
+   * const sdk = new NovaSdk('alice.nova-sdk.near', { sessionToken: 'eyJ...' });
+   * 
+   * @example
+   * // mainnet configuration
+   * const sdk = new NovaSdk('alice.nova-sdk.near', {
+   *   rpcUrl: 'https://rpc.mainnet.near.org',
+   *   contractId: 'nova-sdk.near',
+   * });
+   */
+  constructor(accountId: string, config: NovaSdkConfig = {}) {
     if (!accountId || typeof accountId !== 'string') {
       throw new NovaError('accountId required: get yours at nova-sdk.com');
     }
-    if (!config?.sessionToken) {
-      throw new NovaError('sessionToken required: get yours at nova-sdk.com/api/auth/session-token');
-    }
 
     this.accountId = accountId;
-    this.sessionToken = config.sessionToken;
+    this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
     this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
     this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
     this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
     this.provider = new JsonRpcProvider({ url: this.rpcUrl });
+
+    // Token handling
+    if (config.sessionToken) {
+      // Pre-fetched token provided
+      this.tokenCache = {
+        token: config.sessionToken,
+        expiresAt: Date.now() + 23 * 60 * 60 * 1000, // Assume ~23h remaining
+      };
+    }
+    // Otherwise tokenCache stays null, will auto-fetch on first API call
   
     // Auto-detect network
     this.networkId = this.detectNetwork();
@@ -228,36 +263,118 @@ export class NovaSdk {
     // Validate mainnet contract
     if (this.networkId === 'mainnet' && !this.isValidMainnetContract()) {
       throw new NovaError(
-        `Invalid mainnet contract: ${this.contractId}. Must end with .near or .mainnet`
+        `Invalid mainnet contract: ${this.contractId}. Must end with .near`
       );
     }
 
     if (this.networkId === 'mainnet') {
       console.warn('⚠️  MAINNET MODE: Operations use real NEAR tokens.');
       console.warn('📋 Contract:', this.contractId);
-      console.warn('💰 Check costs at: https://nova-sdk.com/pricing');
+      console.warn('💰 Check costs at: https://github.com/jcarbonnell/nova');
     }
+  }
+
+  // Token Management (auto-fetch and refresh)
+  /**
+   * Get a valid session token, fetching or refreshing if needed.
+   * Called automatically before each API request.
+   */
+  private async getSessionToken(): Promise<string> {
+    // Return cached token if still valid (5 min buffer for safety)
+    if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 5 * 60 * 1000) {
+      return this.tokenCache.token;
+    }
+
+    // Fetch new token
+    console.log('🔑 Fetching session token for:', this.accountId);
+
+    try {
+      const response = await axios.post(
+        `${this.authUrl}/api/auth/session-token`,
+        { account_id: this.accountId },
+        { 
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 15000,
+        }
+      );
+
+      const { token, expires_in, account_id } = response.data;
+
+      if (!token) {
+        throw new NovaError('No token in response - account may not exist');
+      }
+
+      // Verify account_id matches
+      if (account_id && account_id !== this.accountId) {
+        console.warn(`Account ID mismatch: requested ${this.accountId}, got ${account_id}`);
+      }
+
+      // Parse expires_in (e.g., "24h")
+      const expiresMs = this.parseExpiry(expires_in || '24h');
+
+      this.tokenCache = {
+        token,
+        expiresAt: Date.now() + expiresMs,
+      };
+
+      console.log('✅ Session token obtained, expires in:', expires_in || '24h');
+      return token;
+
+    } catch (e) {
+      if (axios.isAxiosError(e)) {
+        const status = e.response?.status;
+        const msg = e.response?.data?.error || e.message;
+        
+        if (status === 404) {
+          throw new NovaError(
+            `Account '${this.accountId}' not found. Create one at nova-sdk.com first.`,
+            e
+          );
+        }
+        throw new NovaError(`Failed to get session token: ${msg}`, e);
+      }
+      throw new NovaError(`Failed to get session token: ${e}`, e as Error);
+    }
+  }
+
+  private parseExpiry(expiresIn: string): number {
+    const match = expiresIn.match(/^(\d+)([hmd])$/);
+    if (!match) return 23 * 60 * 60 * 1000; // Default 23h
+
+    const value = parseInt(match[1]);
+    const unit = match[2];
+
+    switch (unit) {
+      case 'h': return value * 60 * 60 * 1000;
+      case 'm': return value * 60 * 1000;
+      case 'd': return value * 24 * 60 * 60 * 1000;
+      default: return 23 * 60 * 60 * 1000;
+    }
+  }
+
+  /**
+   * Force refresh the session token.
+   * Useful if you get auth errors and want to retry with a fresh token.
+   */
+  async refreshToken(): Promise<void> {
+    this.tokenCache = null;
+    await this.getSessionToken();
   }
 
   // Network detection
   private detectNetwork(): string {
-    // Heuristic 1: Contract ID suffix
     if (this.contractId.endsWith('.testnet')) return 'testnet';
-    if (this.contractId.endsWith('.near') || this.contractId.endsWith('.mainnet')) {
-      return 'mainnet';
-    }
-    
-    // Heuristic 2: RPC URL
+    if (this.contractId.endsWith('.near')) return 'mainnet';
     if (this.rpcUrl.includes('testnet')) return 'testnet';
     if (this.rpcUrl.includes('mainnet')) return 'mainnet';
     
-    // Default to mainnet for safety (v1.0.0+)
+    // Default to mainnet
     console.warn('⚠️  Network auto-detection failed, defaulting to mainnet');
     return 'mainnet';
   }
 
   private isValidMainnetContract(): boolean {
-    return this.contractId.endsWith('.near') || this.contractId.endsWith('.mainnet');
+    return this.contractId.endsWith('.near');
   }
 
   // Get network info (for debugging)
@@ -266,20 +383,23 @@ export class NovaSdk {
     contractId: string; 
     rpcUrl: string;
     mcpUrl: string;
+    authUrl: string;
   } {
     return {
       networkId: this.networkId,
       contractId: this.contractId,
       rpcUrl: this.rpcUrl,
       mcpUrl: this.mcpUrl,
+      authUrl: this.authUrl,
     };
   }
 
-  // Build HTTP headers for MCP server authentication. 
-  private getMcpHeaders(): Record<string, string> {
+  // MCP Communication 
+  private async getMcpHeaders(): Promise<Record<string, string>> {
+    const token = await this.getSessionToken();
     return {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.sessionToken}`,
+      'Authorization': `Bearer ${token}`,
       'X-Account-Id': this.accountId,
     };
   }
@@ -287,15 +407,12 @@ export class NovaSdk {
   // MCP Tool Invocations - Call an MCP tool directly.
   private async callMcpTool<T>(toolName: string, args: Record<string, unknown>): Promise<T> {
     try {
+      const headers = await this.getMcpHeaders();
       const response = await axios.post(
         `${this.mcpUrl}/tools/${toolName}`,
         args,
-        {
-          headers: this.getMcpHeaders(),
-          timeout: 60000,
-        }
+        { headers, timeout: 60000 }
       );
-
       return response.data as T;
     } catch (e) {
       if (axios.isAxiosError(e)) {
@@ -309,13 +426,11 @@ export class NovaSdk {
   // HTTP endpoint call (for finalize_upload)
   private async callHttpEndpoint<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
     try {
+      const headers = await this.getMcpHeaders();
       const response = await axios.post(
         `${this.mcpUrl}${endpoint}`,
         body,
-        {
-          headers: this.getMcpHeaders(),
-          timeout: 60000,
-        }
+        { headers, timeout: 60000 }
       );
       return response.data as T;
     } catch (e) {
@@ -360,12 +475,13 @@ export class NovaSdk {
   }
 
   /**
-   * Upload a file to IPFS with encryption and blockchain recording.
+   * Upload a file with end-to-end encryption
    * 
    * Flow:
-   * 1. Call prepare_upload to get encryption key
-   * 2. Encrypt data locally (client-side)
-   * 3. Call finalize_upload with encrypted data
+   * 1. SDK calls prepare_upload to get encryption key
+   * 2. SDK encrypts data locally (AES-256-GCM)
+   * 3. SDK calls finalize_upload with encrypted data
+   * 4. MCP uploads to IPFS and records on NEAR
    * 
    * @param groupId - The group to upload to
    * @param data - Raw file data as Buffer
@@ -409,7 +525,7 @@ export class NovaSdk {
   }
 
   /**
-   * Retrieve and decrypt a file from IPFS.
+   * Retrieve and decrypt a file
    * 
    * Flow:
    * 1. Call prepare_retrieve to get key and encrypted data
@@ -443,26 +559,6 @@ export class NovaSdk {
       ipfs_hash,
       group_id,
     };
-  }
-
-  // Legacy method names for backwards compatibility (deprecated)
-  /** @deprecated Use upload() instead */
-  async compositeUpload(
-    groupId: string, 
-    data: Buffer, 
-    filename: string
-  ): Promise<UploadResult> {
-    console.warn('compositeUpload() is deprecated, use upload() instead');
-    return this.upload(groupId, data, filename);
-  }
-
-  /** @deprecated Use retrieve() instead */
-  async compositeRetrieve(
-    groupId: string, 
-    ipfsHash: string
-  ): Promise<RetrieveResult> {
-    console.warn('compositeRetrieve() is deprecated, use retrieve() instead');
-    return this.retrieve(groupId, ipfsHash);
   }
 
   // Read-Only Contract Queries (Direct RPC - no auth needed)
@@ -567,6 +663,7 @@ export class NovaSdk {
     }
   }
 
+  // Utility Methods
   /** Compute SHA256 hash of data (synchronous, Node.js only) */
   computeHash(data: Buffer): string {
     return computeSha256(data);
@@ -575,5 +672,25 @@ export class NovaSdk {
   /** Compute SHA256 hash of data (async, works everywhere) */
   async computeHashAsync(data: Buffer): Promise<string> {
     return computeSha256Async(data);
+  }
+
+  // Legacy Methods (deprecated)
+  /** @deprecated Use upload() instead */
+  async compositeUpload(
+    groupId: string, 
+    data: Buffer, 
+    filename: string
+  ): Promise<UploadResult> {
+    console.warn('compositeUpload() is deprecated, use upload() instead');
+    return this.upload(groupId, data, filename);
+  }
+
+  /** @deprecated Use retrieve() instead */
+  async compositeRetrieve(
+    groupId: string, 
+    ipfsHash: string
+  ): Promise<RetrieveResult> {
+    console.warn('compositeRetrieve() is deprecated, use retrieve() instead');
+    return this.retrieve(groupId, ipfsHash);
   }
 }

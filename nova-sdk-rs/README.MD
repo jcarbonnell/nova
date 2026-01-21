@@ -40,11 +40,10 @@ For development, use [testnet configuration](#-testnet-usage).
 
 ## Quick Start
 
-### 1. Get Credentials
+### 1. Prerequisites
 
-Visit **[nova-sdk.com](https://nova-sdk.com)** to:
-1. Create your NEAR account (e.g., `alice.nova-sdk.near`)
-2. Get session token at `/api/auth/session-token`
+1. **Create a NOVA account** at [nova-sdk.com](https://nova-sdk.com)
+2. **Fund your account** with NEAR tokens for transaction fees
 
 ### 2. Basic Usage
 ```rust
@@ -53,15 +52,15 @@ use std::fs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK (mainnet by default)
-    let sdk = NovaSdk::new(
-        "alice.nova-sdk.near",
-        &std::env::var("NOVA_SESSION_TOKEN")?
-    )?;
+    // Initialize SDK - automatic token management!
+    // Just provide your account ID, SDK handles authentication
+    let sdk = NovaSdk::new("alice.nova-sdk.near")?;
 
-    // Verify network
-    let (network, contract, _) = sdk.get_network_info();
-    println!("Network: {} | Contract: {}", network, contract);
+    // For testnet development:
+    // let sdk = NovaSdk::testnet("alice.nova-sdk-5.testnet")?;
+
+    // Verify connection
+    println!("Network: {} | Contract: {}", sdk.network_id(), sdk.contract_id());
 
     // Register group
     sdk.register_group("my-secure-files").await?;
@@ -129,16 +128,45 @@ for tx in txs {
 }
 ```
 
+### Authentication
+
+The SDK handles session tokens automatically:
+
+1. **Automatic fetching** - On first API call, SDK fetches a token from `nova-sdk.com`
+2. **Automatic refresh** - Tokens are cached and refreshed before expiry (24h validity)
+3. **Manual refresh** - Call `sdk.refresh_token().await?` if you encounter auth errors
+```rust
+// SDK fetches token automatically on first use
+let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+
+// Or provide a pre-fetched token
+let config = NovaSdkConfig::default().with_token("your-token-here");
+let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
+
+// Force refresh if needed
+sdk.refresh_token().await?;
+```
+
 ## API Reference
 
 ### Initialization
 
 ```rust
-// Default (mainnet)
-let sdk = NovaSdk::new(account_id, session_token)?;
+// Simplest - automatic token management (mainnet)
+let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+
+// Testnet
+let sdk = NovaSdk::testnet("alice.nova-sdk-5.testnet")?;
 
 // Custom config
-let sdk = NovaSdk::with_config(account_id, session_token, config)?;
+use nova_sdk_rs::NovaSdkConfig;
+
+let config = NovaSdkConfig::default()
+    .with_token("pre-fetched-token");  // Optional: provide your own token
+let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
+
+// Force token refresh if needed
+sdk.refresh_token().await?;
 ```
 
 ### Group Management
@@ -190,6 +218,7 @@ match sdk.upload("my_group", b"data", "file.txt").await {
     Err(NovaError::Near(msg)) => eprintln!("RPC error: {}", msg),
     Err(NovaError::Mcp(msg)) => eprintln!("MCP server error: {}", msg),
     Err(NovaError::Auth(msg)) => eprintln!("Authentication error: {}", msg),
+    Err(NovaError::Token(msg)) => eprintln!("Token error: {}", msg),
     Err(NovaError::InvalidCid(cid)) => eprintln!("Invalid CID: {}", cid),
     Err(NovaError::ParseAccount) => eprintln!("Invalid account ID"),
     Err(NovaError::Http(msg)) => eprintln!("HTTP error: {}", msg),

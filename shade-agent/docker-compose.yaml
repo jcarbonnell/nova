@@ -28,7 +28,7 @@ services:
       TEE_KEY_SECRET: ${TEE_KEY_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image
-    image: jcarbonnell/nova-shade-agent:v3
+    image: jcarbonnell/nova-shade-agent:v4
     container_name: shade-agent-app
     ports:
       - "3000:3000"

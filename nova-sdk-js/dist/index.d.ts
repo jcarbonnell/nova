@@ -1,6 +1,7 @@
 import { Buffer } from 'buffer';
 export interface NovaSdkConfig {
-    sessionToken: string;
+    sessionToken?: string;
+    authUrl?: string;
     rpcUrl?: string;
     contractId?: string;
     mcpUrl?: string;
@@ -10,11 +11,6 @@ export interface Transaction {
     user_id: string;
     file_hash: string;
     ipfs_hash: string;
-}
-export interface FeeBreakdown {
-    claim: number;
-    record?: number;
-    total: number;
 }
 export interface UploadResult {
     cid: string;
@@ -37,13 +33,47 @@ export declare class NovaError extends Error {
 }
 export declare class NovaSdk {
     private provider;
-    private sessionToken;
+    private tokenCache;
+    private authUrl;
     readonly accountId: string;
     readonly contractId: string;
     readonly mcpUrl: string;
     readonly rpcUrl: string;
     readonly networkId: string;
-    constructor(accountId: string, config: NovaSdkConfig);
+    /**
+     * Create a new NOVA SDK instance.
+     *
+     * @param accountId - Your NOVA account (e.g., "alice.nova-sdk.near")
+     * @param config - Optional configuration. If sessionToken is not provided,
+     *                 the SDK will automatically fetch and refresh tokens.
+     *
+     * @example
+     * // Simplest usage - auto token management
+     * const sdk = new NovaSdk('alice.nova-sdk.near');
+     *
+     * @example
+     * // With pre-fetched token
+     * const sdk = new NovaSdk('alice.nova-sdk.near', { sessionToken: 'eyJ...' });
+     *
+     * @example
+     * // mainnet configuration
+     * const sdk = new NovaSdk('alice.nova-sdk.near', {
+     *   rpcUrl: 'https://rpc.mainnet.near.org',
+     *   contractId: 'nova-sdk.near',
+     * });
+     */
+    constructor(accountId: string, config?: NovaSdkConfig);
+    /**
+     * Get a valid session token, fetching or refreshing if needed.
+     * Called automatically before each API request.
+     */
+    private getSessionToken;
+    private parseExpiry;
+    /**
+     * Force refresh the session token.
+     * Useful if you get auth errors and want to retry with a fresh token.
+     */
+    refreshToken(): Promise<void>;
     private detectNetwork;
     private isValidMainnetContract;
     getNetworkInfo(): {
@@ -51,6 +81,7 @@ export declare class NovaSdk {
         contractId: string;
         rpcUrl: string;
         mcpUrl: string;
+        authUrl: string;
     };
     private getMcpHeaders;
     private callMcpTool;
@@ -60,12 +91,13 @@ export declare class NovaSdk {
     addGroupMember(groupId: string, memberId: string): Promise<string>;
     revokeGroupMember(groupId: string, memberId: string): Promise<string>;
     /**
-     * Upload a file to IPFS with encryption and blockchain recording.
+     * Upload a file with end-to-end encryption
      *
      * Flow:
-     * 1. Call prepare_upload to get encryption key
-     * 2. Encrypt data locally (client-side)
-     * 3. Call finalize_upload with encrypted data
+     * 1. SDK calls prepare_upload to get encryption key
+     * 2. SDK encrypts data locally (AES-256-GCM)
+     * 3. SDK calls finalize_upload with encrypted data
+     * 4. MCP uploads to IPFS and records on NEAR
      *
      * @param groupId - The group to upload to
      * @param data - Raw file data as Buffer
@@ -74,7 +106,7 @@ export declare class NovaSdk {
      */
     upload(groupId: string, data: Buffer, filename: string): Promise<UploadResult>;
     /**
-     * Retrieve and decrypt a file from IPFS.
+     * Retrieve and decrypt a file
      *
      * Flow:
      * 1. Call prepare_retrieve to get key and encrypted data
@@ -85,10 +117,6 @@ export declare class NovaSdk {
      * @returns Decrypted file data
      */
     retrieve(groupId: string, ipfsHash: string): Promise<RetrieveResult>;
-    /** @deprecated Use upload() instead */
-    compositeUpload(groupId: string, data: Buffer, filename: string): Promise<UploadResult>;
-    /** @deprecated Use retrieve() instead */
-    compositeRetrieve(groupId: string, ipfsHash: string): Promise<RetrieveResult>;
     getBalance(accountId?: string): Promise<string>;
     isAuthorized(groupId: string, userId?: string): Promise<boolean>;
     getGroupChecksum(groupId: string): Promise<string | null>;
@@ -99,5 +127,9 @@ export declare class NovaSdk {
     computeHash(data: Buffer): string;
     /** Compute SHA256 hash of data (async, works everywhere) */
     computeHashAsync(data: Buffer): Promise<string>;
+    /** @deprecated Use upload() instead */
+    compositeUpload(groupId: string, data: Buffer, filename: string): Promise<UploadResult>;
+    /** @deprecated Use retrieve() instead */
+    compositeRetrieve(groupId: string, ipfsHash: string): Promise<RetrieveResult>;
 }
 //# sourceMappingURL=index.d.ts.map
