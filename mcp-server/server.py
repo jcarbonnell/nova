@@ -324,7 +324,7 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
     if not near_account_id:
         raise ValueError("near_account_id required")
     
-    if not user_email and not wallet_id:
+    if not user_email and not wallet_id and not near_account_id:
         raise ValueError("Either user_email or wallet_id required for Shade key retrieval")
 
     if not SHADE_API_URL:
