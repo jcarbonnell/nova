@@ -1319,6 +1319,383 @@ async def finalize_upload_endpoint(request: Request):
     except Exception as e:
         logger.error(f"HTTP finalize upload error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+    
+# ========== REST WRAPPERS FOR SDK ==========
+# These endpoints allow the SDK to call MCP tools via simple REST API
+
+@mcp.custom_route("/tools/auth_status", methods=["POST"])
+async def auth_status_rest(request: Request):
+    """REST wrapper for auth_status tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    group_id = body.get("group_id", "test_group")
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    near_account_id = user.get("near_account_id")
+    
+    result = {
+        "authenticated": True,
+        "email": user_email,
+        "wallet_id": wallet_id,
+        "near_account_id": near_account_id,
+        "group_id": group_id,
+    }
+    
+    if near_account_id and group_id != "default":
+        try:
+            acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
+            await acc.startup()
+            auth_result = await acc.view_function(
+                contract_id=CONTRACT_ID,
+                method_name="is_authorized",
+                args={"group_id": group_id, "user_id": near_account_id}
+            )
+            result["authorized_for_group"] = auth_result.result
+        except Exception as e:
+            result["authorized_for_group"] = False
+            result["auth_error"] = str(e)
+    
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/tools/prepare_upload", methods=["POST"])
+async def prepare_upload_rest(request: Request):
+    """REST wrapper for prepare_upload tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    group_id = body.get("group_id")
+    filename = body.get("filename")
+    
+    if not group_id or not filename:
+        return JSONResponse({"error": "Required: group_id, filename"}, status_code=400)
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
+    if not near_account_id:
+        return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
+    
+    try:
+        # Clean up expired uploads
+        cleanup_expired_uploads()
+        
+        # Get encryption key from Shade TEE
+        key = await _get_shade_key(
+            group_id=group_id,
+            user_id=near_account_id,
+            payload_b64="auto",
+            sig_hex="auto",
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Generate upload_id and store context
+        upload_id = str(uuid4())
+        PENDING_UPLOADS[upload_id] = {
+            "group_id": group_id,
+            "filename": filename,
+            "user_id": near_account_id,
+            "user_email": user_email,
+            "wallet_id": wallet_id,
+            "access_token": access_token,
+            "expires_at": time.time() + UPLOAD_EXPIRY_SECONDS,
+        }
+        
+        logger.info(f"REST: Prepared upload {upload_id} for {filename} to group {group_id}")
+        
+        return JSONResponse({
+            "upload_id": upload_id,
+            "key": key,
+            "group_id": group_id,
+            "filename": filename,
+        })
+    
+    except Exception as e:
+        logger.error(f"REST prepare_upload error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/tools/prepare_retrieve", methods=["POST"])
+async def prepare_retrieve_rest(request: Request):
+    """REST wrapper for prepare_retrieve tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    group_id = body.get("group_id")
+    ipfs_hash = body.get("ipfs_hash")
+    
+    if not group_id or not ipfs_hash:
+        return JSONResponse({"error": "Required: group_id, ipfs_hash"}, status_code=400)
+    
+    # Validate CID format
+    if not ipfs_hash.startswith('Qm') and not ipfs_hash.startswith('bafy'):
+        return JSONResponse({"error": f"Invalid CID format: {ipfs_hash}"}, status_code=400)
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
+    if not near_account_id:
+        return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
+    
+    try:
+        # Get encryption key from Shade TEE
+        key = await _get_shade_key(
+            group_id=group_id,
+            user_id=near_account_id,
+            payload_b64="auto",
+            sig_hex="auto",
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Fetch encrypted data from IPFS
+        encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
+        
+        logger.info(f"REST: Retrieved {len(encrypted_b64)} bytes for {ipfs_hash}")
+        
+        return JSONResponse({
+            "key": key,
+            "encrypted_b64": encrypted_b64,
+            "ipfs_hash": ipfs_hash,
+            "group_id": group_id,
+        })
+    
+    except Exception as e:
+        logger.error(f"REST prepare_retrieve error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/tools/register_group", methods=["POST"])
+async def register_group_rest(request: Request):
+    """REST wrapper for register_group tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    group_id = body.get("group_id")
+    
+    if not group_id:
+        return JSONResponse({"error": "Required: group_id"}, status_code=400)
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
+    if not near_account_id:
+        return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
+    
+    try:
+        # Get signing account from Shade TEE
+        acc = await get_user_signer(
+            near_account_id=near_account_id,
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Estimate fee
+        fee = await _estimate_fee("register_group")
+        
+        logger.info(f"REST: Registering group {group_id} for {near_account_id} (fee: {fee/1e24:.4f} NEAR)")
+        
+        # Call contract
+        result = await acc.function_call(
+            contract_id=CONTRACT_ID,
+            method_name="register_group",
+            args={"group_id": group_id},
+            amount=fee,
+            gas=int("300000000000000")
+        )
+        
+        logger.info(f"REST: Group {group_id} registered on-chain by {near_account_id}")
+        
+        # Generate encryption key in Shade TEE
+        if SHADE_API_URL:
+            shade_headers = {"Content-Type": "application/json"}
+            if wallet_id:
+                shade_headers["Authorization"] = f"Bearer wallet:{wallet_id}"
+            elif access_token:
+                shade_headers["Authorization"] = f"Bearer {access_token}"
+            
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+                shade_response = await client.post(
+                    f"{SHADE_API_URL}/api/key-management/generate_key",
+                    json={
+                        "group_id": group_id,
+                        "owner": near_account_id,
+                        "account_id": near_account_id,
+                    },
+                    headers=shade_headers,
+                )
+                
+                if shade_response.status_code != 200:
+                    error_text = shade_response.text[:200]
+                    logger.error(f"Shade key generation failed: {error_text}")
+                    return JSONResponse({
+                        "message": f"Group '{group_id}' registered but key generation failed",
+                        "error": error_text
+                    }, status_code=500)
+        
+        return JSONResponse({"message": f"Group '{group_id}' registered successfully"})
+    
+    except Exception as e:
+        logger.error(f"REST register_group error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/tools/add_group_member", methods=["POST"])
+async def add_group_member_rest(request: Request):
+    """REST wrapper for add_group_member tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    group_id = body.get("group_id")
+    member_id = body.get("member_id")
+    
+    if not group_id or not member_id:
+        return JSONResponse({"error": "Required: group_id, member_id"}, status_code=400)
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
+    if not near_account_id:
+        return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
+    
+    try:
+        # Auto-complete username
+        member_id = normalize_account_id(member_id)
+        
+        # Get signing account from Shade TEE
+        acc = await get_user_signer(
+            near_account_id=near_account_id,
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Estimate fee
+        fee = await _estimate_fee("add_group_member")
+        
+        logger.info(f"REST: Add member {member_id} to {group_id} by {near_account_id}")
+        
+        result = await acc.function_call(
+            contract_id=CONTRACT_ID,
+            method_name="add_group_member",
+            args={"group_id": group_id, "user_id": member_id},
+            amount=fee,
+            gas=100_000_000_000_000
+        )
+        
+        return JSONResponse({"message": f"Added {member_id} to group '{group_id}'"})
+    
+    except Exception as e:
+        logger.error(f"REST add_group_member error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/tools/revoke_group_member", methods=["POST"])
+async def revoke_group_member_rest(request: Request):
+    """REST wrapper for revoke_group_member tool (SDK clients)."""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    
+    group_id = body.get("group_id")
+    member_id = body.get("member_id")
+    
+    if not group_id or not member_id:
+        return JSONResponse({"error": "Required: group_id, member_id"}, status_code=400)
+    
+    try:
+        user = get_authenticated_user()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    
+    user_email = user.get("email")
+    wallet_id = user.get("wallet_id")
+    access_token = user.get("access_token")
+    near_account_id = user.get("near_account_id")
+    
+    if not near_account_id:
+        return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
+    
+    try:
+        # Auto-complete username
+        member_id = normalize_account_id(member_id)
+        
+        # Get signing account from Shade TEE
+        acc = await get_user_signer(
+            near_account_id=near_account_id,
+            user_email=user_email,
+            wallet_id=wallet_id,
+            access_token=access_token
+        )
+        
+        # Estimate fee
+        fee = await _estimate_fee("revoke_group_member")
+        
+        logger.info(f"REST: Revoke member {member_id} from {group_id} by {near_account_id}")
+        
+        result = await acc.function_call(
+            contract_id=CONTRACT_ID,
+            method_name="revoke_group_member",
+            args={"group_id": group_id, "user_id": member_id},
+            amount=fee,
+            gas=100_000_000_000_000
+        )
+        
+        return JSONResponse({"message": f"Revoked {member_id} from group '{group_id}' (key rotated)"})
+    
+    except Exception as e:
+        logger.error(f"REST revoke_group_member error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.tool
 async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:

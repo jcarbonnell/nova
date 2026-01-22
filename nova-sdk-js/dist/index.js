@@ -99,6 +99,7 @@ class NovaSdk {
     provider;
     tokenCache = null;
     authUrl;
+    apiKey = null;
     accountId;
     contractId;
     mcpUrl;
@@ -132,19 +133,11 @@ class NovaSdk {
         }
         this.accountId = accountId;
         this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
+        this.apiKey = config.apiKey || null;
         this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
         this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
         this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
         this.provider = new providers_1.JsonRpcProvider({ url: this.rpcUrl });
-        // Token handling
-        if (config.sessionToken) {
-            // Pre-fetched token provided
-            this.tokenCache = {
-                token: config.sessionToken,
-                expiresAt: Date.now() + 23 * 60 * 60 * 1000, // Assume ~23h remaining
-            };
-        }
-        // Otherwise tokenCache stays null, will auto-fetch on first API call
         // Auto-detect network
         this.networkId = this.detectNetwork();
         // Validate mainnet contract
@@ -169,9 +162,15 @@ class NovaSdk {
         }
         // Fetch new token
         console.log('🔑 Fetching session token for:', this.accountId);
+        if (!this.apiKey) {
+            throw new NovaError('API key required. Get yours at nova-sdk.com');
+        }
         try {
             const response = await axios_1.default.post(`${this.authUrl}/api/auth/session-token`, { account_id: this.accountId }, {
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': this.apiKey,
+                },
                 timeout: 15000,
             });
             const { token, expires_in, account_id } = response.data;

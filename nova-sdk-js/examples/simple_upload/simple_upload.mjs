@@ -8,6 +8,7 @@
 
 import { NovaSdk } from 'nova-sdk-js';
 import { Buffer } from 'buffer';
+import 'dotenv/config';
 
 async function main() {
   const accountId = process.env.NOVA_ACCOUNT_ID;

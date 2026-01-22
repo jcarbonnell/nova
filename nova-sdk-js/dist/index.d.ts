@@ -1,6 +1,6 @@
 import { Buffer } from 'buffer';
 export interface NovaSdkConfig {
-    sessionToken?: string;
+    apiKey?: string;
     authUrl?: string;
     rpcUrl?: string;
     contractId?: string;
@@ -35,6 +35,7 @@ export declare class NovaSdk {
     private provider;
     private tokenCache;
     private authUrl;
+    private apiKey;
     readonly accountId: string;
     readonly contractId: string;
     readonly mcpUrl: string;

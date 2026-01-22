@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.0.2
+**Version:** 1.0.3
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -12,7 +12,7 @@ A JavaScript/TypeScript SDK for NOVA's secure, decentralized file-sharing primit
 - 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
 - ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
-- 🛡️ **Session-Based Auth** - OAuth flow (no private key handling)
+- 🛡️ **API Key Auth** - Secure authentication via API keys (get yours at nova-sdk.com)
 - 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
@@ -40,14 +40,17 @@ Typical costs (mainnet):
 ### Prerequisites
 
 1. **Create a NOVA account** at [nova-sdk.com](https://nova-sdk.com)
-2. **Fund your account** with NEAR tokens for transaction fees
+2. **Generate an API key** from the "Manage Account" menu
+3. **Fund your account** with NEAR tokens for transaction fees
 
 ### Simple upload/retrieve example
 ```typescript
 import { NovaSdk } from 'nova-sdk-js';
 
-// provide your account ID
-const sdk = new NovaSdk('alice.nova-sdk.near');
+// Initialize with your account ID and API key
+const sdk = new NovaSdk('alice.nova-sdk.near', {
+  apiKey: process.env.NOVA_API_KEY
+});
 
 // Register group (you become owner)
 await sdk.registerGroup('confidential-docs');
@@ -62,28 +65,27 @@ console.log('Retrieved:', data.toString());
 ```
 
 That's it! The SDK automatically:
-- Fetches a session token from nova-sdk.com
-- Refreshes the token before expiry (24h)
+- Authenticates using your API key
+- Manages session tokens (auto-refresh before 24h expiry)
 - Handles all encryption/decryption client-side
 
 ## Configuration Options
 ```typescript
-// Default (mainnet, auto-token)
-const sdk = new NovaSdk('alice.nova-sdk.near');
-
-// With manual token (if you prefer to manage tokens yourself)
+// Standard usage (mainnet)
 const sdk = new NovaSdk('alice.nova-sdk.near', {
-  sessionToken: 'eyJhbG...',  // Optional: provide your own token
+  apiKey: process.env.NOVA_API_KEY  // Required: get yours at nova-sdk.com
 });
 
 // Testnet configuration
 const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+  apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
   contractId: 'nova-sdk-5.testnet',
 });
 
 // Custom MCP server (advanced)
 const sdk = new NovaSdk('alice.nova-sdk.near', {
+  apiKey: process.env.NOVA_API_KEY,
   mcpUrl: 'https://your-mcp-server.com',
   authUrl: 'https://your-auth-server.com',
 });
@@ -163,24 +165,33 @@ const fee = await sdk.estimateFee('register_group');
 
 **Key point:** Plaintext data and encryption keys never travel together. The MCP server never sees your unencrypted files.
 
-## Token Management
+## Authentication
 
-The SDK handles tokens automatically, but you can also manage them manually:
+The SDK uses API keys for secure authentication. Get your key at [nova-sdk.com](https://nova-sdk.com):
+
+1. Create or log into your NOVA account
+2. Click "Manage Account"
+3. Click "Generate API Key"
+4. Copy the key (shown only once!)
+```bash
+# Store in .env (never commit to git!)
+NOVA_ACCOUNT_ID=alice.nova-sdk.near
+NOVA_API_KEY=nova_sk_xxxxxxxxxxxxxxxxxxxxx
+```
 ```typescript
-// Force refresh token
+// Use environment variables
+const sdk = new NovaSdk(process.env.NOVA_ACCOUNT_ID, {
+  apiKey: process.env.NOVA_API_KEY
+});
+
+// Force refresh session token
 await sdk.refreshToken();
 
-// Get network info (includes auth URL)
+// Get network info
 const info = sdk.getNetworkInfo();
-console.log(info);
-// {
-//   networkId: 'mainnet',
-//   contractId: 'nova-sdk.near',
-//   mcpUrl: 'https://nova-mcp.fastmcp.app',
-//   authUrl: 'https://nova-sdk.com',
-//   rpcUrl: 'https://rpc.mainnet.near.org'
-// }
 ```
+
+**Note:** One API key per account. Generating a new key invalidates the old one.
 
 ## Error Handling
 
