@@ -29,6 +29,7 @@ nova-sdk-js/node_modules/
 nova-sdk-js/.env
 nova-sdk-js/npm-debug.log
 nova-sdk-js/yarn-error.log
+nova-sdk-js/examples/simple_upload/node_modules/
 
 # NOVA sdk RS
 nova-sdk-rs/Cargo.lock

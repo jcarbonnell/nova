@@ -6,7 +6,6 @@
     "test": "node simple_upload.mjs"
   },
   "dependencies": {
-    "nova-sdk-js": "^1.0.1"
+    "nova-sdk-js": "^1.0.2"
   }
 }
-

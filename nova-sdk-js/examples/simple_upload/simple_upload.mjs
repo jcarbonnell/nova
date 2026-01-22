@@ -10,26 +10,19 @@ import { NovaSdk } from 'nova-sdk-js';
 import { Buffer } from 'buffer';
 
 async function main() {
-  const accountId = process.env.TEST_NOVA_ACCOUNT_ID;
+  const accountId = process.env.NOVA_ACCOUNT_ID;
+  const apiKey = process.env.NOVA_API_KEY;
 
   if (!accountId) {
     console.error('❌ Set TEST_NOVA_ACCOUNT_ID environment variable');
     console.error('   Example: export TEST_NOVA_ACCOUNT_ID="alice.nova-sdk.near"');
     process.exit(1);
   }
-
-  // Detect testnet vs mainnet from account suffix
-  const isTestnet = accountId.includes('.testnet');
   
-  console.log('🚀 NOVA SDK Test\n');
+  console.log('🚀 NOVA SDK Test (mainnet)\n');
 
   // Initialize SDK - no sessionToken needed!
-  const sdk = isTestnet
-    ? new NovaSdk(accountId, {
-        rpcUrl: 'https://rpc.mainnet.near.org',
-        contractId: 'nova-sdk.mainnet',
-      })
-    : new NovaSdk(accountId);
+  const sdk = new NovaSdk(accountId);
 
   console.log('📋 Configuration:');
   console.log(`   Account:  ${sdk.accountId}`);
@@ -38,7 +31,7 @@ async function main() {
 
   const groupId = 'sdk_test_group';
 
-  // 1. Auth check (this triggers auto token fetch)
+  // 1. Auth check (triggers auto token fetch)
   console.log('\n🔐 Authenticating...');
   try {
     const status = await sdk.authStatus(groupId);

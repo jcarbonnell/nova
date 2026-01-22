@@ -89,6 +89,7 @@ userKeysDb.exec(`
     public_key TEXT NOT NULL,
     network TEXT NOT NULL,
     wallet_id TEXT,
+    api_key_hash TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -128,6 +129,34 @@ function decryptKey(enc: string): string {
   let decrypted = decipher.update(encrypted);
   decrypted = Buffer.concat([decrypted, decipher.final()]);
   return decrypted.toString();
+}
+
+// ========== API KEY HELPERS ==========
+
+// Base62 charset for URL-safe keys
+const BASE62_CHARSET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+/**
+ * Generate a secure API key with nova_sk_ prefix
+ * Format: nova_sk_ + 32 bytes encoded as base62
+ */
+function generateApiKey(): string {
+  const randomBytes = crypto.randomBytes(32);
+  let encoded = '';
+  
+  // Convert bytes to base62
+  for (let i = 0; i < randomBytes.length; i++) {
+    encoded += BASE62_CHARSET[randomBytes[i] % 62];
+  }
+  
+  return `nova_sk_${encoded}`;
+}
+
+/**
+ * Hash an API key for storage (SHA-256)
+ */
+function hashApiKey(apiKey: string): string {
+  return crypto.createHash('sha256').update(apiKey).digest('hex');
 }
 
 const userKeys = new Hono();
@@ -180,8 +209,8 @@ userKeys.post('/store', async (c) => {
     
     userKeysDb.prepare(`
       INSERT OR REPLACE INTO user_account_keys 
-      (user_email, user_sub, account_id, encrypted_private_key, public_key, network, wallet_id, created_at, updated_at) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (user_email, user_sub, account_id, encrypted_private_key, public_key, network, wallet_id, api_key_hash, created_at, updated_at) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `).run(email, verifiedUser.sub, account_id, encryptedPrivateKey, public_key, network, wallet_id || null, now, now);
     
     const info = await agentInfo();
@@ -387,16 +416,228 @@ userKeys.post('/check', async (c) => {
   }
 });
 
+// ========== GENERATE API KEY ENDPOINT ==========
+userKeys.post('/generate-api-key', async (c) => {
+  try {
+    const { email, auth_token, account_id } = await c.req.json();
+    
+    let targetAccountId: string;
+    
+    // Wallet users: Generate by account_id
+    if (account_id && !auth_token) {
+      // Verify account exists
+      const row = userKeysDb.prepare(`
+        SELECT account_id FROM user_account_keys WHERE account_id = ?
+      `).get(account_id) as any;
+      
+      if (!row) {
+        return c.json({ error: 'Account not found' }, 404);
+      }
+      
+      targetAccountId = account_id;
+      console.log('Generating API key for wallet user:', account_id);
+    }
+    // Email users: Generate by email + auth_token
+    else if (email && auth_token) {
+      let verifiedUser;
+      try {
+        verifiedUser = await verifyAuth0Token(auth_token);
+      } catch (err) {
+        console.error('Token verification failed:', err);
+        return c.json({ error: 'Invalid or expired authentication token' }, 401);
+      }
+      
+      if (verifiedUser.email !== email) {
+        console.error('Email mismatch');
+        return c.json({ error: 'Unauthorized' }, 403);
+      }
+      
+      // Get account_id for this email user
+      const row = userKeysDb.prepare(`
+        SELECT account_id FROM user_account_keys 
+        WHERE user_sub = ? AND user_email = ?
+      `).get(verifiedUser.sub, email) as any;
+      
+      if (!row) {
+        return c.json({ error: 'Account not found' }, 404);
+      }
+      
+      targetAccountId = row.account_id;
+      console.log('Generating API key for email user:', email, '->', targetAccountId);
+    }
+    else {
+      return c.json({ error: 'Missing required fields: (email + auth_token) or account_id' }, 400);
+    }
+    
+    // Generate new API key
+    const apiKey = generateApiKey();
+    const apiKeyHash = hashApiKey(apiKey);
+    const now = new Date().toISOString();
+    
+    // Update the account with new API key hash (replaces any existing key)
+    const result = userKeysDb.prepare(`
+      UPDATE user_account_keys 
+      SET api_key_hash = ?, updated_at = ?
+      WHERE account_id = ?
+    `).run(apiKeyHash, now, targetAccountId);
+    
+    if (result.changes === 0) {
+      return c.json({ error: 'Failed to update account' }, 500);
+    }
+    
+    console.log('✅ API key generated for:', targetAccountId);
+    
+    // Return the plaintext key (only time it's ever shown)
+    return c.json({
+      success: true,
+      api_key: apiKey,
+      account_id: targetAccountId,
+      message: 'Save this key securely — it will not be shown again.',
+    });
+    
+  } catch (error) {
+    console.error('Generate API key error:', error);
+    return c.json({ 
+      error: 'Failed to generate API key',
+      details: error instanceof Error ? error.message : 'Unknown'
+    }, 500);
+  }
+});
+
+// ========== VERIFY API KEY ENDPOINT ==========
+userKeys.post('/verify-api-key', async (c) => {
+  try {
+    const { api_key, account_id } = await c.req.json();
+    
+    if (!api_key || !account_id) {
+      return c.json({ error: 'Missing api_key or account_id' }, 400);
+    }
+    
+    // Validate API key format
+    if (!api_key.startsWith('nova_sk_') || api_key.length < 40) {
+      return c.json({ valid: false, error: 'Invalid API key format' }, 401);
+    }
+    
+    // Hash the provided key
+    const providedHash = hashApiKey(api_key);
+    
+    // Lookup account and compare hash
+    const row = userKeysDb.prepare(`
+      SELECT account_id, api_key_hash, network 
+      FROM user_account_keys 
+      WHERE account_id = ?
+    `).get(account_id) as any;
+    
+    if (!row) {
+      return c.json({ valid: false, error: 'Account not found' }, 404);
+    }
+    
+    if (!row.api_key_hash) {
+      return c.json({ valid: false, error: 'No API key configured for this account' }, 401);
+    }
+    
+    // Constant-time comparison to prevent timing attacks
+    const storedHashBuffer = Buffer.from(row.api_key_hash, 'hex');
+    const providedHashBuffer = Buffer.from(providedHash, 'hex');
+    
+    if (storedHashBuffer.length !== providedHashBuffer.length || 
+        !crypto.timingSafeEqual(storedHashBuffer, providedHashBuffer)) {
+      console.warn('Invalid API key attempt for:', account_id);
+      return c.json({ valid: false, error: 'Invalid API key' }, 401);
+    }
+    
+    console.log('✅ API key verified for:', account_id);
+    
+    return c.json({
+      valid: true,
+      account_id: row.account_id,
+      network: row.network,
+    });
+    
+  } catch (error) {
+    console.error('Verify API key error:', error);
+    return c.json({ 
+      valid: false,
+      error: 'Verification failed',
+      details: error instanceof Error ? error.message : 'Unknown'
+    }, 500);
+  }
+});
+
+// ========== CHECK API KEY STATUS ENDPOINT ==========
+userKeys.post('/has-api-key', async (c) => {
+  try {
+    const { email, auth_token, account_id } = await c.req.json();
+    
+    let targetAccountId: string;
+    
+    // Wallet users: Check by account_id
+    if (account_id && !auth_token) {
+      targetAccountId = account_id;
+    }
+    // Email users: Check by email + auth_token
+    else if (email && auth_token) {
+      let verifiedUser;
+      try {
+        verifiedUser = await verifyAuth0Token(auth_token);
+      } catch (err) {
+        return c.json({ error: 'Invalid or expired authentication token' }, 401);
+      }
+      
+      if (verifiedUser.email !== email) {
+        return c.json({ error: 'Unauthorized' }, 403);
+      }
+      
+      const row = userKeysDb.prepare(`
+        SELECT account_id FROM user_account_keys 
+        WHERE user_sub = ? AND user_email = ?
+      `).get(verifiedUser.sub, email) as any;
+      
+      if (!row) {
+        return c.json({ error: 'Account not found' }, 404);
+      }
+      
+      targetAccountId = row.account_id;
+    }
+    else {
+      return c.json({ error: 'Missing required fields' }, 400);
+    }
+    
+    // Check if API key hash exists
+    const row = userKeysDb.prepare(`
+      SELECT api_key_hash FROM user_account_keys WHERE account_id = ?
+    `).get(targetAccountId) as any;
+    
+    if (!row) {
+      return c.json({ error: 'Account not found' }, 404);
+    }
+    
+    return c.json({
+      has_api_key: !!row.api_key_hash,
+      account_id: targetAccountId,
+    });
+    
+  } catch (error) {
+    console.error('Check API key status error:', error);
+    return c.json({ 
+      error: 'Failed to check API key status',
+      details: error instanceof Error ? error.message : 'Unknown'
+    }, 500);
+  }
+});
+
 // Health check
 userKeys.get('/', async (c) => {
   try {
     const info = await agentInfo();
     const count = userKeysDb.prepare('SELECT COUNT(*) as count FROM user_account_keys').get() as any;
+    const apiKeyCount = userKeysDb.prepare('SELECT COUNT(*) as count FROM user_account_keys WHERE api_key_hash IS NOT NULL').get() as any;
     
     return c.json({
       status: 'healthy',
       service: 'user-account-keys',
       stored_accounts: count.count,
+      accounts_with_api_keys: apiKeyCount.count,
       checksum: info.checksum,
       auth: 'Auth0 JWT verified (idToken or accessToken)'
     });
