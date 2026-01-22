@@ -1320,6 +1320,67 @@ async def finalize_upload_endpoint(request: Request):
         logger.error(f"HTTP finalize upload error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
     
+def get_authenticated_user_from_request(request: Request) -> dict:
+    """
+    Get user info from request headers (for REST endpoints).
+    """
+    headers = dict(request.headers)
+    user_email = headers.get("x-user-email")
+    account_id = headers.get("x-account-id")
+    wallet_id = headers.get("x-wallet-id")
+    auth_header = headers.get("authorization", "")
+    
+    # Check for SDK session token
+    if auth_header.startswith("Bearer ") and SESSION_TOKEN_SECRET:
+        token = auth_header[7:]
+        try:
+            payload = verify_sdk_session_token(token)
+            verified_account_id = payload.get("account_id")
+            claimed_account_id = headers.get("x-account-id")
+            
+            # Security: Verify claimed account matches JWT
+            if claimed_account_id and claimed_account_id != verified_account_id:
+                logger.warning(f"SDK account mismatch: claimed={claimed_account_id}, token={verified_account_id}")
+                raise ValueError("Account ID mismatch")
+            
+            # Extract user type from subject
+            subject = payload.get("sub", "")
+            wallet_id = subject[7:] if subject.startswith("wallet|") else None
+            email = subject[6:] if subject.startswith("email|") else None
+            
+            logger.info(f"REST: SDK session authenticated: {verified_account_id}")
+            return {
+                "email": email,
+                "wallet_id": wallet_id,
+                "session_token": hashlib.sha256(token.encode()).hexdigest(),
+                "near_account_id": verified_account_id,
+                "access_token": token,
+            }
+        except ValueError as e:
+            raise ValueError(str(e))
+    
+    if not account_id:
+        raise ValueError("Missing X-Account-Id header - user not connected")
+    
+    # Extract token
+    access_token = None
+    if auth_header.startswith("Bearer "):
+        access_token = auth_header[7:]
+    
+    if not user_email and not wallet_id:
+        raise ValueError("Auth required: missing X-User-Email or X-Wallet-Id header")
+    
+    identifier = wallet_id or user_email or account_id
+    session_token = hashlib.sha256(f"{identifier}:{access_token or 'wallet-only'}".encode()).hexdigest()
+    
+    return {
+        "email": user_email or None,
+        "wallet_id": wallet_id or None,
+        "session_token": session_token,
+        "near_account_id": account_id,
+        "access_token": access_token,
+    }
+
 # ========== REST WRAPPERS FOR SDK ==========
 # These endpoints allow the SDK to call MCP tools via simple REST API
 
@@ -1334,7 +1395,7 @@ async def auth_status_rest(request: Request):
     group_id = body.get("group_id", "test_group")
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
@@ -1382,7 +1443,7 @@ async def prepare_upload_rest(request: Request):
         return JSONResponse({"error": "Required: group_id, filename"}, status_code=400)
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
@@ -1454,7 +1515,7 @@ async def prepare_retrieve_rest(request: Request):
         return JSONResponse({"error": f"Invalid CID format: {ipfs_hash}"}, status_code=400)
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
@@ -1509,7 +1570,7 @@ async def register_group_rest(request: Request):
         return JSONResponse({"error": "Required: group_id"}, status_code=400)
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
@@ -1595,7 +1656,7 @@ async def add_group_member_rest(request: Request):
         return JSONResponse({"error": "Required: group_id, member_id"}, status_code=400)
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
@@ -1654,7 +1715,7 @@ async def revoke_group_member_rest(request: Request):
         return JSONResponse({"error": "Required: group_id, member_id"}, status_code=400)
     
     try:
-        user = get_authenticated_user()
+        user = get_authenticated_user_from_request(request)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=401)
     
