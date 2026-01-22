@@ -21,8 +21,8 @@ async function main() {
   
   console.log('🚀 NOVA SDK Test (mainnet)\n');
 
-  // Initialize SDK - no sessionToken needed!
-  const sdk = new NovaSdk(accountId);
+  // Initialize SDK with API key
+  const sdk = new NovaSdk(accountId, { apiKey });
 
   console.log('📋 Configuration:');
   console.log(`   Account:  ${sdk.accountId}`);

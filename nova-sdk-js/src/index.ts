@@ -10,11 +10,11 @@ const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
 const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
 
 export interface NovaSdkConfig {
-  // Option 1: Manually-fetched token (old behavior, still available)
-  sessionToken?: string;
+  // API key for authentication (get yours at nova-sdk.com)
+  apiKey?: string;
   
-  // Option 2: Auto-fetch token (new behavior: provide accountId, SDK handles token fetch)
-  authUrl?: string;  // Default: https://nova-sdk.com
+  // Infrastructure config
+  authUrl?: string;
   
   // Network config
   rpcUrl?: string;
@@ -206,6 +206,7 @@ export class NovaSdk {
   private provider: JsonRpcProvider;
   private tokenCache: TokenCache | null = null;
   private authUrl: string;
+  private apiKey: string | null = null;
 
   public readonly accountId: string;
   public readonly contractId: string;
@@ -242,20 +243,11 @@ export class NovaSdk {
 
     this.accountId = accountId;
     this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
+    this.apiKey = config.apiKey || null;
     this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
     this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
     this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
     this.provider = new JsonRpcProvider({ url: this.rpcUrl });
-
-    // Token handling
-    if (config.sessionToken) {
-      // Pre-fetched token provided
-      this.tokenCache = {
-        token: config.sessionToken,
-        expiresAt: Date.now() + 23 * 60 * 60 * 1000, // Assume ~23h remaining
-      };
-    }
-    // Otherwise tokenCache stays null, will auto-fetch on first API call
   
     // Auto-detect network
     this.networkId = this.detectNetwork();
@@ -288,12 +280,19 @@ export class NovaSdk {
     // Fetch new token
     console.log('🔑 Fetching session token for:', this.accountId);
 
+    if (!this.apiKey) {
+      throw new NovaError('API key required. Get yours at nova-sdk.com');
+    }
+
     try {
       const response = await axios.post(
         `${this.authUrl}/api/auth/session-token`,
         { account_id: this.accountId },
         { 
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-API-Key': this.apiKey,
+          },
           timeout: 15000,
         }
       );
