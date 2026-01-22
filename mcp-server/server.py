@@ -337,13 +337,16 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
     if user_email and access_token:
         shade_payload["email"] = user_email
         shade_payload["auth_token"] = access_token
-    # ONLY send wallet_id for wallet users
+    # For wallet users, use account_id lookup
     elif wallet_id:
         shade_payload["account_id"] = near_account_id
+    # For API key users (no email, no wallet_id), use account_id lookup
+    elif near_account_id:
+        shade_payload["account_id"] = near_account_id
     else:
-        raise ValueError("Need either (email + auth_token) or wallet_id")      
+        raise ValueError("Need either (email + auth_token), wallet_id, or account_id")      
     
-    logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}")
+    logger.info(f"Fetching signing key from Shade TEE for: email={user_email}, wallet_id={wallet_id}, account_id={near_account_id}")
     
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
