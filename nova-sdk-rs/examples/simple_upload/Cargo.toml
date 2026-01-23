@@ -1,7 +1,14 @@
 [package]
-name = "nova-sdk-rs"
-version = "1.0.3"
+name = "nova-sdk-test"
+version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "simple_upload"
+path = "simple_upload.rs"
+
 [dependencies]
+nova-sdk-rs = "1.0.3"
 chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+dotenv = "0.15"

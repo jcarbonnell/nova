@@ -10,25 +10,18 @@
 use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 use std::env;
 use std::error::Error;
+use dotenv::dotenv;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Load from env
+    // Load .env file
+    dotenv().ok();
+
+    // load from env
     let account_id = env::var("NOVA_ACCOUNT_ID")
         .expect("NOVA_ACCOUNT_ID required (e.g., alice.nova-sdk.near)");
     let api_key = env::var("NOVA_API_KEY")
         .expect("NOVA_API_KEY required (get from nova-sdk.com)");
-
-    // Optional: custom config for testnet
-    let config = if account_id.contains("testnet") {
-        NovaSdkConfig {
-            rpc_url: "https://rpc.testnet.near.org".to_string(),
-            contract_id: "nova-sdk-5.testnet".to_string(),
-            mcp_url: "https://nova-mcp.fastmcp.app".to_string(),
-        }
-    } else {
-        NovaSdkConfig::default() // Mainnet
-    };
 
     // Initialize SDK
     let config = NovaSdkConfig::default().with_api_key(&api_key);

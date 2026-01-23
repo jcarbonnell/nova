@@ -35,6 +35,8 @@ nova-sdk-js/examples/simple_upload/node_modules/
 nova-sdk-rs/Cargo.lock
 nova-sdk-rs/target
 nova-sdk-rs/.env
+nova-sdk-rs/examples/simple_upload/target/
+nova-sdk-rs/examples/simple_upload/Cargo.lock
 
 # Shade agent
 shade-agent/node_modules/
