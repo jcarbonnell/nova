@@ -2,8 +2,8 @@
 // Test NOVA SDK upload/retrieve with client-side encryption
 //
 // Environment variables required:
-//   TEST_NOVA_ACCOUNT_ID - Your NOVA-managed account (e.g., "alice.nova-sdk.near")
-//   TEST_SESSION_TOKEN   - JWT from nova-sdk.com/api/auth/session-token
+//   NOVA_ACCOUNT_ID - Your NOVA-managed account (e.g., "alice.nova-sdk.near")
+//   NOVA_API_KEY    - API key from nova-sdk.com (Manage Account > Generate API Key)
 //
 // Run with: cargo run --example simple_upload
 
@@ -14,10 +14,10 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load from env
-    let account_id = env::var("TEST_NOVA_ACCOUNT_ID")
-        .expect("TEST_NOVA_ACCOUNT_ID required (e.g., alice.nova-sdk.near)");
-    let session_token = env::var("TEST_SESSION_TOKEN")
-        .expect("TEST_SESSION_TOKEN required (get from nova-sdk.com/api/auth/session-token)");
+    let account_id = env::var("NOVA_ACCOUNT_ID")
+        .expect("NOVA_ACCOUNT_ID required (e.g., alice.nova-sdk.near)");
+    let api_key = env::var("NOVA_API_KEY")
+        .expect("NOVA_API_KEY required (get from nova-sdk.com)");
 
     // Optional: custom config for testnet
     let config = if account_id.contains("testnet") {
@@ -31,13 +31,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // Initialize SDK
-    let sdk = NovaSdk::with_config(&account_id, &session_token, config)?;
+    let config = NovaSdkConfig::default().with_api_key(&api_key);
+    let sdk = NovaSdk::with_config(&account_id, config)?;
     
-    println!("🔧 SDK initialized");
+    println!("📋 Configuration:");
     println!("   Account: {}", sdk.account_id());
-    println!("   Contract: {}", sdk.contract_id());
     println!("   Network: {}", sdk.network_id());
-    println!("   MCP: {}", sdk.mcp_url());
+    println!("   Contract: {}", sdk.contract_id());
 
     let group_id = "sdk_test_group_rs";
 
@@ -74,8 +74,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Prepare test data
-    let test_data = b"Hello from NOVA SDK Rust v1.0! \xF0\x9F\x94\x90 Client-side encrypted on IPFS.";
-    let filename = "hello_sdk_test_rs.txt";
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let test_content = format!(
+        "Hello NOVA! 🔐\nTimestamp: {}\nThis file is encrypted client-side with AES-256-GCM.",
+        timestamp
+    );
+    let test_data = test_content.as_bytes();
+    let filename = "test_file.txt";
     
     println!("\n📤 Uploading file (client-side encryption)...");
     println!("   Filename: {}", filename);
@@ -146,18 +151,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => println!("   Could not fetch transactions: {}", e),
     }
 
-    println!("\n🎉 SDK test complete!");
-    println!("\n📋 Summary:");
-    println!("   ✅ Authentication working");
-    println!("   ✅ Client-side encryption (AES-256-GCM)");
-    println!("   ✅ IPFS upload via MCP");
-    println!("   ✅ NEAR transaction recording");
-    println!("   ✅ Client-side decryption");
-    println!("   ✅ Data integrity verified");
-    println!("\nℹ️  Your file is now:");
-    println!("   - Encrypted locally (key never sent with data)");
-    println!("   - Stored on IPFS: {}", upload_result.cid);
-    println!("   - Recorded on NEAR: {}", upload_result.trans_id);
-    
+    println!("\n{}", "═".repeat(50));
+    println!("🎉 SUCCESS! End-to-end test complete.");
+    println!("{}", "═".repeat(50));
+    println!("\nYour file is now:");
+    println!("  🔐 Encrypted with AES-256-GCM (client-side)");
+    println!("  📦 Stored on IPFS: {}", upload_result.cid);
+    println!("  ⛓️  Recorded on NEAR: {}", upload_result.trans_id);
     Ok(())
 }

@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.0.1 (Mainnet)  
+**Version:** 1.0.3
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -12,7 +12,7 @@ A Rust SDK for NOVA's secure, decentralized file-sharing primitive on NEAR. NOVA
 - 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
 - 🌐 **IPFS Storage** - Decentralized file storage via Pinata
 - ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
-- 🛡️ **Session-Based Auth** - OAuth flow (no private key handling)
+- 🛡️ **API Key Auth** - Secure authentication via API keys (get yours at nova-sdk.com)
 - 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
@@ -23,8 +23,9 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.0.1"
+nova-sdk-rs = "1.0.3"
 tokio = { version = "1", features = ["full"] }
+chrono = "0.4"
 ```
 
 ## ⚠️ Mainnet Notice
@@ -43,18 +44,20 @@ For development, use [testnet configuration](#-testnet-usage).
 ### 1. Prerequisites
 
 1. **Create a NOVA account** at [nova-sdk.com](https://nova-sdk.com)
-2. **Fund your account** with NEAR tokens for transaction fees
+2. **Generate an API key** from the "Manage Account" menu
+3. **Fund your account** with NEAR tokens for transaction fees
 
 ### 2. Basic Usage
 ```rust
-use nova_sdk_rs::NovaSdk;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 use std::fs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK - automatic token management!
-    // Just provide your account ID, SDK handles authentication
-    let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+    // Initialize SDK with API key
+    let config = NovaSdkConfig::default()
+        .with_api_key(&std::env::var("NOVA_API_KEY")?);
+    let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
     // For testnet development:
     // let sdk = NovaSdk::testnet("alice.nova-sdk-5.testnet")?;
@@ -130,42 +133,49 @@ for tx in txs {
 
 ### Authentication
 
-The SDK handles session tokens automatically:
+The SDK uses API keys for secure authentication. Get your key at [nova-sdk.com](https://nova-sdk.com):
 
-1. **Automatic fetching** - On first API call, SDK fetches a token from `nova-sdk.com`
-2. **Automatic refresh** - Tokens are cached and refreshed before expiry (24h validity)
-3. **Manual refresh** - Call `sdk.refresh_token().await?` if you encounter auth errors
+1. Create or log into your NOVA account
+2. Click "Manage Account"  
+3. Click "Generate API Key"
+4. Copy the key (shown only once!)
+```bash
+# Store in .env (never commit to git!)
+NOVA_ACCOUNT_ID=alice.nova-sdk.near
+NOVA_API_KEY=nova_sk_xxxxxxxxxxxxxxxxxxxxx
+```
 ```rust
-// SDK fetches token automatically on first use
-let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 
-// Or provide a pre-fetched token
-let config = NovaSdkConfig::default().with_token("your-token-here");
+// Initialize with API key
+let config = NovaSdkConfig::default()
+    .with_api_key(&std::env::var("NOVA_API_KEY")?);
 let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
-// Force refresh if needed
+// Force refresh session token if needed
 sdk.refresh_token().await?;
 ```
+
+**Note:** One API key per account. Generating a new key invalidates the old one.
 
 ## API Reference
 
 ### Initialization
 
 ```rust
-// Simplest - automatic token management (mainnet)
-let sdk = NovaSdk::new("alice.nova-sdk.near")?;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 
-// Testnet
-let sdk = NovaSdk::testnet("alice.nova-sdk-5.testnet")?;
-
-// Custom config
-use nova_sdk_rs::NovaSdkConfig;
-
+// Standard usage (mainnet) - API key required
 let config = NovaSdkConfig::default()
-    .with_token("pre-fetched-token");  // Optional: provide your own token
+    .with_api_key(&std::env::var("NOVA_API_KEY")?);
 let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
-// Force token refresh if needed
+// Testnet
+let config = NovaSdkConfig::testnet()
+    .with_api_key(&std::env::var("NOVA_API_KEY")?);
+let sdk = NovaSdk::with_config("alice.nova-sdk-5.testnet", config)?;
+
+// Force session token refresh if needed
 sdk.refresh_token().await?;
 ```
 
@@ -228,11 +238,11 @@ match sdk.upload("my_group", b"data", "file.txt").await {
 
 ## 🔐 Security Considerations
 
-1. **Never commit session tokens** - Use environment variables
+1. **Never commit API keys** - Use environment variables
 2. **Verify network** - Check `sdk.network_id()` before operations
 3. **Validate file hashes** - Compare after retrieval
 4. **Use TLS** - Always connect over secure connections
-5. **Rotate tokens** - Refresh JWT tokens regularly
+5. **Regenerate API keys** - If compromised, generate a new key at nova-sdk.com
 6. **Client-side encryption** - Keys are fetched from TEE and used locally; encrypted data travels separately from keys
 
 ## Examples

@@ -133,7 +133,7 @@ struct TokenCache {
 // Configuration for NovaSdk
 #[derive(Clone)]
 pub struct NovaSdkConfig {
-    pub session_token: Option<String>,
+    pub api_key: Option<String>,
     pub auth_url: String,
     pub rpc_url: String,
     pub contract_id: String,
@@ -143,7 +143,7 @@ pub struct NovaSdkConfig {
 impl Default for NovaSdkConfig {
     fn default() -> Self {
         Self {
-            session_token: None,
+            api_key: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: DEFAULT_RPC_URL.to_string(),
             contract_id: DEFAULT_CONTRACT_ID.to_string(),
@@ -156,7 +156,7 @@ impl NovaSdkConfig {
     /// Create config for testnet
     pub fn testnet() -> Self {
         Self {
-            session_token: None,
+            api_key: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: "https://rpc.testnet.near.org".to_string(),
             contract_id: "nova-sdk-5.testnet".to_string(),
@@ -169,9 +169,9 @@ impl NovaSdkConfig {
         Self::default()
     }
 
-    /// Set a pre-fetched session token
-    pub fn with_token(mut self, token: &str) -> Self {
-        self.session_token = Some(token.to_string());
+    /// Set the API key for authentication
+    pub fn with_api_key(mut self, api_key: &str) -> Self {
+        self.api_key = Some(api_key.to_string());
         self
     }
 }
@@ -277,6 +277,7 @@ pub struct NovaSdk {
     account_id: String,
     contract_id: AccountId,
     auth_url: String,
+    api_key: Option<String>,
     mcp_url: String,
     rpc_url: String,
     network_id: String,
@@ -345,6 +346,7 @@ impl NovaSdk {
             account_id: account_id.to_string(),
             contract_id,
             auth_url: config.auth_url,
+            api_key: config.api_key,
             mcp_url: config.mcp_url,
             rpc_url: config.rpc_url,
             network_id,
@@ -355,6 +357,11 @@ impl NovaSdk {
     // Token Management
     /// Get a valid session token, fetching or refreshing if needed.
     async fn get_session_token(&self) -> Result<String, NovaError> {
+        // Require API key
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            NovaError::Auth("API key required. Get yours at nova-sdk.com".to_string())
+        })?;
+        
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -377,6 +384,7 @@ impl NovaSdk {
             .http_client
             .post(format!("{}/api/auth/session-token", self.auth_url))
             .header("Content-Type", "application/json")
+            .header("X-API-Key", api_key)
             .json(&json!({ "account_id": self.account_id }))
             .timeout(std::time::Duration::from_secs(15))
             .send()
