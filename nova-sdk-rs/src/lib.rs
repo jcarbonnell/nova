@@ -8,7 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde_json::json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Sha256, Digest};
 use reqwest::Client;
 use aes_gcm::{
@@ -324,21 +324,6 @@ impl NovaSdk {
             eprintln!("📋 Contract: {}", contract_id);
             eprintln!("💰 Check costs at: https://github.com/jcarbonnell/nova");
         }
-
-        // Initialize token cache
-        let token_cache = if let Some(token) = config.session_token {
-            // Pre-fetched token provided - assume ~23h remaining
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            Some(TokenCache {
-                token,
-                expires_at: now_ms + 23 * 60 * 60 * 1000,
-            })
-        } else {
-            None
-        };
 
         Ok(Self {
             client: JsonRpcClient::connect(&config.rpc_url),
