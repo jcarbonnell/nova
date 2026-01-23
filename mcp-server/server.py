@@ -679,7 +679,7 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
     """
     contract_id = CONTRACT_ID
 
-    if not user_email and not wallet_id:
+    if not user_email and not wallet_id and not user_id:
         raise ValueError("Either user_email or wallet_id required")
     
     if not user_id:
