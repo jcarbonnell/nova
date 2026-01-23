@@ -335,7 +335,7 @@ impl NovaSdk {
             mcp_url: config.mcp_url,
             rpc_url: config.rpc_url,
             network_id,
-            token_cache: Arc::new(RwLock::new(token_cache)),
+            token_cache: Arc::new(RwLock::new(None)),
         })
     }
 
