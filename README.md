@@ -77,7 +77,7 @@ For high-performance applications, blockchain integration, and system-level deve
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.0.1"
+nova-sdk-rs = "1.0.3"
 ```
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
@@ -111,7 +111,7 @@ import fs from 'fs';
 const sdk = new NovaSdk(
   'alice.nova-sdk.near',  // Your NEAR account
   {
-    sessionToken: process.env.NOVA_SESSION_TOKEN,  // From nova-sdk.com/api/auth/session-token
+    apiKey: process.env.NOVA_API_KEY,  // From nova-sdk.com
   }
 );
 
@@ -146,16 +146,15 @@ console.log('✅ File decrypted!');
 
 ### Rust SDK
 ```rust
-use nova_sdk_rs::NovaSdk;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 use std::fs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize SDK (mainnet by default)
-    let sdk = NovaSdk::new(
-        "alice.nova-sdk.near",
-        &std::env::var("NOVA_SESSION_TOKEN")?
-    )?;
+    let config = NovaSdkConfig::default()
+        .with_api_key(&std::env::var("NOVA_API_KEY")?);
+    let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
     // Check network
     let (network, contract, _) = sdk.get_network_info();
@@ -195,26 +194,19 @@ For development, use **testnet** explicitly:
 
 **JavaScript:**
 ```typescript
-const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
-  sessionToken: process.env.TESTNET_SESSION_TOKEN,
+const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+  apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-6.testnet',
+  contractId: 'nova-sdk-5.testnet',
 });
 ```
 
 **Rust:**
 ```rust
-let config = NovaSdkConfig {
-    rpc_url: "https://rpc.testnet.near.org".to_string(),
-    contract_id: "nova-sdk-6.testnet".to_string(),
-    mcp_url: "https://nova-mcp.fastmcp.app".to_string(),
-};
+let config = NovaSdkConfig::testnet()
+    .with_api_key(&std::env::var("NOVA_API_KEY")?);
 
-let sdk = NovaSdk::with_config(
-    "alice.nova-sdk-6.testnet",
-    &session_token,
-    config
-)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-5.testnet", config)?;
 ```
 
 
@@ -245,8 +237,8 @@ let sdk = NovaSdk::with_config(
 ```
 
 **Flow:**
-1. **User authenticates** via OAuth (Auth0) → gets JWT
-2. **SDK sends request** to MCP server with JWT
+1. **User authenticates** via API key (get yours at nova-sdk.com)
+2. **SDK sends request** to MCP server with session token (auto-managed)
 3. **MCP verifies JWT** → retrieves encryption key from Shade TEE
 4. **SDK encrypts locally** using AES-256-GCM (key never leaves client unencrypted)
 5. **MCP uploads encrypted data** to IPFS and records transaction on NEAR
@@ -308,7 +300,8 @@ Comprehensive documentation is available on GitBook:
 4. **Access Control** - Always verify user authorization before operations
 5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
 6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to IPFS or MCP server
-7. **Token Ephemerality** - Nonces and timestamps prevent replay; refresh tokens frequently
+7. **Token Ephemerality** - Nonces and timestamps prevent replay; session tokens auto-refresh
+8. **API Key Security** - Store API keys in environment variables; never commit to version control
 
 
 ## Future Roadmap
