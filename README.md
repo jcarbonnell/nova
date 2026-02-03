@@ -194,10 +194,10 @@ For development, use **testnet** explicitly:
 
 **JavaScript:**
 ```typescript
-const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-5.testnet',
+  contractId: 'nova-sdk-6.testnet',
 });
 ```
 
@@ -206,7 +206,7 @@ const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
 
-let sdk = NovaSdk::with_config("alice.nova-sdk-5.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 ```
 
 
