@@ -37,7 +37,14 @@ chrono = "0.4"
 - Upload file: ~0.01 NEAR + IPFS storage
 - Retrieve file: ~0.001 NEAR
 
-For development, use [testnet configuration](#-testnet-usage).
+For development, use testnet configuration:
+```rust
+let config = NovaSdkConfig::testnet()
+    .with_api_key(&std::env::var("NOVA_API_KEY")?);
+let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
+```
+
+> **Note:** On testnet, IPFS operations are mocked (in-memory storage). Blockchain operations use real testnet with faucet tokens.
 
 ## Quick Start
 
@@ -60,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
     // For testnet development:
-    // let sdk = NovaSdk::testnet("alice.nova-sdk-5.testnet")?;
+    // let sdk = NovaSdk::testnet("alice.nova-sdk-6.testnet")?;
 
     // Verify connection
     println!("Network: {} | Contract: {}", sdk.network_id(), sdk.contract_id());
@@ -173,7 +180,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 // Testnet
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
-let sdk = NovaSdk::with_config("alice.nova-sdk-5.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 
 // Force session token refresh if needed
 sdk.refresh_token().await?;

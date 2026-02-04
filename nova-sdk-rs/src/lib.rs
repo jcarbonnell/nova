@@ -159,7 +159,7 @@ impl NovaSdkConfig {
             api_key: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: "https://rpc.testnet.near.org".to_string(),
-            contract_id: "nova-sdk-5.testnet".to_string(),
+            contract_id: "nova-sdk-6.testnet".to_string(),
             mcp_url: DEFAULT_MCP_URL.to_string(),
         }
     }

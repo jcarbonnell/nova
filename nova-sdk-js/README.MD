@@ -33,7 +33,15 @@ Typical costs (mainnet):
 - **Upload file**: ~0.01 NEAR (incl. IPFS storage)
 - **Retrieve file**: ~0.001 NEAR
 
-**For development, use testnet**
+```typescript
+const sdk = new NovaSdk('yourname.nova-sdk-6.testnet', {
+  apiKey: process.env.NOVA_API_KEY,
+  rpcUrl: 'https://rpc.testnet.near.org',
+  contractId: 'nova-sdk-6.testnet',
+});
+```
+
+> **Note:** On testnet, IPFS operations are mocked (in-memory storage). Blockchain operations use real testnet with faucet tokens.
 
 ## Quick Start
 
@@ -77,10 +85,10 @@ const sdk = new NovaSdk('alice.nova-sdk.near', {
 });
 
 // Testnet configuration
-const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-5.testnet',
+  contractId: 'nova-sdk-6.testnet',
 });
 
 // Custom MCP server (advanced)
