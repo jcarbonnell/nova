@@ -34,17 +34,50 @@ import jwt
 # Load .env variables
 load_dotenv()
 
-# Configuration from environment variables
-CONTRACT_ID = os.environ.get("CONTRACT_ID", "nova-sdk-6.testnet")
-NETWORK = os.environ.get("NETWORK", "").lower()
-if not NETWORK:
-    if "testnet" in CONTRACT_ID or CONTRACT_ID.endswith(".testnet"):
-        NETWORK = "testnet"
-    elif CONTRACT_ID.endswith(".near"):
-        NETWORK = "mainnet"
-    else:
-        NETWORK = "testnet"
-IS_TESTNET = NETWORK == "testnet"
+# Mainnet config
+MAINNET_CONTRACT_ID = os.environ.get("CONTRACT_ID", "nova-sdk.near")
+MAINNET_RPC_URL = os.environ.get("RPC_URL", "https://rpc.mainnet.near.org")
+MAINNET_ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk.near")
+
+# Testnet config
+TESTNET_CONTRACT_ID = os.environ.get("TESTNET_CONTRACT_ID", "nova-sdk-6.testnet")
+TESTNET_RPC_URL = os.environ.get("TESTNET_RPC_URL", "https://rpc.testnet.near.org")
+TESTNET_ACCOUNT_SUFFIX = os.environ.get("TESTNET_ACCOUNT_SUFFIX", ".nova-sdk-6.testnet")
+
+# Legacy compatibility (defaults to mainnet)
+CONTRACT_ID = MAINNET_CONTRACT_ID
+RPC_URL = MAINNET_RPC_URL
+ACCOUNT_SUFFIX = MAINNET_ACCOUNT_SUFFIX
+
+# Testnet mock storage (in-memory, simulates IPFS for testnet users)
+TESTNET_MOCK_FILES: Dict[str, Dict[str, Any]] = {}
+
+def generate_mock_cid(data: bytes, filename: str) -> str:
+    """Generate a realistic-looking mock CID for testnet."""
+    content_hash = hashlib.sha256(data + filename.encode()).hexdigest()
+    return f"Qm{content_hash[:44]}"
+
+def get_network_config(account_id: str = None) -> dict:
+    """
+    Returns network config based on account ID suffix.
+    Testnet accounts contain '.testnet', mainnet accounts end with '.near'
+    """
+    if account_id and '.testnet' in account_id:
+        return {
+            "network": "testnet",
+            "contract_id": TESTNET_CONTRACT_ID,
+            "rpc_url": TESTNET_RPC_URL,
+            "account_suffix": TESTNET_ACCOUNT_SUFFIX,
+            "is_testnet": True,
+        }
+    return {
+        "network": "mainnet",
+        "contract_id": MAINNET_CONTRACT_ID,
+        "rpc_url": MAINNET_RPC_URL,
+        "account_suffix": MAINNET_ACCOUNT_SUFFIX,
+        "is_testnet": False,
+    }
+
 SHADE_API_URL = os.environ.get("SHADE_API_URL", "")
 AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
 if not AUTH0_DOMAIN:
@@ -55,12 +88,9 @@ AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET")
 if not (AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET):
     raise ValueError("AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET env vars required")
-RPC_URL = os.environ.get("RPC_URL", "https://rpc.testnet.near.org")
 PINATA_GATEWAY = os.environ.get("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.environ.get("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.environ.get("IPFS_API_SECRET", "")
-if not IS_TESTNET and not (IPFS_API_KEY and IPFS_API_SECRET):
-    raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required for mainnet")
 RELAYER_URL = os.environ.get("RELAYER_URL", "https://relayer.testnet.near.org")
 DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86 # for view-only NEAR RPC calls
 SESSION_TOKEN_SECRET = os.environ.get("SESSION_TOKEN_SECRET")
@@ -68,17 +98,15 @@ if not SESSION_TOKEN_SECRET:
     raise ValueError("SESSION_TOKEN_SECRET env var required")
 SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
 SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
-ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk-6.testnet")
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Log network mode on startup
-logger.info(f"🌐 NOVA MCP Server starting in {NETWORK.upper()} mode")
-logger.info(f"   Contract: {CONTRACT_ID}")
-if IS_TESTNET:
-    logger.info(f"   ⚠️  TESTNET MODE: IPFS operations are MOCKED")
+logger.info(f"🌐 NOVA MCP Server starting (dual-network mode)")
+logger.info(f"   Mainnet: {MAINNET_CONTRACT_ID} @ {MAINNET_RPC_URL}")
+logger.info(f"   Testnet: {TESTNET_CONTRACT_ID} @ {TESTNET_RPC_URL}")
 
 # Temporary storage for pending uploads
 PENDING_UPLOADS: Dict[str, Dict[str, Any]] = {}
@@ -90,14 +118,6 @@ def cleanup_expired_uploads():
     expired = [uid for uid, data in PENDING_UPLOADS.items() if data.get("expires_at", 0) < now]
     for uid in expired:
         del PENDING_UPLOADS[uid]
-
-# Testnet mock storage (in-memory, simulates IPFS)
-TESTNET_MOCK_FILES: Dict[str, Dict[str, Any]] = {}
-
-def generate_mock_cid(data: bytes, filename: str) -> str:
-    """Generate a realistic-looking mock CID for testnet."""
-    content_hash = hashlib.sha256(data + filename.encode()).hexdigest()
-    return f"Qm{content_hash[:44]}"
 
 # SQLite context manager
 @contextmanager
@@ -274,9 +294,7 @@ async def mcp_health(request: Request):
     return JSONResponse({
         "status": "MCP ready", 
         "version": "0.3.1", 
-        "network": NETWORK,
         "contract": CONTRACT_ID,
-        "testnet_mode": IS_TESTNET,
         "auth": "enabled"
     })
 
@@ -422,7 +440,8 @@ async def get_user_signer(near_account_id: str, user_email: str = None, wallet_i
     
     # Create Account with real private key
     try:
-        acc = Account(near_account_id, private_key, RPC_URL)
+        config = get_network_config(near_account_id)
+        acc = Account(near_account_id, private_key, config["rpc_url"])
         await acc.startup()
         logger.info(f"Signing account ready: {near_account_id}")
         return acc
@@ -576,7 +595,8 @@ async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex:
         access_token=access_token
     )
 
-    contract_id = CONTRACT_ID
+    config = get_network_config(user_id)
+    contract_id = config["contract_id"]
     
     # Determine auth method: token-based or account_id-based
     use_token_auth = (
@@ -589,11 +609,11 @@ async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex:
     
     if use_token_auth:
         logger.info(f"Using pre-signed token for {user_id}")
-        request_body = {"group_id": group_id, "token": f"{payload_b64}.{sig_hex}", "contract_id": CONTRACT_ID}
+        request_body = {"group_id": group_id, "token": f"{payload_b64}.{sig_hex}", "contract_id": contract_id}
     else:
         # Fall back to account_id auth (for wallet users or invalid signatures)
-        logger.info(f"Using account_id auth for {user_id}")
-        request_body = {"group_id": group_id, "account_id": user_id, "contract_id": CONTRACT_ID}
+        logger.info(f"Using account_id auth for {user_id} on {config['network']}")
+        request_body = {"group_id": group_id, "account_id": user_id, "contract_id": contract_id}
     
     # Fetch encryption key from Shade key-management API
     async with httpx.AsyncClient() as client:
@@ -647,12 +667,13 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     )
     return result.result
 
-async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
+async def _ipfs_upload(encrypted_b64: str, filename: str, account_id: str = None) -> str:
     """Upload to IPFS via Pinata. On TESTNET: Returns mock CID."""
     encrypted_data = base64.b64decode(encrypted_b64)
+    config = get_network_config(account_id)
     
     # TESTNET MOCK: Store locally and return fake CID
-    if IS_TESTNET:
+    if config["is_testnet"]:
         mock_cid = generate_mock_cid(encrypted_data, filename)
         TESTNET_MOCK_FILES[mock_cid] = {
             "data": encrypted_b64,
@@ -681,9 +702,11 @@ async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
         logger.debug(f"Uploaded {filename} -> {cid}")
         return cid
 
-async def _ipfs_retrieve(cid: str) -> str:
+async def _ipfs_retrieve(cid: str, account_id: str = None) -> str:
+    config = get_network_config(account_id)
+
     # TESTNET MOCK: Retrieve from local storage
-    if IS_TESTNET:
+    if config["is_testnet"]:
         if cid in TESTNET_MOCK_FILES:
             mock_data = TESTNET_MOCK_FILES[cid]
             logger.info(f"[TESTNET MOCK] Retrieved {cid} ({mock_data['size']} bytes)")
@@ -734,7 +757,8 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
     
     Uses user's signing key from Shade TEE.
     """
-    contract_id = CONTRACT_ID
+    config = get_network_config(user_id)
+    contract_id = config["contract_id"]
 
     if not user_email and not wallet_id and not user_id:
         raise ValueError("Either user_email or wallet_id required")
@@ -751,7 +775,7 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
     )
     
     # Estimate fee for the transaction
-    fee = await _estimate_fee("record_transaction")
+    fee = await _estimate_fee("record_transaction", user_id)
     gas_margin = 100_000_000_000_000
     total_attach = fee + gas_margin
 
@@ -807,15 +831,15 @@ async def _record_near_transaction(group_id: str, user_id: str, file_hash: str, 
         logger.error(f"Transaction submission error: {e}")
         raise ValueError(f"Record failed: {str(e)}")
     
-async def _estimate_fee(action: str) -> int:
+async def _estimate_fee(action: str, account_id: str = None) -> int:
     """Queries contract for fee yoctoNEAR."""
-    contract_id = os.environ["CONTRACT_ID"]
+    config = get_network_config(account_id)
     # Use dummy key for view-only calls
-    acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
+    acc = Account("dummy.near", DUMMY_PRIVATE_KEY, config["rpc_url"])
     await acc.startup()
 
     result = await acc.view_function(
-        contract_id=contract_id,
+        contract_id=config["contract_id"],
         method_name="estimate_fee",
         args={"action": action}
     )
@@ -881,13 +905,14 @@ async def register_group(ctx: Context, group_id: str) -> str:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("register_group")
+    fee = await _estimate_fee("register_group", near_account_id)
     
     logger.info(f"Registering group {group_id} for {near_account_id} (fee: {fee/1e24:.4f} NEAR)")
 
     # Call contract
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="register_group",
         args={"group_id": group_id},
         amount=fee,
@@ -917,7 +942,7 @@ async def register_group(ctx: Context, group_id: str) -> str:
                     "group_id": group_id,
                     "owner": near_account_id,
                     "account_id": near_account_id,
-                    "contract_id": CONTRACT_ID,
+                    "contract_id": config["contract_id"],
                 },
                 headers=shade_headers,
             )
@@ -970,13 +995,14 @@ async def add_group_member(ctx: Context, group_id: str, member_id: str) -> str:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("add_group_member")
+    fee = await _estimate_fee("add_group_member", near_account_id)
     gas_margin = 300_000_000_000_000
     total_attach = fee + gas_margin
     logger.info(f"Add member {member_id} to {group_id} by {near_account_id} (est fee: {fee / 1e24:.4f} NEAR)")
 
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="add_group_member",
         args={"group_id": group_id, "user_id": member_id},
         amount=fee,
@@ -1011,13 +1037,14 @@ async def revoke_group_member(ctx: Context, group_id: str, member_id: str) -> st
     )
     
     # Estimate fee
-    fee = await _estimate_fee("revoke_group_member")
+    fee = await _estimate_fee("revoke_group_member", near_account_id)
     gas_margin = 300_000_000_000_000
     total_attach = fee + gas_margin
     logger.info(f"Revoking {member_id} from {group_id} by {near_account_id} (est fee: {fee / 1e24:.4f} NEAR)")
 
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="revoke_group_member",
         args={"group_id": group_id, "user_id": member_id},
         amount=fee,
@@ -1196,7 +1223,7 @@ async def finalize_upload(ctx: Context, upload_id: str, encrypted_data: str, fil
     
     try:
         # Step 1: Upload encrypted data to IPFS
-        cid = await _ipfs_upload(encrypted_data, filename)
+        cid = await _ipfs_upload(encrypted_data, filename, user_id)
         
         # Step 2: Record transaction on NEAR
         trans_id = await _record_near_transaction(
@@ -1271,7 +1298,7 @@ async def prepare_retrieve(ctx: Context, group_id: str, ipfs_hash: str) -> dict:
         )
         
         # Fetch encrypted data from IPFS
-        encrypted_b64 = await _ipfs_retrieve(ipfs_hash)
+        encrypted_b64 = await _ipfs_retrieve(ipfs_hash, near_account_id)
         
         logger.info(f"Retrieved {len(encrypted_b64)} bytes for {ipfs_hash}")
         
@@ -1465,8 +1492,9 @@ async def auth_status_rest(request: Request):
         try:
             acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
             await acc.startup()
+            config = get_network_config(near_account_id)
             auth_result = await acc.view_function(
-                contract_id=CONTRACT_ID,
+                contract_id=config["contract_id"],
                 method_name="is_authorized",
                 args={"group_id": group_id, "user_id": near_account_id}
             )
@@ -1506,6 +1534,7 @@ async def prepare_upload_rest(request: Request):
         return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
     
     try:
+        config = get_network_config(near_account_id)
         # Clean up expired uploads
         cleanup_expired_uploads()
         
@@ -1578,6 +1607,7 @@ async def prepare_retrieve_rest(request: Request):
         return JSONResponse({"error": "No NEAR account configured"}, status_code=400)
     
     try:
+        config = get_network_config(near_account_id)
         # Get encryption key from Shade TEE
         key = await _get_shade_key(
             group_id=group_id,
@@ -1642,13 +1672,14 @@ async def register_group_rest(request: Request):
         )
         
         # Estimate fee
-        fee = await _estimate_fee("register_group")
-        
+        fee = await _estimate_fee("register_group", near_account_id)
+        config = get_network_config(near_account_id)
         logger.info(f"REST: Registering group {group_id} for {near_account_id} (fee: {fee/1e24:.4f} NEAR)")
         
         # Call contract
+        config = get_network_config(near_account_id)
         result = await acc.function_call(
-            contract_id=CONTRACT_ID,
+            contract_id=config["contract_id"],
             method_name="register_group",
             args={"group_id": group_id},
             amount=fee,
@@ -1672,7 +1703,7 @@ async def register_group_rest(request: Request):
                         "group_id": group_id,
                         "owner": near_account_id,
                         "account_id": near_account_id,
-                        "contract_id": CONTRACT_ID,
+                        "contract_id": config["contract_id"],
                     },
                     headers=shade_headers,
                 )
@@ -1732,12 +1763,13 @@ async def add_group_member_rest(request: Request):
         )
         
         # Estimate fee
-        fee = await _estimate_fee("add_group_member")
+        fee = await _estimate_fee("add_group_member", near_account_id)
         
         logger.info(f"REST: Add member {member_id} to {group_id} by {near_account_id}")
         
+        config = get_network_config(near_account_id)
         result = await acc.function_call(
-            contract_id=CONTRACT_ID,
+            contract_id=config["contract_id"],
             method_name="add_group_member",
             args={"group_id": group_id, "user_id": member_id},
             amount=fee,
@@ -1791,12 +1823,13 @@ async def revoke_group_member_rest(request: Request):
         )
         
         # Estimate fee
-        fee = await _estimate_fee("revoke_group_member")
+        fee = await _estimate_fee("revoke_group_member", near_account_id)
         
         logger.info(f"REST: Revoke member {member_id} from {group_id} by {near_account_id}")
         
+        config = get_network_config(near_account_id)
         result = await acc.function_call(
-            contract_id=CONTRACT_ID,
+            contract_id=config["contract_id"],
             method_name="revoke_group_member",
             args={"group_id": group_id, "user_id": member_id},
             amount=fee,
@@ -1816,6 +1849,7 @@ async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
     user_email = user.get("email")
     wallet_id = user.get("wallet_id")
     near_account_id = user.get("near_account_id")
+    config = get_network_config(near_account_id)
 
     if not user:
         raise ValueError("Auth required.")
@@ -1834,8 +1868,9 @@ async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
             acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
             await acc.startup()
             
+            config = get_network_config(near_account_id)
             auth_result = await acc.view_function(
-                contract_id=CONTRACT_ID,
+                contract_id=config["contract_id"],
                 method_name="is_authorized",
                 args={"group_id": group_id, "user_id": near_account_id}
             )
@@ -1898,13 +1933,14 @@ async def get_owned_groups(ctx: Context) -> list:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("get_owned_groups")
+    fee = await _estimate_fee("get_owned_groups", near_account_id)
     
     logger.info(f"Fetching owned groups for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
 
     # Call contract (payable method)
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="get_owned_groups",
         args={},
         amount=fee,
@@ -1950,13 +1986,14 @@ async def get_member_groups(ctx: Context) -> list:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("get_member_groups")
+    fee = await _estimate_fee("get_member_groups", near_account_id)
     
     logger.info(f"Fetching member groups for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
 
     # Call contract (payable method)
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="get_member_groups",
         args={},
         amount=fee,
@@ -2003,13 +2040,14 @@ async def get_group_members(ctx: Context, group_id: str) -> list:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("get_group_members")
+    fee = await _estimate_fee("get_group_members", near_account_id)
     
     logger.info(f"Fetching members of group '{group_id}' for {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
 
     # Call contract (payable method)
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="get_group_members",
         args={"group_id": group_id},
         amount=fee,
@@ -2056,13 +2094,14 @@ async def get_group_transactions(ctx: Context, group_id: str) -> list:
     )
     
     # Estimate fee
-    fee = await _estimate_fee("get_transactions_for_group")
+    fee = await _estimate_fee("get_transactions_for_group", near_account_id)
     
     logger.info(f"Fetching transactions for group '{group_id}' by {near_account_id} (fee: {fee/1e24:.6f} NEAR)")
 
     # Call contract (payable method)
+    config = get_network_config(near_account_id)
     result = await acc.function_call(
-        contract_id=CONTRACT_ID,
+        contract_id=config["contract_id"],
         method_name="get_transactions_for_group",
         args={"group_id": group_id},
         amount=fee,
