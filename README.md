@@ -4,6 +4,8 @@ NOVA is a privacy-first, decentralized file-sharing primitive, empowering user-o
 
 NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistence for TEEs, Intents, or Shade Agents— while inheriting NEAR’s strengths like sharding for scalability, low-cost transactions (~0.01 NEAR/gas), and AI-native tools (e.g., NEAR AI CLI). Whether you're building AI social platforms, DeFi apps, or autonomous agent workflows, NOVA provides a secure, verifiable data layer.
 
+**Dual-Network Support**: Use mainnet for production [nova-sdk.com](https://nova-sdk.com) or testnet for development [testnet.nova-sdk.com](https://testnet.nova-sdk.com). Testnet uses mocked IPFS for free testing; mainnet uses real Pinata integration (paid).
+
 ## Why Use NOVA?
 
 - **Privacy-First**: Encrypt files with group keys managed off-chain in TEEs, ensuring only authorized users or AI agents access data—keys never exposed on-chain.
@@ -190,14 +192,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 🧪 Testnet Usage
 
+⚠️ **Testnet Mode**: IPFS uploads are mocked on testnet - files are stored in-memory and not persisted to IPFS. Blockchain operations (group registration, member management) are real and use faucet tokens on nova-sdk-6.testnet.
+
 For development, use **testnet** explicitly:
 
 **JavaScript:**
 ```typescript
-const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
+const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-5.testnet',
+  contractId: 'nova-sdk-6.testnet',
 });
 ```
 
@@ -206,7 +210,7 @@ const sdk = new NovaSdk('alice.nova-sdk-5.testnet', {
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
 
-let sdk = NovaSdk::with_config("alice.nova-sdk-5.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 ```
 
 
@@ -346,7 +350,7 @@ See individual SDK directories for specific testing instructions.
 - [NEAR Protocol](https://near.org)
 - [NEAR Documentation](https://docs.near.org)
 - [NEAR JavaScript API](https://docs.near.org/tools/near-api-js/quick-reference)
-- [Create NEAR Account](https://testnet.mynearwallet.com/)
+- [Create NEAR Account](https://app.mynearwallet.com/)
 
 ### Storage Resources
 - [IPFS](https://ipfs.io)

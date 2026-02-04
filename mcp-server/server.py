@@ -14,7 +14,6 @@ from fastapi.responses import RedirectResponse, JSONResponse
 import asyncio
 import base64
 from uuid import uuid4
-
 # Crypto/NEAR imports
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -34,6 +33,18 @@ import jwt
 
 # Load .env variables
 load_dotenv()
+
+# Configuration from environment variables
+CONTRACT_ID = os.environ.get("CONTRACT_ID", "nova-sdk-6.testnet")
+NETWORK = os.environ.get("NETWORK", "").lower()
+if not NETWORK:
+    if "testnet" in CONTRACT_ID or CONTRACT_ID.endswith(".testnet"):
+        NETWORK = "testnet"
+    elif CONTRACT_ID.endswith(".near"):
+        NETWORK = "mainnet"
+    else:
+        NETWORK = "testnet"
+IS_TESTNET = NETWORK == "testnet"
 SHADE_API_URL = os.environ.get("SHADE_API_URL", "")
 AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
 if not AUTH0_DOMAIN:
@@ -44,13 +55,12 @@ AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET")
 if not (AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET):
     raise ValueError("AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET env vars required")
-CONTRACT_ID = os.environ.get("CONTRACT_ID", "nova-sdk-5.testnet")
 RPC_URL = os.environ.get("RPC_URL", "https://rpc.testnet.near.org")
 PINATA_GATEWAY = os.environ.get("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.environ.get("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.environ.get("IPFS_API_SECRET", "")
-if not (IPFS_API_KEY and IPFS_API_SECRET):
-    raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required")
+if not IS_TESTNET and not (IPFS_API_KEY and IPFS_API_SECRET):
+    raise ValueError("IPFS_API_KEY and IPFS_API_SECRET env vars required for mainnet")
 RELAYER_URL = os.environ.get("RELAYER_URL", "https://relayer.testnet.near.org")
 DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86 # for view-only NEAR RPC calls
 SESSION_TOKEN_SECRET = os.environ.get("SESSION_TOKEN_SECRET")
@@ -58,11 +68,17 @@ if not SESSION_TOKEN_SECRET:
     raise ValueError("SESSION_TOKEN_SECRET env var required")
 SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
 SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
-ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk-5.testnet")
+ACCOUNT_SUFFIX = os.environ.get("ACCOUNT_SUFFIX", ".nova-sdk-6.testnet")
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log network mode on startup
+logger.info(f"🌐 NOVA MCP Server starting in {NETWORK.upper()} mode")
+logger.info(f"   Contract: {CONTRACT_ID}")
+if IS_TESTNET:
+    logger.info(f"   ⚠️  TESTNET MODE: IPFS operations are MOCKED")
 
 # Temporary storage for pending uploads
 PENDING_UPLOADS: Dict[str, Dict[str, Any]] = {}
@@ -75,6 +91,13 @@ def cleanup_expired_uploads():
     for uid in expired:
         del PENDING_UPLOADS[uid]
 
+# Testnet mock storage (in-memory, simulates IPFS)
+TESTNET_MOCK_FILES: Dict[str, Dict[str, Any]] = {}
+
+def generate_mock_cid(data: bytes, filename: str) -> str:
+    """Generate a realistic-looking mock CID for testnet."""
+    content_hash = hashlib.sha256(data + filename.encode()).hexdigest()
+    return f"Qm{content_hash[:44]}"
 
 # SQLite context manager
 @contextmanager
@@ -106,11 +129,11 @@ def normalize_account_id(account_id: str) -> str:
     Auto-append NOVA suffix if user provides just a username.
     
     Examples:
-        "john" → "john.nova-sdk-5.testnet"
-        "alice" → "alice.nova-sdk-5.testnet"
+        "john" → "john.nova-sdk-6.testnet"
+        "alice" → "alice.nova-sdk-6.testnet"
         "bob.near" → "bob.near" (unchanged - external account)
         "carol.testnet" → "carol.testnet" (unchanged - external account)
-        "dave.nova-sdk-5.testnet" → "dave.nova-sdk-5.testnet" (unchanged - already complete)
+        "dave.nova-sdk-6.testnet" → "dave.nova-sdk-6.testnet" (unchanged - already complete)
     """
     if not account_id:
         raise ValueError("Account ID cannot be empty")
@@ -248,7 +271,14 @@ mcp = FastMCP(name="nova-mcp")
 # Use @mcp.route for custom HTTP endpoint
 @mcp.custom_route("/", methods=["GET"])
 async def mcp_health(request: Request):
-    return JSONResponse({"status": "MCP ready", "version": "0.3.0", "auth": "enabled"})
+    return JSONResponse({
+        "status": "MCP ready", 
+        "version": "0.3.1", 
+        "network": NETWORK,
+        "contract": CONTRACT_ID,
+        "testnet_mode": IS_TESTNET,
+        "auth": "enabled"
+    })
 
 # Simple unsubscribe endpoint (add to your MCP routes)
 @mcp.custom_route("/unsubscribe", methods=["GET"])
@@ -424,7 +454,7 @@ def get_authenticated_user() -> dict:
     Headers expected from frontend:
     - Authorization: Bearer {access_token}
     - X-User-Email: user@example.com (for email users)
-    - X-Account-Id: user.nova-sdk-5.testnet (NOVA-managed account)
+    - X-Account-Id: user.nova-sdk-6.testnet (NOVA-managed account)
     - X-Wallet-Id: user.near (for wallet users - their original wallet)
     
     Returns:
@@ -559,11 +589,11 @@ async def _get_shade_key(group_id: str, user_id: str, payload_b64: str, sig_hex:
     
     if use_token_auth:
         logger.info(f"Using pre-signed token for {user_id}")
-        request_body = {"group_id": group_id, "token": f"{payload_b64}.{sig_hex}"}
+        request_body = {"group_id": group_id, "token": f"{payload_b64}.{sig_hex}", "contract_id": CONTRACT_ID}
     else:
         # Fall back to account_id auth (for wallet users or invalid signatures)
         logger.info(f"Using account_id auth for {user_id}")
-        request_body = {"group_id": group_id, "account_id": user_id}
+        request_body = {"group_id": group_id, "account_id": user_id, "contract_id": CONTRACT_ID}
     
     # Fetch encryption key from Shade key-management API
     async with httpx.AsyncClient() as client:
@@ -618,14 +648,28 @@ async def _is_authorized(group_id: str, user_id: str, contract_id: str) -> bool:
     return result.result
 
 async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
-    """Upload to IPFS via Pinata."""
+    """Upload to IPFS via Pinata. On TESTNET: Returns mock CID."""
+    encrypted_data = base64.b64decode(encrypted_b64)
+    
+    # TESTNET MOCK: Store locally and return fake CID
+    if IS_TESTNET:
+        mock_cid = generate_mock_cid(encrypted_data, filename)
+        TESTNET_MOCK_FILES[mock_cid] = {
+            "data": encrypted_b64,
+            "filename": filename,
+            "uploaded_at": time.time(),
+            "size": len(encrypted_data),
+        }
+        logger.info(f"[TESTNET MOCK] Uploaded {filename} -> {mock_cid} ({len(encrypted_data)} bytes)")
+        return mock_cid
+    
+    # MAINNET: Real Pinata upload
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        encrypted_data = base64.b64decode(encrypted_b64)
         files = {"file": (filename, encrypted_data)}
         headers = {
             "pinata_api_key": IPFS_API_KEY,
             "pinata_secret_api_key": IPFS_API_SECRET,
-            "User-Agent": "NovaMCP/1.0"  # Pinata 2025 compliance
+            "User-Agent": "NovaMCP/1.0"
         }
         resp = await client.post(
             "https://api.pinata.cloud/pinning/pinFileToIPFS",
@@ -638,10 +682,23 @@ async def _ipfs_upload(encrypted_b64: str, filename: str) -> str:
         return cid
 
 async def _ipfs_retrieve(cid: str) -> str:
+    # TESTNET MOCK: Retrieve from local storage
+    if IS_TESTNET:
+        if cid in TESTNET_MOCK_FILES:
+            mock_data = TESTNET_MOCK_FILES[cid]
+            logger.info(f"[TESTNET MOCK] Retrieved {cid} ({mock_data['size']} bytes)")
+            return mock_data["data"]
+        else:
+            logger.warning(f"[TESTNET MOCK] CID {cid} not found, returning placeholder")
+            placeholder = base64.b64encode(f"TESTNET_MOCK_DATA_FOR_{cid}".encode()).decode()
+            return placeholder
+    
+    # MAINNET: Real IPFS retrieval
     gateway = PINATA_GATEWAY.rstrip('/') if PINATA_GATEWAY else "https://gateway.pinata.cloud/ipfs"
     url = f"{gateway}/{cid.lstrip('/').strip()}"
     if not cid.startswith('Qm'):
         raise ValueError(f"Invalid CID: {cid}")
+    
     headers = {'User-Agent': 'NovaMCP/1.0 (Mozilla/5.0)'}
     max_retries = 5
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
@@ -792,18 +849,7 @@ async def _get_dynamic_fee(contract_id: str, action: str, file_size_gb: float = 
 @mcp.tool
 async def ipfs_upload(data: str, filename: str) -> str:
     """Uploads encrypted data to IPFS via Pinata and returns CID."""
-    data_bytes = base64.b64decode(data)
-    url = "https://api.pinata.cloud/pinning/pinFileToIPFS"
-    headers = {
-        "pinata_api_key": os.environ["IPFS_API_KEY"],
-        "pinata_secret_api_key": os.environ["IPFS_API_SECRET"]
-    }
-    files = {"file": (filename, data_bytes)}
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, files=files)
-        if response.status_code == 200:
-            return response.json()["IpfsHash"]
-        raise Exception(f"Upload failed: {response.text}")
+    return await _ipfs_upload(data, filename)
 
 @mcp.tool
 async def ipfs_retrieve(cid: str) -> str:  # Returns base64 bytes (now async)
@@ -871,6 +917,7 @@ async def register_group(ctx: Context, group_id: str) -> str:
                     "group_id": group_id,
                     "owner": near_account_id,
                     "account_id": near_account_id,
+                    "contract_id": CONTRACT_ID,
                 },
                 headers=shade_headers,
             )
@@ -1625,6 +1672,7 @@ async def register_group_rest(request: Request):
                         "group_id": group_id,
                         "owner": near_account_id,
                         "account_id": near_account_id,
+                        "contract_id": CONTRACT_ID,
                     },
                     headers=shade_headers,
                 )

@@ -17,11 +17,23 @@ db.exec(`
   );
 `);
 
+// Add new columns if they don't exist (safe - won't error if already present)
+try { db.exec(`ALTER TABLE keys ADD COLUMN contract_id TEXT;`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE keys ADD COLUMN network TEXT;`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE keys ADD COLUMN created_at TEXT;`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE keys ADD COLUMN updated_at TEXT;`); } catch (e) { /* exists */ }
+
 // TEE-derived secret (in prod, derive from TEE entropy; here simulate)
 const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
 
 // NOVA contract ID from env
-const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
+const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
+const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
+
+const ALLOWED_CONTRACTS = new Set([
+  'nova-sdk.near',
+  'nova-sdk-6.testnet'
+]);
 
 // Set sha512 for noble
 ed25519.hashes.sha512 = sha512;
@@ -46,7 +58,37 @@ function decryptKey(enc: string): string {
   return decrypted.toString();
 }
 
-async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number}> {
+// Resolve contract ID from request or detect from group lookup
+function resolveContract(requestContractId?: string, groupId?: string): { contractId: string; network: string } {
+  // If contract_id provided, validate and use it
+  if (requestContractId) {
+    if (!ALLOWED_CONTRACTS.has(requestContractId)) {
+      throw new Error(`Invalid contract_id: ${requestContractId}. Not in allowed list.`);
+    }
+    const network = requestContractId.endsWith('.testnet') ? 'testnet' : 'mainnet';
+    return { contractId: requestContractId, network };
+  }
+  
+  // Try to lookup from existing key record
+  if (groupId) {
+    const row = db.prepare('SELECT contract_id, network FROM keys WHERE group_id = ?').get(groupId) as { contract_id?: string; network?: string } | undefined;
+    if (row?.contract_id) {
+      return { contractId: row.contract_id, network: row.network || 'mainnet' };
+    }
+  }
+  
+  // Default to mainnet (handles existing keys with NULL contract_id)
+  return { contractId: DEFAULT_MAINNET_CONTRACT, network: 'mainnet' };
+}
+
+// Get RPC URL for network
+function getRpcUrl(network: string): string {
+  return network === 'testnet' 
+    ? 'https://rpc.testnet.near.org'
+    : 'https://rpc.mainnet.near.org';
+}
+
+async function verifyToken(token: string, contractId: string, network: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number}> {
   try {
     const [payloadB64, sigHex] = token.split('.');
     if (!payloadB64 || !sigHex) {
@@ -54,20 +96,18 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
       return { valid: false };
     }
     
-    // Decode payload to bytes/str
     const payloadBytes = Buffer.from(payloadB64, 'base64');
     if (payloadBytes.length === 0) {
       console.error('Token verify: Empty payload');
       return { valid: false };
     }
     
-    // Decode to str for JSON (for fields extraction)
     const payloadStr = payloadBytes.toString('utf-8');
-    console.log('Token verify: Payload str len', payloadStr.length);  // Debug
+    console.log('Token verify: Payload str len', payloadStr.length);
     
     const payload = JSON.parse(payloadStr);
     const { group_id, user_id, nonce, timestamp, signing_pk_b58 } = payload;
-    if (!group_id || !user_id || !nonce || !timestamp) {  // Core 4 fields only (PK optional)
+    if (!group_id || !user_id || !nonce || !timestamp) {
       console.log('Token verify: Missing payload fields');
       return { valid: false };
     }
@@ -75,9 +115,9 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     // Check timestamp freshness (convert ns to ms)
     const timestampStr = timestamp.toString();
     const tsBig = BigInt(timestampStr);
-    const nowMs = Date.now();  // ms
-    const nowNs = BigInt(nowMs) * 1000000n;  // ms → ns
-    const fiveMinNs = 300000000000n;  // 5min ns
+    const nowMs = Date.now();
+    const nowNs = BigInt(nowMs) * 1000000n;
+    const fiveMinNs = 300000000000n;
     if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
       console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
       return { valid: false };
@@ -86,7 +126,7 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     
     // Verify nonce via contract
     const nonceValid = await agentView({
-      contractId: NOVA_CONTRACT,
+      contractId: contractId,
       methodName: 'get_nonce_validity',
       args: { group_id, user_id, nonce }
     });
@@ -96,11 +136,11 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     }
     console.log('Token verify: Nonce valid');
     
-    // Prefer payload PK if present (for multi-key); fallback to RPC first ed25519
+    // Prefer payload PK if present; fallback to RPC
     let userPkBytes;
     if (signing_pk_b58) {
       try {
-        userPkBytes = bs58.decode(signing_pk_b58);  // Full 32 bytes
+        userPkBytes = bs58.decode(signing_pk_b58);
         if (userPkBytes.length !== 32) {
           console.error('Token verify: Invalid signing PK length');
           return { valid: false };
@@ -112,8 +152,8 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
     }
     
     if (!userPkBytes) {  
-      // Fallback: RPC fetch
-      const rpcUrl = 'https://rpc.mainnet.near.org';
+      // Fallback: RPC fetch (use correct network RPC)
+      const rpcUrl = getRpcUrl(network);
       const rpcRes = await axios.post(rpcUrl, {
         jsonrpc: '2.0',
         id: 'dontcare',
@@ -139,13 +179,13 @@ async function verifyToken(token: string): Promise<{ valid: boolean; user_id?: s
         return { valid: false };
       }
       const userPkStr = keyView.public_key;
-      userPkBytes = bs58.decode(userPkStr.slice(8));  // 32 bytes
+      userPkBytes = bs58.decode(userPkStr.slice(8));
       console.log('Token verify: Using RPC PK', userPkStr.slice(0, 20) + '...');
     }
     
-    // Verify ed25519 on raw payload_bytes (no hash)
+    // Verify ed25519 on raw payload_bytes
     const sigBytes = Buffer.from(sigHex, 'hex');
-    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes); // Raw bytes
+    const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes);
     if (!validSig) {
       console.error('Token verify: Sig invalid');
       return { valid: false };
@@ -171,7 +211,7 @@ const keyMgmt = new Hono();
 keyMgmt.get('/health', async (c) => {
   return c.json({ 
     status: 'ok', 
-    contract: NOVA_CONTRACT,
+    contract: DEFAULT_MAINNET_CONTRACT,
     network: 'mainnet',
     timestamp: new Date().toISOString()
   });
@@ -179,55 +219,77 @@ keyMgmt.get('/health', async (c) => {
 
 // Generate key for a group (called by NOVA contract after group registration)
 keyMgmt.post('/generate_key', async (c) => {
-  const { group_id, owner } = await c.req.json();
+  const { group_id, owner, contract_id } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
 
-  console.log(`Generating key for group ${group_id}, requested by ${owner}`);
+  // Resolve which contract to use
+  let resolved;
+  try {
+    resolved = resolveContract(contract_id);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 400);
+  }
+  const { contractId, network } = resolved;
+
+  console.log(`Generating key for group ${group_id}, requested by ${owner}, contract: ${contractId} (${network})`);
   
   // Verify group exists on-chain
   const groupExists = await agentView({
-    contractId: NOVA_CONTRACT,
+    contractId: contractId,
     methodName: 'group_contains_key',
     args: { group_id }
   });
 
   if (!groupExists) {
-    console.error(`Group ${group_id} does not exist on ${NOVA_CONTRACT}`);
-    return c.json({ error: 'Group does not exist on-chain' }, 404);
+    console.error(`Group ${group_id} does not exist on ${contractId}`);
+    return c.json({ error: `Group does not exist on-chain (${contractId})` }, 404);
   }
 
-  console.log(`Group ${group_id} verified on ${NOVA_CONTRACT}`);
+  console.log(`Group ${group_id} verified on ${contractId}`);
 
   // Generate key in TEE (random 32 bytes)
   const keyBytes = crypto.randomBytes(32);
   const key = keyBytes.toString('base64');
+  const now = new Date().toISOString();
   
   // Encrypt and store (idempotent)
   const encryptedKey = encryptKey(key);
-  db.prepare('INSERT OR REPLACE INTO keys (group_id, encrypted_key) VALUES (?, ?)').run(group_id, encryptedKey);
+  db.prepare(`
+    INSERT OR REPLACE INTO keys (group_id, encrypted_key, contract_id, network, created_at, updated_at) 
+    VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM keys WHERE group_id = ?), ?), ?)
+  `).run(group_id, encryptedKey, contractId, network, group_id, now, now);
   
   // Skip testnet attestation, use TEE-verified placeholder
   const checksum = 'tee-verified'; 
   
-  console.log(`Generated key for group ${group_id}, owner ${owner}`);
+  console.log(`Generated key for group ${group_id}, owner ${owner}, network ${network}`);
   return c.json({ key, checksum: checksum });
 });
 
 // Get key for authorized user
 keyMgmt.post('/get_key', async (c) => {
-  const { group_id, token, account_id } = await c.req.json();
+  const { group_id, token, account_id, contract_id } = await c.req.json();
   if (!group_id ) return c.json({ error: 'group_id required' }, 400);
   if (!token && !account_id) return c.json({ error: 'token or account_id required' }, 400);
   
+  // Resolve which contract to use (prefer request, then lookup from stored key)
+  let resolved;
+  try {
+    resolved = resolveContract(contract_id, group_id);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 400);
+  }
+  const { contractId, network } = resolved;
+
   let user_id: string;
 
   if (account_id) {
     // Direct account_id auth for wallet users
     user_id = account_id;
-    console.log(`Using account_id auth for ${account_id}`);
+    console.log(`Using account_id auth for ${account_id} on ${network}`);
   } else {
     // Token-based auth for email users
-    const tokenInfo = await verifyToken(token);
+    const tokenInfo = await verifyToken(token, contractId, network);
     if (!tokenInfo.valid || !tokenInfo.user_id) {
       return c.json({ error: 'Invalid token' }, 403);
     }
@@ -236,18 +298,18 @@ keyMgmt.post('/get_key', async (c) => {
   
   // Verify on-chain authorization (this is the key security check)
   const authorized = await agentView({
-    contractId: NOVA_CONTRACT,
+    contractId: contractId,
     methodName: 'is_authorized',
     args: { group_id, user_id }
   });
   
   if (!authorized) {
-    console.error(`User ${user_id} not authorized for group ${group_id}`);
+    console.error(`User ${user_id} not authorized for group ${group_id} on ${contractId}`);
     return c.json({ error: 'Unauthorized: On-chain access denied' }, 403);
   }
 
   // Fetch key from DB
-  const row = db.prepare('SELECT encrypted_key FROM keys WHERE group_id = ?').get(group_id) as { encrypted_key: string } | undefined;
+  const row = db.prepare('SELECT encrypted_key, contract_id, network FROM keys WHERE group_id = ?').get(group_id) as { encrypted_key: string; contract_id?: string; network?: string } | undefined;
   if (!row || !row.encrypted_key) {
     console.error(`Key not found for group ${group_id}`);
     return c.json({ error: 'Key not found' }, 404);
@@ -258,31 +320,44 @@ keyMgmt.post('/get_key', async (c) => {
   // Skip testnet attestation
   const checksum = 'tee-mainnet-verified';
   
-  console.log(`Retrieved key for group ${group_id}, user ${user_id}`);
+  console.log(`Retrieved key for group ${group_id}, user ${user_id}, network ${network}`);
   
   return c.json({ key, checksum: checksum });
 });
 
 // Rotate key (called by NOVA contract when member is revoked)
 keyMgmt.post('/rotate_key', async (c) => {
-  const { group_id } = await c.req.json();
+  const { group_id, contract_id } = await c.req.json();
   if (!group_id) return c.json({ error: 'group_id required' }, 400);
   
+  // Resolve which contract to use
+  let resolved;
+  try {
+    resolved = resolveContract(contract_id, group_id);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 400);
+  }
+  const { contractId, network } = resolved;
+
   // Verify group exists
   const groupExists = await agentView({
-    contractId: NOVA_CONTRACT,
+    contractId: contractId,
     methodName: 'group_contains_key',
     args: { group_id }
   });
 
   if (!groupExists) {
-    return c.json({ error: 'Group does not exist' }, 404);
+    return c.json({ error: `Group does not exist (${contractId})` }, 404);
   }
 
   // Generate new key, encrypt, update DB (atomic)
   const newKey = crypto.randomBytes(32).toString('base64');  
   const encryptedKey = encryptKey(newKey);
-  const result = db.prepare('UPDATE keys SET encrypted_key = ? WHERE group_id = ?').run(encryptedKey, group_id);
+  const now = new Date().toISOString();
+
+  const result = db.prepare(`
+    UPDATE keys SET encrypted_key = ?, contract_id = ?, network = ?, updated_at = ? WHERE group_id = ?
+  `).run(encryptedKey, contractId, network, now, group_id);
   
   if (result.changes === 0) {
     return c.json({ error: 'Key not found for rotation' }, 404);
@@ -291,7 +366,7 @@ keyMgmt.post('/rotate_key', async (c) => {
   // Skip testnet attestation
   const checksum = 'tee-mainnet-verified';
 
-  console.log(`Rotated key for group ${group_id}`);
+  console.log(`Rotated key for group ${group_id}, network ${network}`);
 
   return c.json({ 
     success: true, 
@@ -306,7 +381,7 @@ keyMgmt.get('/debug/groups', async (c) => {
   return c.json({ 
     groups: rows.map(r => r.group_id),
     count: rows.length,
-    contract: NOVA_CONTRACT
+    contract: DEFAULT_MAINNET_CONTRACT
   });
 });
 
