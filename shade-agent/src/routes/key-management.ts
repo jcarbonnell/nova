@@ -1,6 +1,6 @@
 // Shade agent manages keys for NOVA groups in a TEE-secure manner
 import { Hono } from 'hono';
-import { agentView } from '@neardefi/shade-agent-js';
+// import { agentView } from '@neardefi/shade-agent-js';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -88,6 +88,38 @@ function getRpcUrl(network: string): string {
     : 'https://rpc.mainnet.near.org';
 }
 
+// Direct RPC view call (bypasses agentView which uses hardcoded RPC)
+async function viewFunction(rpcUrl: string, contractId: string, methodName: string, args: Record<string, any>): Promise<any> {
+  const response = await axios.post(rpcUrl, {
+    jsonrpc: '2.0',
+    id: 'nova-view',
+    method: 'query',
+    params: {
+      request_type: 'call_function',
+      finality: 'final',
+      account_id: contractId,
+      method_name: methodName,
+      args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+    },
+  });
+
+  if (response.data.error) {
+    console.error('RPC error:', response.data.error);
+    return null;
+  }
+
+  const result = response.data.result?.result;
+  if (!result) return null;
+
+  // Decode the result (it's a byte array)
+  const decoded = Buffer.from(result).toString('utf-8');
+  try {
+    return JSON.parse(decoded);
+  } catch {
+    return decoded === 'true';
+  }
+}
+
 async function verifyToken(token: string, contractId: string, network: string): Promise<{ valid: boolean; user_id?: string; group_id?: string; nonce?: string; timestamp?: number}> {
   try {
     const [payloadB64, sigHex] = token.split('.');
@@ -125,11 +157,7 @@ async function verifyToken(token: string, contractId: string, network: string): 
     console.log('Token verify: Timestamp ms', nowMs, 'vs payload', timestamp);
     
     // Verify nonce via contract
-    const nonceValid = await agentView({
-      contractId: contractId,
-      methodName: 'get_nonce_validity',
-      args: { group_id, user_id, nonce }
-    });
+    const nonceValid = await viewFunction(getRpcUrl(network), contractId, 'get_nonce_validity', { group_id, user_id, nonce });
     if (!nonceValid) {
       console.error('Token verify: Nonce invalid/used');
       return { valid: false };
@@ -234,11 +262,8 @@ keyMgmt.post('/generate_key', async (c) => {
   console.log(`Generating key for group ${group_id}, requested by ${owner}, contract: ${contractId} (${network})`);
   
   // Verify group exists on-chain
-  const groupExists = await agentView({
-    contractId: contractId,
-    methodName: 'group_contains_key',
-    args: { group_id }
-  });
+  const rpcUrl = getRpcUrl(network);
+  const groupExists = await viewFunction(rpcUrl, contractId, 'group_contains_key', { group_id });
 
   if (!groupExists) {
     console.error(`Group ${group_id} does not exist on ${contractId}`);
@@ -297,11 +322,7 @@ keyMgmt.post('/get_key', async (c) => {
   }
   
   // Verify on-chain authorization (this is the key security check)
-  const authorized = await agentView({
-    contractId: contractId,
-    methodName: 'is_authorized',
-    args: { group_id, user_id }
-  });
+  const authorized = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
   
   if (!authorized) {
     console.error(`User ${user_id} not authorized for group ${group_id} on ${contractId}`);
@@ -340,11 +361,7 @@ keyMgmt.post('/rotate_key', async (c) => {
   const { contractId, network } = resolved;
 
   // Verify group exists
-  const groupExists = await agentView({
-    contractId: contractId,
-    methodName: 'group_contains_key',
-    args: { group_id }
-  });
+  const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
 
   if (!groupExists) {
     return c.json({ error: `Group does not exist (${contractId})` }, 404);

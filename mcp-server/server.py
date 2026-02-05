@@ -835,7 +835,8 @@ async def _estimate_fee(action: str, account_id: str = None) -> int:
     """Queries contract for fee yoctoNEAR."""
     config = get_network_config(account_id)
     # Use dummy key for view-only calls
-    acc = Account("dummy.near", DUMMY_PRIVATE_KEY, config["rpc_url"])
+    dummy_account = "dummy.testnet" if config["is_testnet"] else "dummy.near"
+    acc = Account(dummy_account, DUMMY_PRIVATE_KEY, config["rpc_url"])
     await acc.startup()
 
     result = await acc.view_function(
@@ -1490,9 +1491,10 @@ async def auth_status_rest(request: Request):
     
     if near_account_id and group_id != "default":
         try:
-            acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
-            await acc.startup()
             config = get_network_config(near_account_id)
+            dummy_account = "dummy.testnet" if config["is_testnet"] else "dummy.near"
+            acc = Account(dummy_account, DUMMY_PRIVATE_KEY, config["rpc_url"])
+            await acc.startup()
             auth_result = await acc.view_function(
                 contract_id=config["contract_id"],
                 method_name="is_authorized",
@@ -1865,10 +1867,10 @@ async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
     if near_account_id and group_id != "default":
         try:
             # View-only call with dummy key
-            acc = Account("dummy.near", DUMMY_PRIVATE_KEY, RPC_URL)
-            await acc.startup()
-            
             config = get_network_config(near_account_id)
+            dummy_account = "dummy.testnet" if config["is_testnet"] else "dummy.near"
+            acc = Account(dummy_account, DUMMY_PRIVATE_KEY, config["rpc_url"])
+            await acc.startup()
             auth_result = await acc.view_function(
                 contract_id=config["contract_id"],
                 method_name="is_authorized",
@@ -1882,13 +1884,14 @@ async def auth_status(ctx: Context, group_id: str = "test_group") -> dict:
     return result
     
 
-async def verify_shade_checksum_for_group(group_id: str, checksum: str, contract_id: str = None) -> bool:
+async def verify_shade_checksum_for_group(group_id: str, checksum: str, account_id: str = None, contract_id: str = None) -> bool:
     """Verifies Shade attestation checksum against on-chain expected for the group."""
-    contract_id = os.environ["CONTRACT_ID"]
-    rpc = os.environ["RPC_URL"]
-    private_key = DUMMY_PRIVATE_KEY  # Dummy for views
-    acc = Account("dummy.near", private_key, rpc)  # Dummy account for view
+    config = get_network_config(account_id)
+    contract_id = contract_id or config["contract_id"]
+    dummy_account = "dummy.testnet" if config["is_testnet"] else "dummy.near"
+    acc = Account(dummy_account, DUMMY_PRIVATE_KEY, config["rpc_url"])
     await acc.startup()
+
     try:
         # Fetch expected checksum from contract view
         checksum_result = await acc.view_function(

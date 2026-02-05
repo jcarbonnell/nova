@@ -34,4 +34,4 @@ services:
       - "3000:3000"
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
-    restart: always
+    restart: alwayimage: jcarbonnell/nova-shade-agents
