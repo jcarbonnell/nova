@@ -288,6 +288,18 @@ async def auth_middleware(ctx: Context):
 # Initialize FastMCP server
 mcp = FastMCP(name="nova-mcp")
 
+# ADD CORS MIDDLEWARE
+from starlette.middleware.cors import CORSMiddleware
+
+# Get the underlying ASGI app and add CORS
+mcp._app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https://.*\.(near\.page|testnet\.page)$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
 # Use @mcp.route for custom HTTP endpoint
 @mcp.custom_route("/", methods=["GET"])
 async def mcp_health(request: Request):

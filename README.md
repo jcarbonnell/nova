@@ -316,6 +316,7 @@ Comprehensive documentation is available on GitBook:
 - **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
 - **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + IPFS storage costs)
 - **Multi-Chain Support**: Expand to other NEAR-compatible chains
+- **NOVA account Backup**: NOVA accounts are NEAR wallets stored in shade TEE. If Shade gets out-of-service, or even with hard updates, the DB in shade is wiped out. I need a backup solution to migrate accounts + group memberships and other indexed data (transaction history) from the shade in tee to another.
 
 ## Contributing
 
