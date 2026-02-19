@@ -64,7 +64,7 @@ This skill allows OpenClaw agents to securely access files shared by users, enab
 
 ```bash
 cd ~/openclaw/skills
-git clone https://github.com/anthropics/nova-skill.git nova-file-sharing
+git clone https://github.com/jcarbonnell/nova/openclaw-skill.git nova-file-sharing
 ```
 
 2. **Make scripts executable:**
@@ -86,8 +86,8 @@ Edit the scripts to replace the API key and account ID with your own:
 ```bash
 # In check_auth.sh and retrieve_and_decrypt.sh, replace:
 X-API-Key: nova_sk_YOUR_API_KEY
-account_id: your-agent.near
-X-Account-Id: your-agent.near
+account_id: your-nova-account.near
+X-Account-Id: your-nova-account.near
 ```
 
 ## Files
