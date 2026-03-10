@@ -29,6 +29,7 @@ import httpx
 import jwt
 
 from fastmcp import FastMCP, Context
+from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_http_headers
 
@@ -61,8 +62,8 @@ PINATA_GATEWAY = os.getenv("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.getenv("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.getenv("IPFS_API_SECRET", "")
 RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer.testnet.near.org")
-DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
 SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
+DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
 SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
 SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
 
@@ -211,6 +212,47 @@ def require_auth(func):
             raise ValueError("No NEAR account configured")
         return await func(ctx, user, *args, **kwargs)
     return wrapper
+
+# ────────────────────────
+# REST Exposer
+# ────────────────────────
+
+def expose_as_rest(path: str, methods: list[str] = ["POST"]):
+    def decorator(original_func: Callable):
+        # 1. Register as MCP tool (required for chat interface)
+        mcp.tool(original_func)
+
+        # 2. Create REST wrapper that calls the SAME function
+        @mcp.custom_route(path, methods=methods)
+        async def rest_handler(request: Request):
+            try:
+                body = await request.json()
+            except:
+                body = {}
+
+            user = get_current_user(request=request)
+
+            sig = signature(original_func)
+            kwargs = {}
+            for param in sig.parameters.values():
+                if param.name in ("ctx", "user"):
+                    continue
+                default = param.default if param.default is not param.empty else None
+                kwargs[param.name] = body.get(param.name, default)
+
+            try:
+                result = await original_func(None, user, **kwargs)  # ctx=None for REST
+                return JSONResponse({"result": result})
+            except Exception as e:
+                logger.error(f"REST {path} failed: {e}")
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        # Unique name to avoid inspector confusion
+        rest_handler.__name__ = f"rest_{original_func.__name__}"
+
+        return original_func  # return original for @mcp.tool chain
+
+    return decorator
 
 # ─────────────────────────────
 # Contract & Shade Integrations
@@ -374,185 +416,33 @@ async def _ipfs_retrieve(cid: str, account_id: str | None = None) -> str:
         resp.raise_for_status()
         return base64.b64encode(resp.content).decode()
     
-# ────────────────────────
-# REST Exposer
-# ────────────────────────
-
-def expose_as_rest(path: str, methods: list = ["POST"]):
-    """Decorator: Registers tool for MCP AND exposes it as REST endpoint."""
-    def decorator(tool_func: Callable):
-        # 1. Register as normal MCP tool (with @require_auth already applied)
-        mcp.tool(tool_func)  # This makes it available in chat
-
-        # 2. Create REST handler that calls the ORIGINAL tool logic
-        @mcp.custom_route(path, methods=methods)
-        @wraps(tool_func)
-        async def rest_handler(request: Request):
-            try:
-                body = await request.json()
-            except:
-                body = {}
-
-            # Authenticate from REST headers
-            user = get_current_user(request=request)
-
-            # Extract args matching tool signature (skip ctx/user)
-            sig = signature(tool_func)
-            kwargs = {}
-            for param in sig.parameters.values():
-                if param.name in ("ctx", "user"):
-                    continue
-                default = param.default if param.default is not param.empty else None
-                kwargs[param.name] = body.get(param.name, default)
-
-            try:
-                # Call ORIGINAL function (bypasses REST wrapper)
-                # If @require_auth is present, it already checks user
-                result = await tool_func(None, user, **kwargs)  # ctx=None (not needed)
-                return JSONResponse({"result": result})
-            except Exception as e:
-                logger.error(f"REST {path} error: {e}")
-                return JSONResponse({"error": str(e)}, status_code=500)
-
-        return tool_func  # Return original so MCP chain continues
-
-    return decorator
 
 # ─────────────
-# MCP Tools
+# MCP Tools + REST exposure
 # ─────────────
 
 mcp = FastMCP(name="nova-mcp")
-
-@mcp.tool
-@require_auth
-async def register_group(ctx: Context, user: dict, group_id: str) -> str:
-    await call_contract(user, "register_group", {"group_id": group_id}, "register_group")
-    # Shade key generation
-    config = get_config(user["near_account_id"])
-    headers = {"Content-Type": "application/json"}
-    if user.get("wallet_id"):
-        headers["Authorization"] = f"Bearer wallet:{user['wallet_id']}"
-    elif user.get("access_token"):
-        headers["Authorization"] = f"Bearer {user['access_token']}"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        await client.post(f"{SHADE_API_URL}/api/key-management/generate_key",
-                          json={"group_id": group_id, "owner": user["near_account_id"], "account_id": user["near_account_id"]},
-                          headers=headers)
-    return f"Group '{group_id}' registered successfully"
-
-@mcp.tool
-@require_auth
-async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
-    member_id = normalize_account_id(member_id)
-    await call_contract(user, "add_group_member", {"group_id": group_id, "user_id": member_id}, "add_group_member")
-    return f"Added {member_id} to group '{group_id}'"
-
-@mcp.tool
-@require_auth
-async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
-    member_id = normalize_account_id(member_id)
-    await call_contract(user, "revoke_group_member", {"group_id": group_id, "user_id": member_id}, "revoke_group_member")
-    return f"Revoked {member_id} from group '{group_id}' (key rotated)"
-
-@mcp.tool
-@require_auth
-async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str) -> dict:
-    cleanup_expired_uploads()
-    key = await _get_shade_key_internal(group_id, user)
-    upload_id = str(uuid4())
-    PENDING_UPLOADS[upload_id] = {
-        "group_id": group_id, "filename": filename,
-        "user_id": user["near_account_id"], "user_email": user.get("email"),
-        "wallet_id": user.get("wallet_id"), "access_token": user.get("access_token"),
-        "expires_at": time.time() + UPLOAD_EXPIRY_SECONDS,
-    }
-    return {"upload_id": upload_id, "key": key, "group_id": group_id, "filename": filename}
-
-@mcp.tool
-@require_auth
-async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str) -> dict:
-    cleanup_expired_uploads()
-    if upload_id not in PENDING_UPLOADS:
-        raise ValueError("Invalid or expired upload_id")
-    ctx_data = PENDING_UPLOADS[upload_id]
-    cid = await _ipfs_upload(encrypted_data, ctx_data["filename"], ctx_data["user_id"])
-    trans_id = await call_contract(user, "record_transaction",
-                                   {"group_id": ctx_data["group_id"], "user_id": ctx_data["user_id"],
-                                    "file_hash": file_hash, "ipfs_hash": cid}, "record_transaction")
-    del PENDING_UPLOADS[upload_id]
-    return {"cid": cid, "trans_id": trans_id, "file_hash": file_hash}
-
-@mcp.tool
-@require_auth
-async def prepare_retrieve(ctx: Context, user: dict, group_id: str, ipfs_hash: str) -> dict:
-    key = await _get_shade_key_internal(group_id, user)
-    encrypted_b64 = await _ipfs_retrieve(ipfs_hash, user["near_account_id"])
-    return {"key": key, "encrypted_b64": encrypted_b64, "ipfs_hash": ipfs_hash, "group_id": group_id}
-
-async def _group_query_tool(ctx: Context, user: dict, method: str, group_id: str | None = None) -> list:
-    args = {"group_id": group_id} if group_id else {}
-    raw = await view_contract(user, method, args)
-    try:
-        return json.loads(raw) if isinstance(raw, str) else raw or []
-    except:
-        return []
-
-@mcp.tool
-@require_auth
-async def get_owned_groups(ctx: Context, user: dict) -> list:
-    return await _group_query_tool(ctx, user, "get_owned_groups") or []
-
-@mcp.tool
-@require_auth
-async def get_member_groups(ctx: Context, user: dict) -> list:
-    return await _group_query_tool(ctx, user, "get_member_groups") or []
-
-@mcp.tool
-@require_auth
-async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
-    return await _group_query_tool(ctx, user, "get_group_members", group_id) or []
-
-@mcp.tool
-@require_auth
-async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> list:
-    return await _group_query_tool(ctx, user, "get_transactions_for_group", group_id) or []
-
-@mcp.tool
-@require_auth
-async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") -> dict:
-    result = {"authenticated": True, "near_account_id": user["near_account_id"], "group_id": group_id}
-    if user["near_account_id"] and group_id != "default":
-        try:
-            config = get_config(user["near_account_id"])
-            acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-            await acc.startup()
-            auth_result = await acc.view_function(config["contract_id"], "is_authorized",
-                                                  {"group_id": group_id, "user_id": user["near_account_id"]})
-            result["authorized_for_group"] = auth_result.result
-        except:
-            result["authorized_for_group"] = False
-    return result
-
-
-# ────────────────────
-# REST Endpoints
-# ────────────────────
 
 @expose_as_rest("/tools/register_group")
 @require_auth
 async def register_group(ctx: Context, user: dict, group_id: str) -> str:
     await call_contract(user, "register_group", {"group_id": group_id}, "register_group")
+    
     config = get_config(user["near_account_id"])
     headers = {"Content-Type": "application/json"}
     if user.get("wallet_id"):
         headers["Authorization"] = f"Bearer wallet:{user['wallet_id']}"
     elif user.get("access_token"):
         headers["Authorization"] = f"Bearer {user['access_token']}"
+    
     async with httpx.AsyncClient(timeout=15.0) as client:
         await client.post(
             f"{SHADE_API_URL}/api/key-management/generate_key",
-            json={"group_id": group_id, "owner": user["near_account_id"], "account_id": user["near_account_id"]},
+            json={
+                "group_id": group_id,
+                "owner": user["near_account_id"],
+                "account_id": user["near_account_id"]
+            },
             headers=headers
         )
     return f"Group '{group_id}' registered successfully"
@@ -619,7 +509,6 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
     
     ctx_data = PENDING_UPLOADS[upload_id]
     
-    # Security: verify caller owns this upload
     if ctx_data["user_id"] != user["near_account_id"]:
         raise ValueError("Account mismatch - you do not own this upload")
     
@@ -690,22 +579,70 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
 @expose_as_rest("/tools/get_owned_groups")
 @require_auth
 async def get_owned_groups(ctx: Context, user: dict) -> list:
-    return await _group_query_tool(ctx, user, "get_owned_groups") or []
+    config = get_config(user["near_account_id"])
+    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
+    await acc.startup()
+    result = await acc.view_function(
+        contract_id=config["contract_id"],
+        method_name="get_owned_groups",
+        args={}
+    )
+    return result.result or []
 
 @expose_as_rest("/tools/get_member_groups")
 @require_auth
 async def get_member_groups(ctx: Context, user: dict) -> list:
-    return await _group_query_tool(ctx, user, "get_member_groups") or []
+    config = get_config(user["near_account_id"])
+    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
+    await acc.startup()
+    result = await acc.view_function(
+        contract_id=config["contract_id"],
+        method_name="get_member_groups",
+        args={}
+    )
+    return result.result or []
 
 @expose_as_rest("/tools/get_group_members")
 @require_auth
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
-    return await _group_query_tool(ctx, user, "get_group_members", group_id) or []
+    config = get_config(user["near_account_id"])
+    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
+    await acc.startup()
+    result = await acc.view_function(
+        contract_id=config["contract_id"],
+        method_name="get_group_members",
+        args={"group_id": group_id}
+    )
+    return result.result or []
 
 @expose_as_rest("/tools/get_group_transactions")
 @require_auth
 async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> list:
-    return await _group_query_tool(ctx, user, "get_transactions_for_group", group_id) or []
+    config = get_config(user["near_account_id"])
+    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
+    await acc.startup()
+    result = await acc.view_function(
+        contract_id=config["contract_id"],
+        method_name="get_transactions_for_group",
+        args={"group_id": group_id}
+    )
+    return result.result or []
+
+# ────────────────────────────────
+# Auth0 JWT Verification (global)
+# ────────────────────────────────
+
+token_verifier = JWTVerifier(
+    jwks_uri=f"https://{AUTH0_DOMAIN}/.well-known/jwks.json" if AUTH0_DOMAIN else None,
+    issuer=AUTH0_ISSUER if AUTH0_DOMAIN else None,
+    audience=AUTH0_AUDIENCE
+)
+
+auth_provider = RemoteAuthProvider(
+    token_verifier=token_verifier,
+    authorization_servers=[AUTH0_ISSUER] if AUTH0_DOMAIN else [],
+    base_url="https://nova-mcp.fastmcp.app"
+) if AUTH0_DOMAIN else None
 
 # ─────────────────
 # Custom Routes 
@@ -735,19 +672,62 @@ async def unsubscribe_route(request: Request):
 
 @mcp.custom_route("/auth/callback", methods=["GET"])
 async def auth_callback(request: Request):
-    # Your existing OAuth logic here (unchanged)
-    pass
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing auth code")
+
+    # Exchange code for tokens
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        token_resp = await client.post(
+            f"https://{AUTH0_DOMAIN}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": AUTH0_CLIENT_ID,
+                "client_secret": AUTH0_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": "https://nova-sdk.com/callback"
+            }
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+
+    id_token = token_data.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=401, detail="No id_token received from Auth0")
+
+    # Verify the ID token
+    if not auth_provider:
+        raise HTTPException(status_code=500, detail="Auth provider not configured")
+
+    try:
+        claims = auth_provider.token_verifier.verify(id_token)
+    except Exception as e:
+        logger.error(f"Token verification failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
+
+    email = claims.get("email")
+    near_account_id = claims.get("near_account_id")  # custom claim if you configured it
+
+    if not email:
+        raise HTTPException(status_code=400, detail="No email in claims")
+
+    # Store/update user
+    store_user(email=email, near_account_id=near_account_id)
+    logger.info(f"User authenticated and stored: {email} → {near_account_id or 'no NEAR account'}")
+
+    # Redirect back to frontend with id_token (or access_token if preferred)
+    # You can also set a cookie/session here if needed
+    frontend_url = f"https://nova-sdk.com?token={id_token}"
+    return RedirectResponse(url=frontend_url, status_code=302)
 
 # ────────────────────
 # CORS & Expose App
 # ────────────────────
 
-mcp.app.add_middleware(
+mcp.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(.*\.)?(nova-sdk\.com|localhost)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app = mcp.app
