@@ -15,6 +15,7 @@ from inspect import signature
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 import asyncio
@@ -720,13 +721,29 @@ async def auth_callback(request: Request):
     return RedirectResponse(url=frontend_url, status_code=302)
 
 # ────────────────────
-# CORS & Expose App
+# CORS Middleware for browser clients
 # ────────────────────
 
-mcp.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"https?://(.*\.)?(nova-sdk\.com|localhost)(:\d+)?",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+cors_middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://nova-sdk.com",
+            "https://www.nova-sdk.com",
+            "http://localhost:3000",  # local dev
+            "http://localhost:5173",  # vite dev
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "x-user-email",
+            "x-account-id", 
+            "x-wallet-id",
+            "mcp-protocol-version",
+            "mcp-session-id",
+        ],
+        expose_headers=["mcp-session-id"],
+    )
+]
