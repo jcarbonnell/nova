@@ -12,8 +12,9 @@ from contextlib import contextmanager
 from functools import wraps
 from inspect import signature
 
-from fastapi import Request, HTTPException
-from fastapi.responses import RedirectResponse, JSONResponse
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.exceptions import HTTPException
 from starlette.middleware.cors import CORSMiddleware
 
 import asyncio
