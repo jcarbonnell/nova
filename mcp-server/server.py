@@ -22,7 +22,6 @@ import base64
 # Crypto / NEAR
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
-import py_near
 from py_near.account import Account
 import httpx
 import jwt
