@@ -730,8 +730,8 @@ cors_middleware = [
         allow_origins=[
             "https://nova-sdk.com",
             "https://www.nova-sdk.com",
-            "http://localhost:3000",  # local dev
-            "http://localhost:5173",  # vite dev
+            "http://localhost:3000",
+            "http://localhost:5173",
         ],
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS", "DELETE"],

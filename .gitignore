@@ -12,6 +12,12 @@ nova-venv/
 # Contract
 contract/target
 contract/*.wasm
+contract/Cargo.lock
+
+# KV Contract
+kv-contract/target
+kv-contract/*.wasm
+contract/Cargo.lock
 
 # Demos
 demos/.env
