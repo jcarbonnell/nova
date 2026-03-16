@@ -17,8 +17,9 @@
     "@hono/node-server": "^1.15.0",
     "@neardefi/shade-agent-js": "^1.0.4",
     "@noble/ed25519": "^3.0.0",
+    "@noble/hashes": "^2.0.1",
     "@types/better-sqlite3": "^7.6.13",
-    "axios": "^1.12.2",
+    "axios": "^1.13.6",
     "better-sqlite3": "^12.4.1",
     "bs58": "^6.0.0",
     "chainsig.js": "^1.1.11",
@@ -28,6 +29,7 @@
     "hono": "^4.8.4",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.2.0",
+    "near-api-js": "^5.1.1",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {

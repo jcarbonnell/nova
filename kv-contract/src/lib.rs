@@ -1,3 +1,4 @@
+// simple key-value contract for NOVA key management
 use near_sdk::{env, near, AccountId, PanicOnDefault};
 use near_sdk::store::IterableMap;
 
