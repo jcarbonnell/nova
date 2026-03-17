@@ -33,7 +33,7 @@ services:
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image – update tag to your new build (v7 or main)
-    image: jcarbonnell/nova-shade-agent:v11
+    image: jcarbonnell/nova-shade-agent:v17
     container_name: shade-agent-app
     ports:
       - "3000:3000"

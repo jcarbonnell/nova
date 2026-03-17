@@ -162,7 +162,10 @@ async function getBlobFromKV(key: string): Promise<string | number[] | null> {
   try {
     const result = await rpcCallWithRetry(rpcUrl, payload) as { result?: number[] } | null;
     if (result?.result && result.result.length > 0) {
-      return Array.from(result.result);
+      const jsonStr = Buffer.from(result.result).toString('utf8');
+      const parsed: number[] | null = JSON.parse(jsonStr);
+      if (!parsed || parsed.length === 0) return null;
+      return parsed;
     }
     return null;
   } catch (err) {
@@ -261,7 +264,9 @@ async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> 
   const blockHash = bs58.decode(accessKeyResult.block_hash);
 
   // 3. Encode FunctionCall action + full transaction
-  const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: encryptedBlob }));
+  const [ivHex, encHex] = encryptedBlob.split(':');
+  const rawBytes = Buffer.concat([Buffer.from(ivHex, 'hex'), Buffer.from(encHex, 'hex')]);
+  const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
   const action = encodeFunctionCallAction('store', callArgs, 30_000_000_000_000n, 0n);
   const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
 
@@ -281,7 +286,11 @@ async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> 
     jsonrpc: '2.0', id: 'broadcast',
     method: 'broadcast_tx_commit',
     params: [signedTx.toString('base64')],
-  }) as { transaction?: { hash: string } };
+  }) as { transaction?: { hash: string }; status?: { Failure?: unknown } };
+
+  if (broadcastResult?.status?.Failure) {
+    throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
+  }
   log('info', 'kv_store_committed', { key, txHash: broadcastResult?.transaction?.hash });
 }
 
@@ -394,6 +403,12 @@ function checkRateLimit(key: string): boolean {
 
 const userKeys = new Hono();
 
+// Ensure master seed is loaded before any route handler runs
+userKeys.use('*', async (c, next) => {
+  await initializeMasterSeedIfNeeded();
+  await next();
+});
+
 // STORE - Store user key (deterministic derivation)
 userKeys.post('/store', async (c) => {
   const clientIp = c.req.header('x-forwarded-for') ?? 'unknown';
@@ -451,7 +466,7 @@ userKeys.post('/store', async (c) => {
 // RETRIEVE - Fetch and decrypt
 userKeys.post('/retrieve', async (c) => {
   try {
-    const { email, auth_token, account_id } = await c.req.json();
+    const { email, auth_token, account_id, wallet_id: walletId } = await c.req.json();
 
     let verifiedUser: { email: string; sub: string } | null = null;
     let targetAccountId: string;
@@ -462,15 +477,17 @@ userKeys.post('/retrieve', async (c) => {
       verifiedUser = await verifyAuth0Token(auth_token);
       if (verifiedUser.email !== email) return c.json({ error: 'Unauthorized' }, 403);
 
-      // Derive keyId same way as store
-      const salt = `user:${verifiedUser.sub}:${account_id || 'unknown'}`;
-      const keyId = crypto.createHash('sha256').update(salt).digest('hex');
       targetAccountId = account_id || 'derived';
     } else {
       return c.json({ error: 'Missing fields' }, 400);
     }
 
-    const keyId = crypto.createHash('sha256').update(`user:${verifiedUser?.sub || 'wallet'}:${targetAccountId}`).digest('hex');
+    // Reconstruct the exact same salt used in /store
+    // wallet_id path: sub = 'wallet|{wallet_id}'
+    // auth_token path: sub = verifiedUser.sub
+    const sub = verifiedUser?.sub || (walletId ? `wallet|${walletId}` : null);
+    if (!sub) return c.json({ error: 'Cannot derive key id without auth_token or wallet_id' }, 400);
+    const keyId = crypto.createHash('sha256').update(`user:${sub}:${targetAccountId}`).digest('hex');
     const encryptedBlob = await getBlobFromKV(keyId);
     if (!encryptedBlob) return c.json({ error: 'Account not found' }, 404);
 
@@ -498,12 +515,14 @@ userKeys.post('/check', async (c) => {
     const { email, auth_token, wallet_id, account_id } = await c.req.json();
 
     let targetAccountId: string;
+    let verifiedSub: string | undefined;
 
-    if (account_id) {
+    if (account_id && !auth_token && !wallet_id) {
       targetAccountId = account_id;
     } else if (email && auth_token) {
       const verified = await verifyAuth0Token(auth_token);
       if (verified.email !== email) return c.json({ error: 'Unauthorized' }, 403);
+      verifiedSub = verified.sub;
       targetAccountId = account_id || 'unknown';
     } else if (wallet_id) {
       targetAccountId = account_id || 'wallet-derived';
@@ -511,7 +530,12 @@ userKeys.post('/check', async (c) => {
       return c.json({ error: 'Missing fields' }, 400);
     }
 
-    const salt = `user:${email || wallet_id || 'unknown'}:${targetAccountId}`;
+    const sub = verifiedSub
+      ? verifiedSub
+      : wallet_id
+        ? `wallet|${wallet_id}`
+        : email || 'unknown';
+    const salt = `user:${sub}:${targetAccountId}`;
     const keyId = crypto.createHash('sha256').update(salt).digest('hex');
 
     const blob = await getBlobFromKV(keyId);
@@ -554,7 +578,7 @@ userKeys.post('/generate-api-key', async (c) => {
 
     // Store hash on KV under derived key
     const hashKeyId = crypto.createHash('sha256').update(`api-hash:${targetAccountId}`).digest('hex');
-    await storeBlobToKV(hashKeyId, apiKeyHash);
+    await storeBlobToKV(hashKeyId, encryptBlob(Buffer.from(apiKeyHash, 'utf8')));
 
     return c.json({
       success: true,
@@ -583,9 +607,7 @@ userKeys.post('/verify-api-key', async (c) => {
 
     if (!storedHash) return c.json({ valid: false, error: 'No API key configured' }, 401);
 
-    const storedHashStr = Array.isArray(storedHash)
-      ? Buffer.from(storedHash).toString('utf8')
-      : storedHash;
+    const storedHashStr = Buffer.from(decryptBlob(storedHash)).toString('utf8');
 
     const isValid = crypto.timingSafeEqual(
       Buffer.from(storedHashStr, 'hex'),
