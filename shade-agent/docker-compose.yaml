@@ -4,10 +4,10 @@ services:
     environment:
       NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
       NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
+      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
       API_CODEHASH: ${API_CODEHASH}
       APP_CODEHASH: ${APP_CODEHASH}
       NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
-      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-api-image
     image: mattdlockyer/shade-agent-api@sha256:a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5
@@ -16,22 +16,27 @@ services:
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
     restart: always
+
   shade-agent-app:
     environment:
       NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
+      NEAR_RPC_URL: ${NEAR_RPC_URL}
+      KV_CONTRACT_ID: ${KV_CONTRACT_ID}
+      NOVA_CONTRACT_ID: ${NOVA_CONTRACT_ID}
+      NOVA_TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
+      SHADE_AGENT_ACCOUNT_ID: ${SHADE_AGENT_ACCOUNT_ID}
+      TEE_KEY_SECRET: ${TEE_KEY_SECRET}
       JWT_SECRET: ${JWT_SECRET}
       AUTH0_DOMAIN: ${AUTH0_DOMAIN}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
-      NOVA_CONTRACT_ID: ${NOVA_CONTRACT_ID}
-      TEE_KEY_SECRET: ${TEE_KEY_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
-    # shade-agent-app-image
-    image: jcarbonnell/nova-shade-agent:v6
+    # shade-agent-app-image – update tag to your new build (v7 or main)
+    image: jcarbonnell/nova-shade-agent:v11
     container_name: shade-agent-app
     ports:
       - "3000:3000"
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
-    restart: alwayimage: jcarbonnell/nova-shade-agents
+    restart: always
