@@ -25,6 +25,7 @@ services:
       NOVA_CONTRACT_ID: ${NOVA_CONTRACT_ID}
       NOVA_TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
       SHADE_AGENT_ACCOUNT_ID: ${SHADE_AGENT_ACCOUNT_ID}
+      NOVA_SIGNER_ACCOUNT_ID: ${NOVA_SIGNER_ACCOUNT_ID}
       TEE_KEY_SECRET: ${TEE_KEY_SECRET}
       JWT_SECRET: ${JWT_SECRET}
       AUTH0_DOMAIN: ${AUTH0_DOMAIN}
@@ -33,7 +34,7 @@ services:
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image – update tag to your new build (v7 or main)
-    image: jcarbonnell/nova-shade-agent:v20
+    image: jcarbonnell/nova-shade-agent:v23
     container_name: shade-agent-app
     ports:
       - "3000:3000"

@@ -192,11 +192,19 @@ async function broadcastContractCall(
   const rpcUrl = network === 'testnet'
     ? 'https://rpc.testnet.near.org'
     : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
-
   const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
-  const signerPriv = deriveKey('kv-signer-v1', 32);
+  const signerPriv = deriveKey('nova-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
+
+  log('info', 'broadcast_contract_call_attempt', {
+    signerAccountId,
+    signerPubBs58,
+    contractId,
+    methodName,
+    depositYocto,
+    rpcUrl,
+  });
 
   const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
     jsonrpc: '2.0', id: 'access-key',
@@ -237,8 +245,7 @@ async function broadcastContractCall(
 async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
   const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
   const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
-
-  const signerPriv = deriveKey('nova-signer-v1', 32);
+  const signerPriv = deriveKey('kv-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
 
@@ -665,7 +672,7 @@ keyMgmt.post('/revoke_member', async (c) => {
     network,
     'revoke_group_member',
     { group_id, user_id },
-    '15000000000000000000', // 0.015 NEAR fee in yoctoNEAR
+    '0',
   );
   log('info', 'member_revoked_on_chain', { group_id, user_id });
 
