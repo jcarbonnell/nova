@@ -1,4 +1,4 @@
-// NOVA contract v0.3.0 - multi-user w/ Shade/TEEs + pay-per-action fees
+// NOVA contract v0.3.1 - multi-user w/ Shade/TEEs + pay-per-action fees
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -264,7 +264,11 @@ impl Contract {
     #[payable]
     pub fn revoke_group_member(&mut self, group_id: String, user_id: AccountId) {
         let attached = env::attached_deposit().as_yoctonear();
-        self.collect_fee("revoke_group_member", attached);
+        // Contract owner (via shade agent) pays no protocol fee for revocations
+        let caller = env::predecessor_account_id();
+        if caller != self.owner {
+            self.collect_fee("revoke_group_member", attached);
+        }
         
         let group = self.groups.get(&group_id).expect("Group not found");
         let caller = env::predecessor_account_id();

@@ -181,12 +181,64 @@ function encodeTransaction(
   ]);
 }
 
+// Generic contract call broadcaster — reuses same signer keypair as storeBlobToKV
+async function broadcastContractCall(
+  contractId: string,
+  network: string,
+  methodName: string,
+  args: Record<string, unknown>,
+  depositYocto: string = '0',
+): Promise<void> {
+  const rpcUrl = network === 'testnet'
+    ? 'https://rpc.testnet.near.org'
+    : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
+
+  const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
+  const signerPriv = deriveKey('kv-signer-v1', 32);
+  const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
+  const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
+
+  const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
+    jsonrpc: '2.0', id: 'access-key',
+    method: 'query',
+    params: {
+      request_type: 'view_access_key',
+      finality: 'final',
+      account_id: signerAccountId,
+      public_key: signerPubBs58,
+    },
+  }) as { nonce: number; block_hash: string };
+
+  const nonce = BigInt(accessKeyResult.nonce) + 1n;
+  const blockHash = bs58.decode(accessKeyResult.block_hash);
+  const callArgs = Buffer.from(JSON.stringify(args));
+  const deposit = BigInt(depositYocto);
+  const action = encodeFunctionCallAction(methodName, callArgs, 50_000_000_000_000n, deposit);
+  const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, contractId, blockHash, [action]);
+  const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
+  const signature = await ed25519.signAsync(txHash, signerPriv);
+  const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
+
+  const broadcastResult = await rpcCallWithRetry(rpcUrl, {
+    jsonrpc: '2.0', id: 'broadcast',
+    method: 'broadcast_tx_commit',
+    params: [signedTx.toString('base64')],
+  }) as { transaction?: { hash: string }; status?: { Failure?: unknown } };
+
+  if (broadcastResult?.status?.Failure) {
+    throw new Error(`Contract call failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
+  }
+  log('info', 'contract_call_committed', {
+    contractId, methodName, txHash: broadcastResult?.transaction?.hash,
+  });
+}
+
 // Signed transaction broadcast
 async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
   const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
   const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
 
-  const signerPriv = deriveKey('kv-signer-v1', 32);
+  const signerPriv = deriveKey('nova-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
 
@@ -570,9 +622,11 @@ keyMgmt.post('/get_key', async (c) => {
   // Check if key has been rotated — look up stored version
   const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
   const versionBlob = await getBlobFromKV(versionKeyId);
-  const version = versionBlob
-    ? Buffer.from(decryptBlob(versionBlob)).toString('utf8')
-    : null;
+  let version: string | null = null;
+  if (versionBlob) {
+    const combined = JSON.parse(Buffer.from(decryptBlob(versionBlob)).toString('utf8'));
+    version = combined.version ?? null;
+  }
 
   const salt = version
     ? `group:${group_id}:${network}:${contractId}:v${version}`
@@ -582,6 +636,57 @@ keyMgmt.post('/get_key', async (c) => {
   const keyB64 = Buffer.from(keyBytes).toString('base64');
 
   return c.json({ key: keyB64, checksum: 'derived-verified' });
+});
+
+// REVOKE MEMBER + AUTO-ROTATE — single atomic operation
+// Clients call this instead of calling nova-sdk.near directly
+keyMgmt.post('/revoke_member', async (c) => {
+  const { group_id, user_id, contract_id } = await c.req.json();
+  if (!group_id || !user_id) return c.json({ error: 'group_id and user_id required' }, 400);
+
+  let resolved;
+  try {
+    resolved = resolveContract(contract_id, group_id);
+  } catch (e: unknown) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+  const { contractId, network } = resolved;
+
+  // 1. Verify group exists and user is currently a member
+  const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
+  if (!groupExists) return c.json({ error: `Group not found on ${contractId}` }, 404);
+
+  const isMember = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
+  if (!isMember) return c.json({ error: 'User is not a member' }, 400);
+
+  // 2. Broadcast revoke_group_member to nova-sdk.near
+  await broadcastContractCall(
+    contractId,
+    network,
+    'revoke_group_member',
+    { group_id, user_id },
+    '15000000000000000000', // 0.015 NEAR fee in yoctoNEAR
+  );
+  log('info', 'member_revoked_on_chain', { group_id, user_id });
+
+  // 3. Immediately rotate the group key
+  const version = Date.now();
+  const salt = `group:${group_id}:${network}:${contractId}:v${version}`;
+  const newKeyBytes = deriveKey(salt, 32);
+  const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
+  const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
+  const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+  await storeBlobToKV(versionKeyId, combinedEncrypted);
+
+  log('info', 'key_auto_rotated', { group_id, version, revokedUser: user_id });
+
+  return c.json({
+    success: true,
+    group_id,
+    revoked_user_id: user_id,
+    version,
+    message: 'Member revoked and key rotated atomically',
+  });
 });
 
 // ROTATE KEY - New deterministic key (different salt or version)
@@ -606,12 +711,13 @@ keyMgmt.post('/rotate_key', async (c) => {
 
   // Store new blob
   const encrypted = encryptBlob(newKeyBytes);
-  const keyId = crypto.createHash('sha256').update(salt).digest('hex');
-  await storeBlobToKV(keyId, encrypted);
+  const versionStr = version.toString();
 
-  // Store version under a stable lookup key so get_key can find the current version
+  // Pack key + version into a single encrypted blob
+  const combined = JSON.stringify({ key: encrypted, version: versionStr });
+  const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
   const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
-  await storeBlobToKV(versionKeyId, encryptBlob(Buffer.from(version.toString(), 'utf8')));
+  await storeBlobToKV(versionKeyId, combinedEncrypted);
 
   const newKeyHash = crypto.createHash('sha256').update(newKeyBytes).digest('hex');
 
