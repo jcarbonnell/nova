@@ -269,7 +269,7 @@ async def get_user_signer(user: dict) -> Account:
     if user["email"] and user["access_token"]:
         payload = {"email": user["email"], "auth_token": user["access_token"]}
     elif user["wallet_id"]:
-        payload = {"account_id": near_account_id}
+        payload = {"account_id": near_account_id, "wallet_id": user["wallet_id"]}
     else:
         payload = {"account_id": near_account_id}
 
@@ -463,13 +463,21 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
 @require_auth
 async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
     member_id = normalize_account_id(member_id)
-    await call_contract(
-        user=user,
-        method_name="revoke_group_member",
-        args={"group_id": group_id, "user_id": member_id},
-        fee_action="revoke_group_member"
-    )
-    return f"Revoked {member_id} from group '{group_id}' (key rotated)"
+    config = get_config(user["near_account_id"])
+    # Use shade agent atomic endpoint — revokes on-chain AND rotates key in one call
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{SHADE_API_URL}/api/key-management/revoke_member",
+            json={
+                "group_id": group_id,
+                "user_id": member_id,
+                "contract_id": config["contract_id"],
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Atomic revoke failed: {resp.status_code} - {resp.text[:200]}")
+    return f"Revoked {member_id} from group '{group_id}' (key rotated atomically)"
 
 @expose_as_rest("/tools/prepare_upload")
 @require_auth
