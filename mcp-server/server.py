@@ -415,16 +415,44 @@ async def _ipfs_retrieve(cid: str, account_id: str | None = None) -> str:
         resp = await client.get(f"{gateway}/{cid.lstrip('/')}")
         resp.raise_for_status()
         return base64.b64encode(resp.content).decode()
-    
+
+# ────────────────────
+# CORS Middleware for browser clients
+# ────────────────────
+
+cors_middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://nova-sdk.com",
+            "https://www.nova-sdk.com",
+            "http://localhost:3000",
+            "http://localhost:5173",
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "x-user-email",
+            "x-account-id", 
+            "x-wallet-id",
+            "mcp-protocol-version",
+            "mcp-session-id",
+        ],
+        expose_headers=["mcp-session-id"],
+    )
+]
+
+mcp = FastMCP(
+    name="nova-mcp",
+    auth=None,
+    middleware=cors_middleware,
+)
 
 # ─────────────
 # MCP Tools + REST exposure
 # ─────────────
-
-mcp = FastMCP(
-    name="nova-mcp",
-    # Auth handled per-tool via @require_auth — not globally enforced
-)
 
 @expose_as_rest("/tools/register_group")
 @require_auth
@@ -727,30 +755,5 @@ async def auth_callback(request: Request):
     frontend_url = f"https://nova-sdk.com?token={id_token}"
     return RedirectResponse(url=frontend_url, status_code=302)
 
-# ────────────────────
-# CORS Middleware for browser clients
-# ────────────────────
-
-cors_middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "https://nova-sdk.com",
-            "https://www.nova-sdk.com",
-            "http://localhost:3000",
-            "http://localhost:5173",
-        ],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "x-user-email",
-            "x-account-id", 
-            "x-wallet-id",
-            "mcp-protocol-version",
-            "mcp-session-id",
-        ],
-        expose_headers=["mcp-session-id"],
-    )
-]
+if __name__ == "__main__":
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
