@@ -41,3 +41,29 @@ services:
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
     restart: always
+
+  nova-mcp:
+    environment:
+      # Internal Docker hostname — resolves within same CVM, no public URL needed
+      SHADE_API_URL: http://shade-agent-app:3000
+      CONTRACT_ID: ${NOVA_CONTRACT_ID}
+      TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
+      RPC_URL: ${NEAR_RPC_URL}
+      TESTNET_RPC_URL: https://rpc.testnet.near.org
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
+      SESSION_TOKEN_SECRET: ${SESSION_TOKEN_SECRET}
+      PINATA_GATEWAY: ${PINATA_GATEWAY}
+      IPFS_API_KEY: ${IPFS_API_KEY}
+      IPFS_API_SECRET: ${IPFS_API_SECRET}
+    platform: linux/amd64
+    image: jcarbonnell/nova-mcp:v8
+    container_name: nova-mcp
+    ports:
+      - "8000:8000"
+    depends_on:
+      - shade-agent-app
+    restart: always
+    # No tappd.sock — MCP server does not perform TDX attestation

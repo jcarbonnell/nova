@@ -212,6 +212,7 @@ def require_auth(func):
         if not user.get("near_account_id"):
             raise ValueError("No NEAR account configured")
         return await func(ctx, user, *args, **kwargs)
+    wrapper.__inner__ = func  # explicit reference bypassing @wraps uncertainty
     return wrapper
 
 # ────────────────────────
@@ -242,7 +243,9 @@ def expose_as_rest(path: str, methods: list[str] = ["POST"]):
                 kwargs[param.name] = body.get(param.name, default)
 
             try:
-                result = await original_func(None, user, **kwargs)  # ctx=None for REST
+                # Call the unwrapped function directly — user is already resolved above.
+                unwrapped = getattr(original_func, '__inner__', original_func)
+                result = await unwrapped(None, user, **kwargs)
                 return JSONResponse({"result": result})
             except Exception as e:
                 logger.error(f"REST {path} failed: {e}")
@@ -298,10 +301,14 @@ async def call_contract(
     gas: int = 100_000_000_000_000,
     extra_attach: int = 0
 ) -> Any:
-    acc = await get_user_signer(user)
+    try:
+        acc = await get_user_signer(user)
+    except Exception as e:
+        raise RuntimeError(f"Failed to get signer for {user.get('near_account_id')}: {e}")
     config = get_config(user["near_account_id"])
     fee = await _estimate_fee(fee_action, user["near_account_id"])
     total_attach = fee + extra_attach + 50_000_000_000_000
+    logger.info(f"call_contract: method={method_name} fee_action={fee_action} fee={fee} total_attach={total_attach}")
 
     result = await acc.function_call(
         contract_id=config["contract_id"],
@@ -329,29 +336,56 @@ async def view_contract(
     method_name: str,
     args: dict
 ) -> Any:
-    """View-only contract call – no fee, no gas attached."""
+    """View-only contract call via direct RPC — no py_near Account needed."""
     config = get_config(user["near_account_id"])
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name=method_name,
-        args=args
-    )
-    
-    return result.result
+    args_b64 = base64.b64encode(json.dumps(args).encode()).decode()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            config["rpc_url"],
+            json={
+                "jsonrpc": "2.0",
+                "id": "view",
+                "method": "query",
+                "params": {
+                    "request_type": "call_function",
+                    "finality": "final",
+                    "account_id": config["contract_id"],
+                    "method_name": method_name,
+                    "args_base64": args_b64,
+                }
+            }
+        )
+        data = resp.json()
+        if data.get("error"):
+            raise RuntimeError(f"RPC error: {data['error']}")
+        result_bytes = bytes(data["result"]["result"])
+        return json.loads(result_bytes.decode())
 
 async def _estimate_fee(action: str, account_id: str | None = None) -> int:
     config = get_config(account_id)
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name="estimate_fee",
-        args={"action": action}
-    )
-    return int(result.result or 0)
+    args_b64 = base64.b64encode(json.dumps({"action": action}).encode()).decode()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            config["rpc_url"],
+            json={
+                "jsonrpc": "2.0",
+                "id": "fee",
+                "method": "query",
+                "params": {
+                    "request_type": "call_function",
+                    "finality": "final",
+                    "account_id": config["contract_id"],
+                    "method_name": "estimate_fee",
+                    "args_base64": args_b64,
+                }
+            }
+        )
+        data = resp.json()
+        if data.get("error"):
+            logger.warning(f"Fee estimation failed for {action}: {data['error']}")
+            return 0
+        result_bytes = bytes(data["result"]["result"])
+        return int(json.loads(result_bytes.decode()) or 0)
 
 async def _get_shade_key_internal(group_id: str, user: dict) -> str:
     config = get_config(user["near_account_id"])
@@ -601,15 +635,12 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
     
     if user["near_account_id"] and group_id != "default":
         try:
-            config = get_config(user["near_account_id"])
-            acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-            await acc.startup()
-            auth_result = await acc.view_function(
-                config["contract_id"],
+            authorized = await view_contract(
+                user,
                 "is_authorized",
                 {"group_id": group_id, "user_id": user["near_account_id"]}
             )
-            result["authorized_for_group"] = auth_result.result
+            result["authorized_for_group"] = authorized
         except Exception as e:
             result["authorized_for_group"] = False
             result["auth_error"] = str(e)
@@ -619,54 +650,38 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
 @expose_as_rest("/tools/get_owned_groups")
 @require_auth
 async def get_owned_groups(ctx: Context, user: dict) -> list:
-    config = get_config(user["near_account_id"])
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name="get_owned_groups",
-        args={}
-    )
-    return result.result or []
+    result = await call_contract(user, "get_owned_groups", {}, "get_owned_groups")
+    if isinstance(result, str):
+        import json
+        return json.loads(result) or []
+    return result or []
 
 @expose_as_rest("/tools/get_member_groups")
 @require_auth
 async def get_member_groups(ctx: Context, user: dict) -> list:
-    config = get_config(user["near_account_id"])
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name="get_member_groups",
-        args={}
-    )
-    return result.result or []
+    result = await call_contract(user, "get_member_groups", {}, "get_member_groups")
+    if isinstance(result, str):
+        import json
+        return json.loads(result) or []
+    return result or []
 
 @expose_as_rest("/tools/get_group_members")
 @require_auth
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
-    config = get_config(user["near_account_id"])
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name="get_group_members",
-        args={"group_id": group_id}
-    )
-    return result.result or []
+    result = await call_contract(user, "get_group_members", {"group_id": group_id}, "get_group_members")
+    if isinstance(result, str):
+        import json
+        return json.loads(result) or []
+    return result or []
 
 @expose_as_rest("/tools/get_group_transactions")
 @require_auth
 async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> list:
-    config = get_config(user["near_account_id"])
-    acc = Account("dummy", DUMMY_PRIVATE_KEY, config["rpc_url"])
-    await acc.startup()
-    result = await acc.view_function(
-        contract_id=config["contract_id"],
-        method_name="get_transactions_for_group",
-        args={"group_id": group_id}
-    )
-    return result.result or []
+    result = await call_contract(user, "get_transactions_for_group", {"group_id": group_id}, "get_transactions_for_group")
+    if isinstance(result, str):
+        import json
+        return json.loads(result) or []
+    return result or []
 
 # ────────────────────────────────
 # Auth0 JWT Verification (global)
@@ -686,7 +701,16 @@ auth_provider = None
 
 @mcp.custom_route("/", methods=["GET"])
 async def health(request: Request):
-    return JSONResponse({"status": "MCP ready", "version": "0.4.1", "auth": "enabled"})
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                "https://rpc.mainnet.near.org",
+                json={"jsonrpc": "2.0", "id": "health", "method": "status", "params": []},
+            )
+            rpc_ok = resp.status_code == 200
+    except Exception as e:
+        rpc_ok = str(e)
+    return JSONResponse({"status": "MCP ready", "version": "0.4.1", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 @mcp.custom_route("/unsubscribe", methods=["GET"])
 async def unsubscribe_route(request: Request):
