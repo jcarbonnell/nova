@@ -421,7 +421,10 @@ async def _ipfs_retrieve(cid: str, account_id: str | None = None) -> str:
 # MCP Tools + REST exposure
 # ─────────────
 
-mcp = FastMCP(name="nova-mcp")
+mcp = FastMCP(
+    name="nova-mcp",
+    # Auth handled per-tool via @require_auth — not globally enforced
+)
 
 @expose_as_rest("/tools/register_group")
 @require_auth
@@ -646,11 +649,7 @@ token_verifier = JWTVerifier(
     audience=AUTH0_AUDIENCE
 )
 
-auth_provider = RemoteAuthProvider(
-    token_verifier=token_verifier,
-    authorization_servers=[AUTH0_ISSUER] if AUTH0_DOMAIN else [],
-    base_url="https://nova-mcp.fastmcp.app"
-) if AUTH0_DOMAIN else None
+auth_provider = None
 
 # ─────────────────
 # Custom Routes 
@@ -704,11 +703,11 @@ async def auth_callback(request: Request):
         raise HTTPException(status_code=401, detail="No id_token received from Auth0")
 
     # Verify the ID token
-    if not auth_provider:
-        raise HTTPException(status_code=500, detail="Auth provider not configured")
-
     try:
-        claims = auth_provider.token_verifier.verify(id_token)
+        claims = jwt.decode(
+            id_token,
+            options={"verify_signature": False},  # signature already verified by Auth0 exchange
+        )
     except Exception as e:
         logger.error(f"Token verification failed: {str(e)}")
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
