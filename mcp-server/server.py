@@ -31,6 +31,7 @@ import jwt
 from fastmcp import FastMCP, Context
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 from fastmcp.server.dependencies import get_http_headers
 
 # ─────────────────
@@ -446,7 +447,7 @@ cors_middleware = [
 
 mcp = FastMCP(
     name="nova-mcp",
-    auth=None,
+    auth=DebugTokenVerifier(),
     middleware=cors_middleware,
 )
 
