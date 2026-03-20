@@ -27,11 +27,11 @@ NOVA fills critical gaps in NEAR’s ecosystem —no native encrypted persistenc
 **Keys are managed off-chain in verifiable TEEs via Shade Agents. Never published on-chain, NOVA file-sharing ensures unbreakable privacy against blockchain fetches.**
 
 NOVA's keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
-- **Off-Chain Key Management**: Keys are derived and encrypted in TEE-secure SQLite databases, accessible only by verified Shade workers (multi-instance with identical code hashes for redundancy and shared access).
+- **Off-Chain Key Management**: Keys are derived via HKDF from a master seed and encrypted with AES-256-CBC inside the TEE. Encrypted blobs are stored on-chain in `nova-kv.near` — a purpose-built NEAR smart contract — accessible only by the Shade Agent's deterministic signer key, registered with minimal FunctionCall permission scope.
 - **No On-Chain Keys**: The smart contract stores only group metadata, attestations (checksums/code hashes), and used nonces—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
-- **Secure Distribution**: Users request ephemeral nonce-based access tokens from the contract (gated by on-chain membership). Tokens incorporate a timestamp-derived SHA256 nonce (preventing replay attacks) and are verified in-TEE before key release, ensuring single-use validity without shared secrets.
+- **Secure Distribution**: Users request ephemeral nonce-based access tokens from the contract (gated by on-chain membership). Tokens incorporate a timestamp and nonce verified in-TEE before key release. Group keys are derived deterministically from a master seed using HKDF — the same key is always re-derived for the same group, making keys stateless and recoverable across TEE restarts.
 - **Verification & Attestation**: Every key operation returns a TEE checksum (via agentInfo), proving execution in genuine hardware with unmodified code—no tampering possible.
-- **Rotation & Revocation**: On member removal, keys rotate in-TEE (new derivation), invalidating prior access without re-encryption overhead.
+- **Rotation & Revocation**: On member removal, `revoke_member` atomically revokes on-chain and rotates the group key in a single call — a new versioned salt is derived, the rotated key is stored on `nova-kv.near`, and the revoked member's prior key is immediately invalid.
 - **Attack Resistance**: Even targeted attacks (e.g., indexing interactions or RPC dumps) can't extract keys: they're never on-chain. High-value targets (e.g., AI datasets) remain secure against nation-state or sophisticated threats.
 
 NOVA's architecture combined with Shade/TEEs confidentiality provides bullet-proof security for your data: verifiable, private, and resilient, aligning with NEAR's user-owned AI vision.
@@ -49,11 +49,16 @@ Choose the integration that best fits your use case:
 
 ### 🤖 MCP Server - AI Assistant Integration
 
-For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp as a custom connector in your mcp client.
+For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed MCP server as a custom connector in your MCP client:
+```
+https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp
+```
 
-You can also interact with NOVA directly from its multi-user interface at [https://nova-sdk.com](https://nova-sdk.com)
+The MCP server runs alongside the Shade Agent in a Phala TDX CVM — no centralized hosting, no third-party auth gate. You can also interact with NOVA directly from its multi-user interface at [https://nova-sdk.com](https://nova-sdk.com)
 
 **Best for**: Natural language file operations, AI agent workflows, conversational interfaces
+
+**OpenClaw Skill**: For agent-side retrieval, use the [nova-skill](./openclaw/skills/nova-file-sharing) — a shell + Python skill that authenticates, retrieves, and decrypts NOVA files directly from any OpenClaw-compatible agent.
 
 **Documentation**: [/mcp-server](./mcp-server) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
 
@@ -79,7 +84,7 @@ For high-performance applications, blockchain integration, and system-level deve
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.0.3"
+nova-sdk-rs = "1.1.0"
 ```
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
@@ -159,8 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
     // Check network
-    let (network, contract, _) = sdk.get_network_info();
-    println!("Network: {} | Contract: {}", network, contract);
+    println!("Network: {} | Contract: {}", sdk.network_id(), sdk.contract_id());
 
     // Register group
     sdk.register_group("my-secure-files").await?;
@@ -235,9 +239,10 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 ┌─────▼──┐      ┌─────▼─────┐        ┌─▼─────────┐
 │  IPFS  │      │   NEAR    │        │ Shade/TEE │
 │(Pinata)│      │ Blockchain│        │ (key ops) │
-└────────┘      └───────────┘        └───────────┘
- Encrypted       Access Control        Keys Never
-   Storage        & Group Metadata      Exposed
+└────────┘      └─────┬─────┘        └───────────┘
+ Encrypted       nova-sdk.near          Keys Never
+   Storage       nova-kv.near           Exposed
+                 (encrypted blobs)
 ```
 
 **Flow:**
@@ -246,7 +251,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 3. **MCP verifies JWT** → retrieves encryption key from Shade TEE
 4. **SDK encrypts locally** using AES-256-GCM (key never leaves client unencrypted)
 5. **MCP uploads encrypted data** to IPFS and records transaction on NEAR
-6. **Shade Agent** manages keys in TEE (never exposed on-chain)
+6. **Shade Agent** derives keys in TEE via HKDF and stores encrypted blobs on `nova-kv.near` — keys are never exposed in plaintext on-chain
 7. **IPFS stores** encrypted files (ciphertext only)
 8. **NEAR records** transaction metadata (CID, file hash)
 
@@ -316,7 +321,7 @@ Comprehensive documentation is available on GitBook:
 - **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
 - **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + IPFS storage costs)
 - **Multi-Chain Support**: Expand to other NEAR-compatible chains
-- **NOVA account Backup**: NOVA accounts are NEAR wallets stored in shade TEE. If Shade gets out-of-service, or even with hard updates, the DB in shade is wiped out. I need a backup solution to migrate accounts + group memberships and other indexed data (transaction history) from the shade in tee to another.
+- **NOVA account Backup**: NOVA accounts and group keys are now persisted on `nova-kv.near` as encrypted blobs, recoverable across TEE restarts via the master seed. Remaining risk is master seed loss — a cold backup mechanism for the encrypted master seed blob is on the roadmap.
 
 ## Contributing
 
