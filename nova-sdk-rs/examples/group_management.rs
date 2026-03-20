@@ -6,21 +6,22 @@
 //
 // Run with: cargo run --example group_management
 
-use nova_sdk_rs::NovaSdk;
+use nova_sdk_rs::{NovaSdk, NovaSdkConfig};
 use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load from env
-    let account_id = env::var("TEST_NOVA_ACCOUNT_ID")
-        .expect("TEST_NOVA_ACCOUNT_ID required (e.g., alice-nova.nova-sdk-5.testnet)");
-    let session_token = env::var("TEST_SESSION_TOKEN")
-        .expect("TEST_SESSION_TOKEN required (get from nova-sdk.com/api/auth/session-token)");
-    
+    let account_id = env::var("NOVA_ACCOUNT_ID")
+        .expect("NOVA_ACCOUNT_ID required (e.g., alice.nova-sdk.near)");
+    let api_key = env::var("NOVA_API_KEY")
+        .expect("NOVA_API_KEY required (get from nova-sdk.com → Manage Account → Generate API Key)");
+
     let new_member = "test.member.testnet"; // Replace with a real test account
 
-    // Initialize SDK (v3: account_id + session_token only)
-    let sdk = NovaSdk::new(&account_id, &session_token)?;
+    // Initialize SDK with API key
+    let config = NovaSdkConfig::default().with_api_key(&api_key);
+    let sdk = NovaSdk::with_config(&account_id, config)?;
     
     println!("🔧 SDK initialized for account: {}", sdk.account_id());
     println!("   Contract: {}", sdk.contract_id());

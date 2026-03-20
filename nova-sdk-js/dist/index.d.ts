@@ -86,7 +86,6 @@ export declare class NovaSdk {
     };
     private getMcpHeaders;
     private callMcpTool;
-    private callHttpEndpoint;
     authStatus(groupId?: string): Promise<AuthStatusResult>;
     registerGroup(groupId: string): Promise<string>;
     addGroupMember(groupId: string, memberId: string): Promise<string>;

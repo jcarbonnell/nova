@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.0.3
+**Version:** 1.1.0
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -23,7 +23,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.0.3"
+nova-sdk-rs = "1.1.0"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4"
 ```

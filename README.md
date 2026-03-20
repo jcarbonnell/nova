@@ -49,7 +49,7 @@ Choose the integration that best fits your use case:
 
 ### 🤖 MCP Server - AI Assistant Integration
 
-For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed https://nova-mcp.fastmcp.app/mcp as a custom connector in your mcp client.
+For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp as a custom connector in your mcp client.
 
 You can also interact with NOVA directly from its multi-user interface at [https://nova-sdk.com](https://nova-sdk.com)
 

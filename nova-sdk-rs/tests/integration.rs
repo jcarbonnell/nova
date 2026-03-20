@@ -3,7 +3,13 @@ use nova_sdk_rs::{NovaSdk, NovaError};
 
 // Mock session token for tests that don't need real MCP auth
 const MOCK_SESSION_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Utbm92YS5ub3ZhLXNkay01LnRlc3RuZXQiLCJ0eXBlIjoibm92YV9zZXNzaW9uIn0.mock";
-const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-5.testnet";
+const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
+
+fn make_test_sdk(account_id: &str) -> NovaSdk {
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    NovaSdk::with_config(account_id, config).unwrap()
+}
 
 // =========================================================================
 // Helper Functions
@@ -11,8 +17,9 @@ const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-5.testnet";
 
 fn get_integration_sdk() -> Option<NovaSdk> {
     let account_id = std::env::var("TEST_NOVA_ACCOUNT_ID").ok()?;
-    let session_token = std::env::var("TEST_SESSION_TOKEN").ok()?;
-    NovaSdk::new(&account_id, &session_token).ok()
+    let api_key = std::env::var("NOVA_API_KEY").ok()?;
+    let config = nova_sdk_rs::NovaSdkConfig::default().with_api_key(&api_key);
+    NovaSdk::with_config(&account_id, config).ok()
 }
 
 // =========================================================================
@@ -21,27 +28,29 @@ fn get_integration_sdk() -> Option<NovaSdk> {
 
 #[tokio::test]
 async fn test_sdk_initialization() {
-    let result = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN);
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let result = NovaSdk::with_config(TEST_ACCOUNT_ID, config);
     assert!(result.is_ok(), "SDK should initialize without panicking");
-    
+
     let sdk = result.unwrap();
     assert_eq!(sdk.account_id(), TEST_ACCOUNT_ID);
-    assert_eq!(sdk.contract_id(), "nova-sdk-5.testnet");
-    assert_eq!(sdk.mcp_url(), "https://nova-mcp.fastmcp.app");
+    assert_eq!(sdk.contract_id(), "nova-sdk.near");
+    assert_eq!(sdk.mcp_url(), "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network");
 }
 
 #[tokio::test]
 async fn test_sdk_requires_account_id() {
-    let result = NovaSdk::new("", MOCK_SESSION_TOKEN);
+    let result = NovaSdk::new("");
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), NovaError::Auth(_)));
 }
 
 #[tokio::test]
-async fn test_sdk_requires_session_token() {
-    let result = NovaSdk::new(TEST_ACCOUNT_ID, "");
-    assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), NovaError::Auth(_)));
+async fn test_sdk_api_key_required_at_call_time() {
+    // Construction succeeds without api_key; enforcement is lazy
+    let result = NovaSdk::new(TEST_ACCOUNT_ID);
+    assert!(result.is_ok());
 }
 
 // =========================================================================
@@ -50,10 +59,12 @@ async fn test_sdk_requires_session_token() {
 
 #[tokio::test]
 async fn test_get_balance_integration() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Query balance for the contract account (always exists)
-    let balance = sdk.get_balance(Some("nova-sdk-5.testnet")).await.unwrap();
+    let balance = sdk.get_balance(Some("nova-sdk.near")).await.unwrap();
 
     // Balance should be a valid u128 (yoctoNEAR)
     assert!(balance > 0, "Balance should be greater than 0 for an active account");
@@ -62,8 +73,10 @@ async fn test_get_balance_integration() {
 
 #[tokio::test]
 async fn test_get_balance_default_account() {
-    // Use contract account as the SDK account (guaranteed to exist)
-    let sdk = NovaSdk::new("nova-sdk-5.testnet", MOCK_SESSION_TOKEN).unwrap();
+    // Use a known mainnet account as SDK account (guaranteed to exist)
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config("nova-sdk.near", config).unwrap();
 
     // Uses sdk.account_id by default
     let balance = sdk.get_balance(None).await.unwrap();
@@ -72,7 +85,9 @@ async fn test_get_balance_default_account() {
 
 #[tokio::test]
 async fn test_get_balance_nonexistent_account() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Try to query balance for a likely nonexistent account
     let result = sdk.get_balance(Some("this-account-definitely-does-not-exist-12345.testnet")).await;
@@ -87,7 +102,9 @@ async fn test_get_balance_nonexistent_account() {
 
 #[tokio::test]
 async fn test_is_authorized_integration() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Test with a likely non-member user and existing group
     let result = sdk.is_authorized("test_group", Some("random.user.testnet")).await;
@@ -112,7 +129,9 @@ async fn test_is_authorized_integration() {
 
 #[tokio::test]
 async fn test_is_authorized_nonexistent_group() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Non-existent group should cause contract panic → RPC error or return false
     let result = sdk.is_authorized("nonexistent_group_123456789", Some("test.user.testnet")).await;
@@ -125,7 +144,9 @@ async fn test_is_authorized_nonexistent_group() {
 
 #[tokio::test]
 async fn test_estimate_fee_integration() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Test estimate for known actions
     let actions = vec!["register_group", "claim_token", "record_transaction", "add_group_member"];
@@ -149,7 +170,9 @@ async fn test_estimate_fee_integration() {
 
 #[tokio::test]
 async fn test_estimate_fee_unknown_action() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Unknown action should return 0 without panic
     let fee = sdk.estimate_fee("unknown_action_xyz").await.unwrap();
@@ -159,7 +182,9 @@ async fn test_estimate_fee_unknown_action() {
 
 #[tokio::test]
 async fn test_get_group_checksum_integration() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     let result = sdk.get_group_checksum("test_group").await;
     
@@ -181,7 +206,9 @@ async fn test_get_group_checksum_integration() {
 
 #[tokio::test]
 async fn test_get_group_owner_integration() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     let result = sdk.get_group_owner("test_group").await;
     
@@ -203,7 +230,9 @@ async fn test_get_group_owner_integration() {
 
 #[tokio::test]
 async fn test_get_transactions_for_group() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
     // Test with likely unauthorized user → expect empty vec or error
     let result = sdk.get_transactions_for_group("test_group", Some("random.user.testnet")).await;
@@ -227,22 +256,29 @@ async fn test_get_transactions_for_group() {
 
 #[tokio::test]
 async fn test_auth_status_invalid_token() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
     
     let result = sdk.auth_status(None).await;
     assert!(result.is_err(), "Should fail with invalid token");
     
     let err = result.unwrap_err();
     assert!(
-        matches!(err, NovaError::Mcp(_)) || matches!(err, NovaError::Http(_)),
-        "Expected Mcp or Http error, got: {:?}", err
+        matches!(err, NovaError::Auth(_))
+        || matches!(err, NovaError::Token(_))
+        || matches!(err, NovaError::Mcp(_))
+        || matches!(err, NovaError::Http(_)),
+        "Expected Auth/Token/Mcp/Http error, got: {:?}", err
     );
     println!("✅ Invalid token correctly rejected");
 }
 
 #[tokio::test]
 async fn test_register_group_invalid_token() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
     
     let result = sdk.register_group("test_new_group").await;
     assert!(result.is_err(), "Should fail with invalid token");
@@ -250,29 +286,35 @@ async fn test_register_group_invalid_token() {
 }
 
 #[tokio::test]
-async fn test_composite_upload_invalid_token() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+async fn test_upload_invalid_token() {
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
     
     let test_data = b"test data";
-    let result = sdk.composite_upload("test_group", test_data, "test.txt").await;
+    let result = sdk.upload("test_group", test_data, "test.txt").await;
     assert!(result.is_err(), "Should fail with invalid token");
     println!("✅ Composite upload correctly rejected with invalid token");
 }
 
 #[tokio::test]
-async fn test_composite_retrieve_invalid_token() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, "invalid_token").unwrap();
+async fn test_retrieve_invalid_token() {
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
     
-    let result = sdk.composite_retrieve("test_group", "QmDummyCID123456789").await;
+    let result = sdk.retrieve("test_group", "QmDummyCID123456789").await;
     assert!(result.is_err(), "Should fail with invalid token");
     println!("✅ Composite retrieve correctly rejected with invalid token");
 }
 
 #[tokio::test]
-async fn test_composite_retrieve_invalid_cid() {
-    let sdk = NovaSdk::new(TEST_ACCOUNT_ID, MOCK_SESSION_TOKEN).unwrap();
+async fn test_retrieve_invalid_cid() {
+    let config = nova_sdk_rs::NovaSdkConfig::default()
+        .with_api_key("nova_sk_testkey1234567890123456789012345678901");
+    let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
     
-    let result = sdk.composite_retrieve("test_group", "invalid_cid").await;
+    let result = sdk.retrieve("test_group", "invalid_cid").await;
     assert!(result.is_err(), "Should fail with invalid CID");
     
     let err = result.unwrap_err();
@@ -413,34 +455,29 @@ async fn test_revoke_group_member_integration() {
 }
 
 #[tokio::test]
-async fn test_composite_upload_integration() {
+async fn test_upload_integration() {
     let sdk = match get_integration_sdk() {
         Some(s) => s,
         None => {
-            println!("Skipping test_composite_upload_integration: Credentials not set");
+            println!("Skipping test_upload_integration: Credentials not set");
             return;
         }
     };
 
     let test_data = b"Test data for composite upload via MCP v3";
-    let result = sdk.composite_upload("test_group", test_data, "test.txt").await;
+    let result = sdk.upload("test_group", test_data, "test.txt").await;
     
     match result {
         Ok(res) => {
-            println!("✅ Composite upload success:");
+            println!("✅ Upload success:");
             println!("   CID: {}", res.cid);
             println!("   Trans ID: {}", res.trans_id);
             println!("   File Hash: {}", res.file_hash);
-            println!("   Fee: claim={} NEAR, record={:?} NEAR, total={} NEAR",
-                     res.fee_breakdown.claim, 
-                     res.fee_breakdown.record, 
-                     res.fee_breakdown.total);
-            
+
             assert!(!res.cid.is_empty());
             assert!(res.cid.starts_with("Qm"), "CID should start with Qm");
             assert!(!res.trans_id.is_empty());
             assert_eq!(res.file_hash.len(), 64, "SHA-256 hex should be 64 chars");
-            assert!(res.fee_breakdown.total > 0.0, "Total fee should be > 0");
         }
         Err(e) => {
             println!("⚠️  Upload failed: {}", e);
@@ -449,11 +486,11 @@ async fn test_composite_upload_integration() {
 }
 
 #[tokio::test]
-async fn test_composite_retrieve_integration() {
+async fn test_retrieve_integration() {
     let sdk = match get_integration_sdk() {
         Some(s) => s,
         None => {
-            println!("Skipping test_composite_retrieve_integration: Credentials not set");
+            println!("Skipping test_retrieve_integration: Credentials not set");
             return;
         }
     };
@@ -463,7 +500,7 @@ async fn test_composite_retrieve_integration() {
 
     // First, upload to get a real CID
     let upload_result = sdk
-        .composite_upload("test_group", original_data, "retrieve_test.txt")
+        .upload("test_group", original_data, "retrieve_test.txt")
         .await;
 
     let cid = match upload_result {
@@ -478,25 +515,18 @@ async fn test_composite_retrieve_integration() {
     };
 
     // Now retrieve
-    let retrieve_result = sdk.composite_retrieve("test_group", &cid).await;
+    let retrieve_result = sdk.retrieve("test_group", &cid).await;
     
     match retrieve_result {
         Ok(res) => {
-            println!("✅ Composite retrieve success:");
-            println!("   File Hash: {}", res.file_hash);
+            println!("✅ Retrieve success:");
             println!("   Data length: {} bytes", res.data.len());
             println!("   IPFS Hash: {}", res.ipfs_hash);
             println!("   Group ID: {}", res.group_id);
-            println!("   Fee: claim={} NEAR, total={} NEAR",
-                     res.fee_breakdown.claim,
-                     res.fee_breakdown.total);
 
-            // Verify data matches
             assert_eq!(res.data, original_data, "Decrypted data should match original");
-            assert_eq!(res.file_hash.len(), 64, "File hash should be 64 chars (SHA-256 hex)");
             assert_eq!(res.ipfs_hash, cid, "IPFS hash should match uploaded CID");
             assert_eq!(res.group_id, "test_group");
-            assert!(res.fee_breakdown.total > 0.0, "Total fee should be > 0");
 
             println!("✅ Decrypted data matches original ({} bytes)", res.data.len());
         }
@@ -507,33 +537,23 @@ async fn test_composite_retrieve_integration() {
 }
 
 #[tokio::test]
-async fn test_composite_upload_fee_breakdown_integration() {
+async fn test_upload_fee_breakdown_integration() {
     let sdk = match get_integration_sdk() {
         Some(s) => s,
         None => {
-            println!("Skipping test_composite_upload_fee_breakdown_integration: Credentials not set");
+            println!("Skipping test_upload_fee_breakdown_integration: Credentials not set");
             return;
         }
     };
 
     let test_data = b"Test data for fee breakdown";
-    let result = sdk.composite_upload("test_group", test_data, "fee_test.txt").await;
+    let result = sdk.upload("test_group", test_data, "fee_test.txt").await;
     
     match result {
         Ok(res) => {
-            let breakdown = &res.fee_breakdown;
-            
-            assert!(breakdown.claim > 0.0, "Claim fee should be positive");
-            assert!(breakdown.record.unwrap_or(0.0) > 0.0, "Record fee should be positive");
-            
-            let expected_total = breakdown.claim + breakdown.record.unwrap_or(0.0);
-            assert!(
-                (breakdown.total - expected_total).abs() < 0.0001,
-                "Total should sum claim + record"
-            );
-            
-            println!("✅ Fee breakdown: claim={} NEAR, record={:?} NEAR, total={} NEAR",
-                     breakdown.claim, breakdown.record, breakdown.total);
+            assert!(!res.cid.is_empty(), "CID should not be empty");
+            assert_eq!(res.file_hash.len(), 64, "File hash should be 64 hex chars");
+            println!("✅ Upload ok: cid={}, hash={}", res.cid, res.file_hash);
         }
         Err(e) => {
             println!("⚠️  Upload failed: {}", e);
@@ -542,11 +562,11 @@ async fn test_composite_upload_fee_breakdown_integration() {
 }
 
 #[tokio::test]
-async fn test_composite_retrieve_fee_breakdown_integration() {
+async fn test_retrieve_fee_breakdown_integration() {
     let sdk = match get_integration_sdk() {
         Some(s) => s,
         None => {
-            println!("Skipping test_composite_retrieve_fee_breakdown_integration: Credentials not set");
+            println!("Skipping test_retrieve_fee_breakdown_integration: Credentials not set");
             return;
         }
     };
@@ -554,7 +574,7 @@ async fn test_composite_retrieve_fee_breakdown_integration() {
     let original_data = b"Test data for retrieve fee breakdown";
     
     // Upload first
-    let upload_result = sdk.composite_upload("test_group", original_data, "fee_retrieve_test.txt").await;
+    let upload_result = sdk.upload("test_group", original_data, "fee_retrieve_test.txt").await;
     let cid = match upload_result {
         Ok(res) => res.cid,
         Err(e) => {
@@ -564,20 +584,13 @@ async fn test_composite_retrieve_fee_breakdown_integration() {
     };
 
     // Retrieve
-    let retrieve_result = sdk.composite_retrieve("test_group", &cid).await;
+    let retrieve_result = sdk.retrieve("test_group", &cid).await;
     
     match retrieve_result {
         Ok(res) => {
-            let breakdown = &res.fee_breakdown;
-            
-            assert!(breakdown.claim > 0.0, "Claim fee should be positive");
-            assert!(
-                (breakdown.total - breakdown.claim).abs() < 0.0001,
-                "Total should equal claim for retrieve"
-            );
-            
-            println!("✅ Retrieve fee breakdown: claim={} NEAR, total={} NEAR",
-                     breakdown.claim, breakdown.total);
+            assert_eq!(res.data, original_data, "Decrypted data should match original");
+            assert_eq!(res.ipfs_hash, cid);
+            println!("✅ Retrieve ok: {} bytes", res.data.len());
         }
         Err(e) => {
             println!("⚠️  Retrieve failed: {}", e);

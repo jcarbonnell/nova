@@ -1,6 +1,6 @@
 {
   "name": "nova-sdk-js",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "JavaScript SDK for multi-user NOVA: Secure file sharing on NEAR with Shade/TEEs key management.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -26,8 +26,7 @@
   "license": "MIT",
   "dependencies": {
     "@near-js/providers": "^2.3.3",
-    "axios": "^1.7.7",
-    "nova-sdk-js": "^1.0.3"
+    "axios": "^1.7.7"
   },
   "devDependencies": {
     "@babel/core": "^7.28.5",
@@ -35,7 +34,7 @@
     "@babel/preset-env": "^7.28.5",
     "@babel/preset-typescript": "^7.28.5",
     "@types/jest": "^29.5.14",
-    "@types/node": "^22.7.4",
+    "@types/node": "^20.0.0",
     "babel-jest": "^30.2.0",
     "dotenv": "^17.2.3",
     "jest": "^29.7.0",

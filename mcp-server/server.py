@@ -55,7 +55,7 @@ CONFIG = {
 
 SHADE_API_URL = os.getenv("SHADE_API_URL", "")
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")
-AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "https://nova-mcp.fastmcp.app")
+AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp")
 AUTH0_ISSUER = os.getenv("AUTH0_ISSUER", "")
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
@@ -66,7 +66,7 @@ RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer.testnet.near.org")
 SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
 DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
 SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
-SESSION_TOKEN_AUDIENCE = "https://nova-mcp.fastmcp.app"
+SESSION_TOKEN_AUDIENCE = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

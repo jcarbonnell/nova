@@ -7,15 +7,22 @@ const mockAxiosPost = axios.post as jest.MockedFunction<typeof axios.post>;
 const mockAxiosIsAxiosError = axios.isAxiosError as jest.MockedFunction<typeof axios.isAxiosError>;
 
 // Mock session token (in real usage, get from nova-sdk.com)
+const mockApiKey = 'nova_sk_mockapikey1234567890123456789012345678901';
 const mockSessionToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Uubm92YS1zZGsubmVhciIsInR5cGUiOiJub3ZhX3Nlc3Npb24ifQ.mock';
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  jest.resetAllMocks(); // clears both call history AND the mockResolvedValueOnce queue
   jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'warn').mockImplementation(() => {});
-  
+
   mockAxiosIsAxiosError.mockImplementation((error: unknown) => {
     return error !== null && typeof error === 'object' && 'isAxiosError' in error;
+  });
+
+  // Mock session token exchange — consumed as first axios call in each test
+  mockAxiosPost.mockResolvedValueOnce({
+    status: 200,
+    data: { token: mockSessionToken, expires_in: '24h', account_id: 'alice.nova-sdk.near' },
   });
 });
 
@@ -28,10 +35,11 @@ describe('NovaSdk v3', () => {
 
   describe('Constructor', () => {
     test('initializes with accountId and sessionToken', () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey }
+);
       expect(sdk.accountId).toBe(testAccountId);
       expect(sdk.contractId).toBe('nova-sdk.near');
-      expect(sdk.mcpUrl).toBe('https://nova-mcp.fastmcp.app');
+      expect(sdk.mcpUrl).toBe('https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network');
       expect(sdk.rpcUrl).toBe('https://rpc.mainnet.near.org');
     });
 
@@ -48,14 +56,17 @@ describe('NovaSdk v3', () => {
     });
 
     test('throws without accountId', () => {
-      expect(() => new NovaSdk('', { sessionToken: mockSessionToken })).toThrow('accountId required');
-      expect(() => new NovaSdk(null as unknown as string, { sessionToken: mockSessionToken })).toThrow('accountId required');
+      expect(() => new NovaSdk('', { apiKey: mockApiKey }
+)).toThrow('accountId required');
+      expect(() => new NovaSdk(null as unknown as string, { apiKey: mockApiKey }
+)).toThrow('accountId required');
     });
 
-    test('throws without sessionToken', () => {
-      expect(() => new NovaSdk(testAccountId, {} as any)).toThrow('sessionToken required');
-      expect(() => new NovaSdk(testAccountId, { sessionToken: '' } as any)).toThrow('sessionToken required');
-      expect(() => new NovaSdk(testAccountId, undefined as any)).toThrow('sessionToken required');
+    test('throws without apiKey at first API call', async () => {
+      // apiKey validation is lazy — constructor succeeds, throws on first call
+      // beforeEach session token mock goes unused here; resetAllMocks cleans it up before next test
+      const sdk = new NovaSdk(testAccountId);
+      await expect(sdk.authStatus()).rejects.toThrow('API key required');
     });
   });
 
@@ -70,17 +81,18 @@ describe('NovaSdk v3', () => {
         },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const result = await sdk.authStatus('my-group');
 
       expect(result.authenticated).toBe(true);
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://nova-mcp.fastmcp.app/tools/auth_status',
+        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/auth_status',
         { group_id: 'my-group' },
         expect.objectContaining({
           headers: expect.objectContaining({
             'Authorization': `Bearer ${mockSessionToken}`,
-            'X-Account-Id': testAccountId,
+            'x-account-id': testAccountId,
+            'x-wallet-id': testAccountId,
           }),
         })
       );
@@ -92,12 +104,12 @@ describe('NovaSdk v3', () => {
         data: { message: "Group 'test-group' registered successfully" },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const result = await sdk.registerGroup('test-group');
 
       expect(result).toBe("Group 'test-group' registered successfully");
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://nova-mcp.fastmcp.app/tools/register_group',
+        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/register_group',
         { group_id: 'test-group' },
         expect.objectContaining({
           headers: expect.objectContaining({
@@ -113,7 +125,7 @@ describe('NovaSdk v3', () => {
         data: { message: "Added bob-nova.nova-sdk.near to group 'test-group'" },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const result = await sdk.addGroupMember('test-group', 'bob-nova.nova-sdk.near');
 
       expect(result).toContain('Added bob-nova');
@@ -125,7 +137,7 @@ describe('NovaSdk v3', () => {
         data: { message: "Revoked bob-nova.nova-sdk.near from group 'test-group'" },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const result = await sdk.revokeGroupMember('test-group', 'bob-nova.nova-sdk.near');
 
       expect(result).toContain('Revoked bob-nova');
@@ -155,7 +167,7 @@ describe('NovaSdk v3', () => {
         },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const testData = Buffer.from('Hello NOVA!');
       const result = await sdk.upload('test-group', testData, 'hello.txt');
 
@@ -165,19 +177,33 @@ describe('NovaSdk v3', () => {
 
     test('retrieve returns decrypted Buffer', async () => {
       const originalData = 'Hello NOVA!';
-      const encryptedB64 = 'aW50ZW50aW9uYWxseSBub3QgZW5jcnlwdGVkIGZvciB0ZXN0aW5n';  // Mock encrypted
+      const mockKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
+      // Generate a real AES-256-GCM encrypted blob so SubtleCrypto can decrypt it
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const nodeCrypto = require('crypto');
+      const keyBytes = Buffer.from(mockKey, 'base64');
+      const iv = Buffer.alloc(12, 0); // deterministic IV for reproducibility
+      const cipher = nodeCrypto.createCipheriv('aes-256-gcm', keyBytes, iv);
+      const encrypted = Buffer.concat([
+        cipher.update(Buffer.from(originalData)),
+        cipher.final(),
+      ]);
+      const authTag = cipher.getAuthTag();
+      // Format: IV (12) + ciphertext + authTag (16) — matches encryptData output
+      const encryptedB64 = Buffer.concat([iv, encrypted, authTag]).toString('base64');
 
       mockAxiosPost.mockResolvedValueOnce({
         status: 200,
         data: {
-          key: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',  // Mock key b64
+          key: mockKey,
           encrypted_b64: encryptedB64,
           ipfs_hash: 'QmTestCid123456789012345678901234567890123',
           group_id: 'test-group',
         },
       });
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const result = await sdk.retrieve(
         'test-group',
         'QmTestCid123456789012345678901234567890123'
@@ -187,7 +213,7 @@ describe('NovaSdk v3', () => {
     });
 
     test('retrieve validates CID format', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       await expect(
         sdk.retrieve('test-group', 'invalid_cid')
@@ -197,7 +223,7 @@ describe('NovaSdk v3', () => {
 
   describe('Read-Only Contract Queries', () => {
     test('getBalance queries NEAR RPC (no auth needed)', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       const mockProvider = (sdk as any).provider;
       jest.spyOn(mockProvider, 'viewAccount').mockResolvedValueOnce({
@@ -209,7 +235,7 @@ describe('NovaSdk v3', () => {
     });
 
     test('isAuthorized queries contract', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       const mockProvider = (sdk as any).provider;
       jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
@@ -221,7 +247,7 @@ describe('NovaSdk v3', () => {
     });
 
     test('getGroupOwner returns owner account', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       const mockProvider = (sdk as any).provider;
       jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
@@ -233,7 +259,7 @@ describe('NovaSdk v3', () => {
     });
 
     test('estimateFee returns bigint', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       const mockProvider = (sdk as any).provider;
       jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
@@ -245,7 +271,7 @@ describe('NovaSdk v3', () => {
     });
 
     test('getTransactionsForGroup returns array', async () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       const mockProvider = (sdk as any).provider;
       jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
@@ -267,7 +293,7 @@ describe('NovaSdk v3', () => {
 
   describe('Utility Methods', () => {
     test('computeHash returns SHA256 hex string', () => {
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const data = Buffer.from('test data');
       const hash = sdk.computeHash(data);
 
@@ -286,7 +312,7 @@ describe('NovaSdk v3', () => {
       expect(novaError.name).toBe('NovaError');
     });
 
-    test('MCP 401 error indicates auth failure', async () => {
+     test('MCP 401 error indicates auth failure', async () => {
       const axiosError = {
         isAxiosError: true,
         response: { 
@@ -295,11 +321,13 @@ describe('NovaSdk v3', () => {
         },
         message: 'Request failed with status 401',
       };
-      mockAxiosPost.mockRejectedValue(axiosError);
+
+      // Queue error for both registerGroup calls (each call hits axios once for the tool)
+      mockAxiosPost.mockRejectedValueOnce(axiosError);
+      mockAxiosPost.mockRejectedValueOnce(axiosError);
       mockAxiosIsAxiosError.mockReturnValue(true);
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
-
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       await expect(sdk.registerGroup('test')).rejects.toThrow(NovaError);
       await expect(sdk.registerGroup('test')).rejects.toThrow(/Session token expired/);
     });
@@ -316,7 +344,7 @@ describe('NovaSdk v3', () => {
       mockAxiosPost.mockRejectedValueOnce(axiosError);
       mockAxiosIsAxiosError.mockReturnValueOnce(true);
 
-      const sdk = new NovaSdk(testAccountId, { sessionToken: mockSessionToken });
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
       await expect(
         sdk.registerGroup('test')

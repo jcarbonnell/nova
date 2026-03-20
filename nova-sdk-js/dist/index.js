@@ -9,7 +9,7 @@ const providers_1 = require("@near-js/providers");
 const axios_1 = __importDefault(require("axios"));
 const buffer_1 = require("buffer");
 // Infrastructure endpoints (public, immutable)
-const DEFAULT_MCP_URL = 'https://nova-mcp.fastmcp.app';
+const DEFAULT_MCP_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
 const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
 const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
 const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
@@ -256,7 +256,8 @@ class NovaSdk {
         return {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`,
-            'X-Account-Id': this.accountId,
+            'x-account-id': this.accountId,
+            'x-wallet-id': this.accountId,
         };
     }
     // MCP Tool Invocations - Call an MCP tool directly.
@@ -264,7 +265,12 @@ class NovaSdk {
         try {
             const headers = await this.getMcpHeaders();
             const response = await axios_1.default.post(`${this.mcpUrl}/tools/${toolName}`, args, { headers, timeout: 60000 });
-            return response.data;
+            // Unwrap { result: ... } envelope added by expose_as_rest decorator
+            const data = response.data;
+            if (data && typeof data === 'object' && 'result' in data) {
+                return data.result;
+            }
+            return data;
         }
         catch (e) {
             if (axios_1.default.isAxiosError(e)) {
@@ -272,21 +278,6 @@ class NovaSdk {
                 throw new NovaError(`MCP tool '${toolName}' failed: ${errorMsg}`, e);
             }
             throw new NovaError(`MCP tool '${toolName}' failed: ${e}`, e);
-        }
-    }
-    // HTTP endpoint call (for finalize_upload)
-    async callHttpEndpoint(endpoint, body) {
-        try {
-            const headers = await this.getMcpHeaders();
-            const response = await axios_1.default.post(`${this.mcpUrl}${endpoint}`, body, { headers, timeout: 60000 });
-            return response.data;
-        }
-        catch (e) {
-            if (axios_1.default.isAxiosError(e)) {
-                const errorMsg = e.response?.data?.error || e.response?.data?.message || e.message;
-                throw new NovaError(`HTTP endpoint '${endpoint}' failed: ${errorMsg}`, e);
-            }
-            throw new NovaError(`HTTP endpoint '${endpoint}' failed: ${e}`, e);
         }
     }
     // Core NOVA Operations (via MCP)
@@ -342,8 +333,8 @@ class NovaSdk {
         const encryptedB64 = await encryptData(data, key);
         // Step 3: Compute hash of plaintext
         const fileHash = await computeSha256Async(data);
-        // Step 4: Finalize upload
-        const finalizeResult = await this.callHttpEndpoint('/api/finalize-upload', {
+        // Step 4: Finalize upload via MCP tool
+        const finalizeResult = await this.callMcpTool('finalize_upload', {
             upload_id,
             encrypted_data: encryptedB64,
             file_hash: fileHash,
