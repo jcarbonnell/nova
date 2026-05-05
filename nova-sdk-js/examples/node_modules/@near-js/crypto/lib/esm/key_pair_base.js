@@ -1,0 +1,5 @@
+class KeyPairBase {
+}
+export {
+  KeyPairBase
+};

@@ -1,0 +1,5 @@
+// src/constants.ts
+var DEFAULT_FUNCTION_CALL_GAS = 30000000000000n;
+export {
+  DEFAULT_FUNCTION_CALL_GAS
+};
