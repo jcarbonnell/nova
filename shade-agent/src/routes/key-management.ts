@@ -5,22 +5,17 @@ import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
 
-
 // ────────────────────────────────────────────────
 // Configuration
 // ────────────────────────────────────────────────
 
 const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
-const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
-const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
 
 const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
 const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
 
 const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
-
-if (!process.env.SHADE_AGENT_ACCOUNT_ID) throw new Error('SHADE_AGENT_ACCOUNT_ID required');
-if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET)) throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
 
 // ────────────────────────────────────────────────
 // Master Seed & Derivation (shared with user-keys)
@@ -28,38 +23,44 @@ if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET)) throw new Error('TEE_KEY_SECRET must be
 
 let masterSeed: Uint8Array | null = null;
 
-// ⚠️  FIRST-DEPLOY SAFETY: After the initial deployment confirms the master seed
-// is stored on-chain, set MASTER_SEED_INIT_ALLOWED=false (or remove the env var)
-// to prevent accidental re-initialization on subsequent deploys.
-const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
-
 async function getMasterSeed(): Promise<Uint8Array> {
   if (masterSeed) return masterSeed;
 
-  const encryptedBlob = await getBlobFromKV('master-root');
-  if (encryptedBlob) {
-    masterSeed = decryptBlob(encryptedBlob);
-    console.log('Master seed loaded from KV');
+  const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
+  
+  // If MASTER_SEED_INIT_ALLOWED is true, force re-initialization
+  if (MASTER_SEED_INIT_ALLOWED) {
+    console.warn('⚠️  MASTER_SEED_INIT_ALLOWED=true: Force re-initializing master seed!');
+    const sponsorKey = process.env.SPONSOR_PRIVATE_KEY as string;
+    const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
+    const newSeed = crypto.createHash('sha256')
+      .update(Buffer.concat([
+        sponsorKeyBytes,
+        Buffer.from('nova-master-seed-v1', 'utf8')
+      ]))
+      .digest();
+
+    // SET MASTER SEED FIRST (before storing!)
+    masterSeed = newSeed;  
+    const encrypted = encryptBlob(newSeed);
+    await storeBlobToKV('master-root', encrypted);
+    console.log('✅ Master seed initialized and stored on-chain');
     return masterSeed;
   }
 
-  if (!MASTER_SEED_INIT_ALLOWED) {
-    throw new Error(
-      'Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
-      'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.'
-    );
+  // Otherwise, try to load existing seed
+  const encryptedBlob = await getBlobFromKV('master-root');  
+  if (encryptedBlob) {      
+    masterSeed = decryptBlob(encryptedBlob);
+    console.log('✅ Master seed loaded from KV');
+    return masterSeed;
   }
 
-  // First-time init — runs ONCE when no blob exists and flag is explicitly set
-  console.warn('⚠️  Initializing new master seed — this should run ONLY once!');
-  const newSeed = crypto.randomBytes(32);
-  const encrypted = encryptBlob(newSeed);
-
-  await storeBlobToKV('master-root', encrypted);
-
-  masterSeed = newSeed;
-  console.log('Master seed initialized and stored on-chain');
-  return masterSeed;
+  // No seed exists and init not allowed
+  throw new Error(
+    'Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
+    'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.'
+  );
 }
 
 function deriveKey(salt: string, length: number = 32): Uint8Array {
@@ -80,6 +81,10 @@ function getMasterSeedSync(): Uint8Array {
 }
 
 function encryptBlob(data: Uint8Array): string {
+  const TEE_SECRET = process.env.TEE_KEY_SECRET!;
+  if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+    throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
+  }
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
   let encrypted = cipher.update(data);
@@ -88,9 +93,15 @@ function encryptBlob(data: Uint8Array): string {
 }
 
 function decryptBlob(enc: string | number[]): Uint8Array {
+  const TEE_SECRET = process.env.TEE_KEY_SECRET!;
+  if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+    throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
+  }
+
   // Handle raw byte array returned directly from NEAR KV (16-byte IV + ciphertext)
   if (Array.isArray(enc)) {
     const raw = Buffer.from(enc);
+    if (raw.length < 17) throw new Error('Encrypted blob too short');
     const iv = raw.subarray(0, 16);
     const encrypted = raw.subarray(16);
     const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
@@ -192,7 +203,8 @@ async function broadcastContractCall(
   const rpcUrl = network === 'testnet'
     ? 'https://rpc.testnet.near.org'
     : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
-  const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
+  const signerAccountId = `kv-signer.${KV_CONTRACT}`;
+
   const signerPriv = deriveKey('nova-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
@@ -244,8 +256,9 @@ async function broadcastContractCall(
 // Signed transaction broadcast
 async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
   const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
-  const signerAccountId = SHADE_AGENT_ACCOUNT_ID as string;
-  const signerPriv = deriveKey('kv-signer-v1', 32);
+  const signerAccountId = KV_CONTRACT_OWNER;
+  
+  const signerPriv = deriveKey('kv-owner-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
 
@@ -259,6 +272,15 @@ async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> 
       public_key: signerPubBs58,
     },
   }) as { nonce: number; block_hash: string };
+    
+  if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
+    throw new Error(
+      `Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
+      `Please add the key with:\n` +
+      `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`
+    );
+  }
+    
   const nonce = BigInt(accessKeyResult.nonce) + 1n;
   const blockHash = bs58.decode(accessKeyResult.block_hash);
 
@@ -541,6 +563,23 @@ async function getAttestation(): Promise<{ provider: string; pcr0: string; verif
 // ────────────────────────────────────────────────
 
 const keyMgmt = new Hono();
+
+// Validate env vars once when first request comes in
+let envValidated = false;
+keyMgmt.use('*', async (c, next) => {
+  if (!envValidated) {
+    const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+    const TEE_SECRET = process.env.TEE_KEY_SECRET || '';
+    
+    if (!SHADE_AGENT_ACCOUNT_ID) throw new Error('SHADE_AGENT_ACCOUNT_ID required');
+    if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+      throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
+    }
+    envValidated = true;
+  }
+  await getMasterSeed();
+  await next();
+});
 
 // Ensure master seed is loaded before any route handler runs
 keyMgmt.use('*', async (c, next) => {

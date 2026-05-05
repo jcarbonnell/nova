@@ -1,0 +1,12 @@
+{
+  "nearRpcProviders": [
+    {
+      "connectionInfo": {
+        "url": "https://rpc.testnet.fastnear.com",
+        "headers": {
+          "Authorization": "Bearer 0b1399596423db51740cfbe041490f6a7611a6b0089d30afb7d459939723171c"
+        }
+      }
+    }
+  ]
+}

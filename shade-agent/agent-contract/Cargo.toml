@@ -1,0 +1,45 @@
+[package]
+name = "nova-shade-contract"
+version = "0.1.0"
+edition = "2021"
+description = "NOVA Shade Agent contract with TEE attestation. Made for production use on NEAR mainnet."
+license = "Apache-2.0"
+repository = "https://github.com/jcarbonnell/nova/shade-agent"
+
+[package.metadata.near.reproducible_build]
+image = "sourcescan/cargo-near:0.19.0-rust-1.86.0"
+image_digest = "sha256:772638e343baeeea24e49062c7d424274f3441452cc06ce97fc4e5695b19fecc"
+container_build_command = [
+    "cargo",
+    "near",
+    "build",
+    "non-reproducible-wasm",
+    "--locked",
+    "--no-abi",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+near-sdk = "5.21.0"
+serde = { version = "1.0.217", features = ["derive"] }
+shade-attestation = "0.1.0"
+
+[dev-dependencies]
+near-api = "0.8.2"
+near-api-types = "0.8.2"
+near-sandbox = "0.3.4"
+near-sdk = { version = "5.24.0", features = ["unit-testing"] }
+serde_json = "1.0"
+shade-attestation = "0.1.0"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true

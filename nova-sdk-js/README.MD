@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.0.3
+**Version:** 1.1.0
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -201,6 +201,20 @@ const info = sdk.getNetworkInfo();
 
 **Note:** One API key per account. Generating a new key invalidates the old one.
 
+### How Authentication Works
+
+Under the hood, API keys are used to generate session tokens:
+1. SDK sends API key to `/api/auth/session-token`
+2. Server validates key and returns JWT (24h expiry)
+3. SDK uses JWT for all MCP operations
+4. Auto-refresh happens before expiry
+
+Session tokens contain:
+- `account_id`: Your NOVA account
+- `sub`: Your Auth0 subject ID
+- `aud`: MCP server URL (port 8000)
+- `exp`: Expiration timestamp (24h)
+
 ## Error Handling
 
 ```typescript
@@ -210,7 +224,9 @@ try {
   await sdk.upload('my-group', data, 'file.txt');
 } catch (e) {
   if (e instanceof NovaError) {
-    if (e.message.includes('not found')) {
+    if (e.message.includes('Audience')) {
+      console.error('Token validation failed - try refreshing: await sdk.refreshToken()');
+    } else if (e.message.includes('not found')) {
       console.error('Account not found - create one at nova-sdk.com');
     } else if (e.message.includes('not authorized')) {
       console.error('Not a member of this group');

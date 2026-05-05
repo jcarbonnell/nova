@@ -165,6 +165,19 @@ sdk.refresh_token().await?;
 
 **Note:** One API key per account. Generating a new key invalidates the old one.
 
+### How Authentication Works
+
+The SDK uses a two-step authentication flow:
+1. API key → Session token (JWT with 24h expiry)
+2. Session token → MCP operations
+
+Session tokens are automatically managed by the SDK and refreshed before expiration. You can force a refresh with:
+```rust
+sdk.refresh_token().await?;
+```
+
+Session tokens contain your `account_id` and are validated by the MCP server at port 8000.
+
 ## API Reference
 
 ### Initialization
@@ -232,6 +245,10 @@ use nova_sdk_rs::NovaError;
 
 match sdk.upload("my_group", b"data", "file.txt").await {
     Ok(result) => println!("CID: {}", result.cid),
+    Err(NovaError::Auth(msg)) if msg.contains("Audience") => {
+        eprintln!("Token validation failed - refreshing...");
+        sdk.refresh_token().await?;
+    },
     Err(NovaError::Near(msg)) => eprintln!("RPC error: {}", msg),
     Err(NovaError::Mcp(msg)) => eprintln!("MCP server error: {}", msg),
     Err(NovaError::Auth(msg)) => eprintln!("Authentication error: {}", msg),

@@ -1,131 +1,371 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
+// Shade agent manages keys for NOVA groups in shade agent
+import { Hono } from 'hono';
+import crypto, { hkdfSync } from 'crypto';
+import axios from 'axios';
+import bs58 from 'bs58';
+import * as ed25519 from '@noble/ed25519';
+// ────────────────────────────────────────────────
+// Configuration
+// ────────────────────────────────────────────────
+const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
+const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
+const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
+const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
+const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
+if (!process.env.SHADE_AGENT_ACCOUNT_ID)
+    throw new Error('SHADE_AGENT_ACCOUNT_ID required');
+if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET))
+    throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
+// ────────────────────────────────────────────────
+// Master Seed & Derivation (shared with user-keys)
+// ────────────────────────────────────────────────
+let masterSeed = null;
+// ⚠️  FIRST-DEPLOY SAFETY: After the initial deployment confirms the master seed
+// is stored on-chain, set MASTER_SEED_INIT_ALLOWED=false (or remove the env var)
+// to prevent accidental re-initialization on subsequent deploys.
+const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
+async function getMasterSeed() {
+    if (masterSeed)
+        return masterSeed;
+    const encryptedBlob = await getBlobFromKV('master-root');
+    if (encryptedBlob) {
+        masterSeed = decryptBlob(encryptedBlob);
+        console.log('Master seed loaded from KV');
+        return masterSeed;
     }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-// Shade agent manages keys for NOVA groups in a TEE-secure manner
-const hono_1 = require("hono");
-const shade_agent_js_1 = require("@neardefi/shade-agent-js");
-const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
-const crypto_1 = __importDefault(require("crypto"));
-const axios_1 = __importDefault(require("axios"));
-const bs58_1 = __importDefault(require("bs58"));
-const ed25519 = __importStar(require("@noble/ed25519"));
-const sha2_js_1 = require("@noble/hashes/sha2.js");
-// Persistent encrypted DB (TEE-secure; use file for persistence across restarts)
-const db = new better_sqlite3_1.default('./nova-keys.db');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS keys (
-    group_id TEXT PRIMARY KEY,
-    encrypted_key TEXT
-  );
-`);
-// TEE-derived secret (in prod, derive from TEE entropy; here simulate)
-const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto_1.default.randomBytes(32).toString('hex');
-// NOVA contract ID from env
-const NOVA_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk-5.testnet';
-// Set sha512 for noble
-ed25519.hashes.sha512 = sha2_js_1.sha512;
-// Helpers
-function encryptKey(key) {
-    const iv = crypto_1.default.randomBytes(16);
-    const cipher = crypto_1.default.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let encrypted = cipher.update(key);
+    if (!MASTER_SEED_INIT_ALLOWED) {
+        throw new Error('Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
+            'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.');
+    }
+    // First-time init — runs ONCE when no blob exists and flag is explicitly set
+    console.warn('⚠️  Initializing new master seed — this should run ONLY once!');
+    const newSeed = crypto.randomBytes(32);
+    const encrypted = encryptBlob(newSeed);
+    await storeBlobToKV('master-root', encrypted);
+    masterSeed = newSeed;
+    console.log('Master seed initialized and stored on-chain');
+    return masterSeed;
+}
+function deriveKey(salt, length = 32) {
+    const master = getMasterSeedSync();
+    const derived = hkdfSync('sha256', master, Buffer.from(salt), Buffer.from('nova-v1'), length);
+    return new Uint8Array(derived);
+}
+function getMasterSeedSync() {
+    if (!masterSeed)
+        throw new Error('Master seed not initialized');
+    return masterSeed;
+}
+function encryptBlob(data) {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
+    let encrypted = cipher.update(data);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
     return iv.toString('hex') + ':' + encrypted.toString('hex');
 }
-function decryptKey(enc) {
+function decryptBlob(enc) {
+    // Handle raw byte array returned directly from NEAR KV (16-byte IV + ciphertext)
+    if (Array.isArray(enc)) {
+        const raw = Buffer.from(enc);
+        const iv = raw.subarray(0, 16);
+        const encrypted = raw.subarray(16);
+        const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
+        let decrypted = decipher.update(encrypted);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+        return decrypted;
+    }
+    // Handle legacy hex-string format "ivhex:encryptedhex"
     const [ivStr, encStr] = enc.split(':');
     if (!ivStr || !encStr)
-        throw new Error('Invalid encrypted key format');
+        throw new Error('Invalid encrypted blob format');
     const iv = Buffer.from(ivStr, 'hex');
     const encrypted = Buffer.from(encStr, 'hex');
-    const decipher = crypto_1.default.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
     let decrypted = decipher.update(encrypted);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted.toString();
+    return decrypted;
 }
-async function verifyToken(token) {
+// ────────────────────────────────────────────────
+// KV Helpers (same as user-keys)
+// ────────────────────────────────────────────────
+function log(level, event, meta) {
+    console[level](JSON.stringify({ ts: new Date().toISOString(), level, event, ...meta }));
+}
+// Borsh primitives for manual NEAR transaction serialization
+function borshString(s) {
+    const b = Buffer.from(s, 'utf8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(b.length, 0);
+    return Buffer.concat([len, b]);
+}
+function borshBytes(b) {
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(b.length, 0);
+    return Buffer.concat([len, b]);
+}
+function borshU64(n) {
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64LE(n, 0);
+    return buf;
+}
+function borshU128(n) {
+    const buf = Buffer.alloc(16);
+    buf.writeBigUInt64LE(n & 0xffffffffffffffffn, 0);
+    buf.writeBigUInt64LE(n >> 64n, 8);
+    return buf;
+}
+function encodeFunctionCallAction(methodName, args, gas, deposit) {
+    return Buffer.concat([
+        Buffer.from([2]),
+        borshString(methodName),
+        borshBytes(args),
+        borshU64(gas),
+        borshU128(deposit),
+    ]);
+}
+function encodeTransaction(signerId, publicKey, nonce, receiverId, blockHash, actions) {
+    const actionsCount = Buffer.alloc(4);
+    actionsCount.writeUInt32LE(actions.length, 0);
+    return Buffer.concat([
+        borshString(signerId),
+        Buffer.from([0]),
+        publicKey,
+        borshU64(nonce),
+        borshString(receiverId),
+        blockHash,
+        actionsCount,
+        ...actions,
+    ]);
+}
+// Generic contract call broadcaster — reuses same signer keypair as storeBlobToKV
+async function broadcastContractCall(contractId, network, methodName, args, depositYocto = '0') {
+    const rpcUrl = network === 'testnet'
+        ? 'https://rpc.testnet.near.org'
+        : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
+    const signerAccountId = SHADE_AGENT_ACCOUNT_ID;
+    const signerPriv = deriveKey('nova-signer-v1', 32);
+    const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
+    const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
+    log('info', 'broadcast_contract_call_attempt', {
+        signerAccountId,
+        signerPubBs58,
+        contractId,
+        methodName,
+        depositYocto,
+        rpcUrl,
+    });
+    const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
+        jsonrpc: '2.0', id: 'access-key',
+        method: 'query',
+        params: {
+            request_type: 'view_access_key',
+            finality: 'final',
+            account_id: signerAccountId,
+            public_key: signerPubBs58,
+        },
+    });
+    const nonce = BigInt(accessKeyResult.nonce) + 1n;
+    const blockHash = bs58.decode(accessKeyResult.block_hash);
+    const callArgs = Buffer.from(JSON.stringify(args));
+    const deposit = BigInt(depositYocto);
+    const action = encodeFunctionCallAction(methodName, callArgs, 50000000000000n, deposit);
+    const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, contractId, blockHash, [action]);
+    const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
+    const signature = await ed25519.signAsync(txHash, signerPriv);
+    const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
+    const broadcastResult = await rpcCallWithRetry(rpcUrl, {
+        jsonrpc: '2.0', id: 'broadcast',
+        method: 'broadcast_tx_commit',
+        params: [signedTx.toString('base64')],
+    });
+    if (broadcastResult?.status?.Failure) {
+        throw new Error(`Contract call failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
+    }
+    log('info', 'contract_call_committed', {
+        contractId, methodName, txHash: broadcastResult?.transaction?.hash,
+    });
+}
+// Signed transaction broadcast
+async function storeBlobToKV(key, encryptedBlob) {
+    const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
+    const signerAccountId = SHADE_AGENT_ACCOUNT_ID;
+    const signerPriv = deriveKey('kv-signer-v1', 32);
+    const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
+    const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
+    const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
+        jsonrpc: '2.0', id: 'access-key',
+        method: 'query',
+        params: {
+            request_type: 'view_access_key',
+            finality: 'final',
+            account_id: signerAccountId,
+            public_key: signerPubBs58,
+        },
+    });
+    const nonce = BigInt(accessKeyResult.nonce) + 1n;
+    const blockHash = bs58.decode(accessKeyResult.block_hash);
+    const [ivHex, encHex] = encryptedBlob.split(':');
+    const rawBytes = Buffer.concat([Buffer.from(ivHex, 'hex'), Buffer.from(encHex, 'hex')]);
+    const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
+    const action = encodeFunctionCallAction('store', callArgs, 30000000000000n, 0n);
+    const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
+    const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
+    const signature = await ed25519.signAsync(txHash, signerPriv);
+    const signedTx = Buffer.concat([
+        txBytes,
+        Buffer.from([0]),
+        signature,
+    ]);
+    const broadcastResult = await rpcCallWithRetry(rpcUrl, {
+        jsonrpc: '2.0', id: 'broadcast',
+        method: 'broadcast_tx_commit',
+        params: [signedTx.toString('base64')],
+    });
+    if (broadcastResult?.status?.Failure) {
+        throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
+    }
+    log('info', 'kv_store_committed', { key, txHash: broadcastResult?.transaction?.hash });
+}
+async function rpcCallWithRetry(rpcUrl, payload, retries = 3) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const res = await axios.post(rpcUrl, payload, { timeout: 10_000 });
+            if (res.data.error) {
+                const msg = res.data.error.message || res.data.error.cause?.name || JSON.stringify(res.data.error);
+                throw new Error(`RPC error: ${msg}`);
+            }
+            return res.data.result;
+        }
+        catch (err) {
+            const isLast = attempt === retries - 1;
+            if (isLast)
+                throw err;
+            const backoffMs = 1_000 * (attempt + 1);
+            log('warn', 'rpc_retry', { attempt: attempt + 1, backoffMs, error: err.message });
+            await new Promise(r => setTimeout(r, backoffMs));
+        }
+    }
+    throw new Error('rpcCallWithRetry: exhausted retries without throwing');
+}
+async function getBlobFromKV(key) {
+    const rpcUrl = 'https://rpc.mainnet.near.org';
+    const payload = {
+        jsonrpc: '2.0',
+        id: 'kv-get',
+        method: 'query',
+        params: {
+            request_type: 'call_function',
+            finality: 'final',
+            account_id: KV_CONTRACT,
+            method_name: 'get',
+            args_base64: Buffer.from(JSON.stringify({ key })).toString('base64'),
+        },
+    };
+    try {
+        const result = await rpcCallWithRetry(rpcUrl, payload);
+        if (result?.result && result.result.length > 0) {
+            const jsonStr = Buffer.from(result.result).toString('utf8');
+            const parsed = JSON.parse(jsonStr);
+            if (!parsed || parsed.length === 0)
+                return null;
+            return parsed;
+        }
+        return null;
+    }
+    catch (err) {
+        console.error('KV get failed after retries:', err.message);
+        return null;
+    }
+}
+// ────────────────────────────────────────────────
+// RPC View Helper (unchanged)
+// ────────────────────────────────────────────────
+async function viewFunction(rpcUrl, contractId, methodName, args) {
+    const response = await axios.post(rpcUrl, {
+        jsonrpc: '2.0',
+        id: 'nova-view',
+        method: 'query',
+        params: {
+            request_type: 'call_function',
+            finality: 'final',
+            account_id: contractId,
+            method_name: methodName,
+            args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+        },
+    });
+    if (response.data.error) {
+        console.error('RPC error:', response.data.error);
+        return null;
+    }
+    const result = response.data.result?.result;
+    if (!result)
+        return null;
+    const decoded = Buffer.from(result).toString('utf-8');
+    try {
+        return JSON.parse(decoded);
+    }
+    catch {
+        return decoded === 'true';
+    }
+}
+// ────────────────────────────────────────────────
+// Existing Helpers (unchanged)
+// ────────────────────────────────────────────────
+function getRpcUrl(network) {
+    return network === 'testnet' ? 'https://rpc.testnet.near.org' : 'https://rpc.mainnet.near.org';
+}
+function resolveContract(requestContractId, _groupId) {
+    if (requestContractId && ALLOWED_CONTRACTS.has(requestContractId)) {
+        const network = requestContractId.endsWith('.testnet') ? 'testnet' : 'mainnet';
+        return { contractId: requestContractId, network };
+    }
+    // Default fallback
+    return { contractId: DEFAULT_MAINNET_CONTRACT, network: 'mainnet' };
+}
+async function verifyToken(token, contractId, network) {
     try {
         const [payloadB64, sigHex] = token.split('.');
         if (!payloadB64 || !sigHex) {
             console.error('Token verify: Invalid format (missing . separator)');
             return { valid: false };
         }
-        // Decode payload to bytes/str
         const payloadBytes = Buffer.from(payloadB64, 'base64');
         if (payloadBytes.length === 0) {
             console.error('Token verify: Empty payload');
             return { valid: false };
         }
-        // Decode to str for JSON (for fields extraction)
         const payloadStr = payloadBytes.toString('utf-8');
-        console.log('Token verify: Payload str len', payloadStr.length); // Debug
+        console.log('Token verify: Payload str len', payloadStr.length);
         const payload = JSON.parse(payloadStr);
         const { group_id, user_id, nonce, timestamp, signing_pk_b58 } = payload;
-        if (!group_id || !user_id || !nonce || !timestamp) { // Core 4 fields only (PK optional)
+        if (!group_id || !user_id || !nonce || !timestamp) {
             console.log('Token verify: Missing payload fields');
             return { valid: false };
         }
         // Check timestamp freshness (convert ns to ms)
         const timestampStr = timestamp.toString();
         const tsBig = BigInt(timestampStr);
-        const nowMs = Date.now(); // ms
-        const nowNs = BigInt(nowMs) * 1000000n; // ms → ns
-        const fiveMinNs = 300000000000n; // 5min ns
+        const nowMs = Date.now();
+        const nowNs = BigInt(nowMs) * 1000000n;
+        const fiveMinNs = 300000000000n;
         if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
             console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
             return { valid: false };
         }
         console.log('Token verify: Timestamp ms', nowMs, 'vs payload', timestamp);
         // Verify nonce via contract
-        const nonceValid = await (0, shade_agent_js_1.agentView)({
-            methodName: 'get_nonce_validity',
-            args: { group_id, user_id, nonce }
-        });
+        const nonceValid = await viewFunction(getRpcUrl(network), contractId, 'get_nonce_validity', { group_id, user_id, nonce });
         if (!nonceValid) {
             console.error('Token verify: Nonce invalid/used');
             return { valid: false };
         }
         console.log('Token verify: Nonce valid');
-        // Prefer payload PK if present (for multi-key); fallback to RPC first ed25519
+        // Prefer payload PK if present; fallback to RPC
         let userPkBytes;
         if (signing_pk_b58) {
             try {
-                userPkBytes = bs58_1.default.decode(signing_pk_b58); // Full 32 bytes
+                userPkBytes = bs58.decode(signing_pk_b58);
                 if (userPkBytes.length !== 32) {
                     console.error('Token verify: Invalid signing PK length');
                     return { valid: false };
@@ -134,12 +374,12 @@ async function verifyToken(token) {
             }
             catch (e) {
                 console.error('Token verify: PK decode error, falling back to RPC', e);
-                // Proceed to RPC fallback
             }
         }
-        if (!userPkBytes) { // Fallback: RPC fetch (legacy compat)
-            const rpcUrl = 'https://rpc.testnet.near.org';
-            const rpcRes = await axios_1.default.post(rpcUrl, {
+        if (!userPkBytes) {
+            // Fallback: RPC fetch (use correct network RPC)
+            const rpcUrl = getRpcUrl(network);
+            const rpcRes = await axios.post(rpcUrl, {
                 jsonrpc: '2.0',
                 id: 'dontcare',
                 method: 'query',
@@ -164,12 +404,12 @@ async function verifyToken(token) {
                 return { valid: false };
             }
             const userPkStr = keyView.public_key;
-            userPkBytes = bs58_1.default.decode(userPkStr.slice(8)); // 32 bytes
+            userPkBytes = bs58.decode(userPkStr.slice(8));
             console.log('Token verify: Using RPC PK', userPkStr.slice(0, 20) + '...');
         }
-        // Verify ed25519 on raw payload_bytes (no hash)
+        // Verify ed25519 on raw payload_bytes
         const sigBytes = Buffer.from(sigHex, 'hex');
-        const validSig = ed25519.verify(sigBytes, payloadBytes, userPkBytes); // Raw bytes
+        const validSig = await ed25519.verifyAsync(sigBytes, payloadBytes, userPkBytes);
         if (!validSig) {
             console.error('Token verify: Sig invalid');
             return { valid: false };
@@ -188,92 +428,212 @@ async function verifyToken(token) {
         return { valid: false };
     }
 }
-const keyMgmt = new hono_1.Hono();
-// Generate key for a group (called by NOVA contract after group registration)
+// ────────────────────────────────────────────────
+// Attestation
+// ────────────────────────────────────────────────
+// TODO: replace stub with real Nitro enclave attestation once deployed.
+// Production path:
+//   1. Read PCR0/PCR1/PCR2 from /dev/nsm via vsock or NSM API
+//   2. Fetch expected hashes stored in KV contract under key 'expected-pcrs'
+//   3. Compare and throw if mismatch — block all key ops until attestation passes
+async function getAttestation() {
+    const provider = process.env.ENCLAVE_PROVIDER || 'local';
+    if (provider === 'nitro') {
+        // Real Nitro path (uncomment when NSM device is available):
+        // const nsm = await import('@aws-nitro-enclaves/nsm-api');
+        // const doc = await nsm.getAttestationDoc();
+        // const pcr0 = doc.pcrs[0].toString('hex');
+        // const expected = await getBlobFromKV('expected-pcrs');
+        // if (!expected || !verifyPcrs(doc.pcrs, expected)) throw new Error('Attestation mismatch');
+        // return { provider: 'nitro', pcr0, verified: true };
+        throw new Error('Nitro NSM not yet wired — set ENCLAVE_PROVIDER=local for dev');
+    }
+    // Stub for local / pre-Nitro development
+    const devPcr0 = process.env.DEV_PCR0 || '0'.repeat(96); // 48-byte PCR0 as hex
+    return { provider: 'local', pcr0: devPcr0, verified: false };
+}
+// ────────────────────────────────────────────────
+// Routes
+// ────────────────────────────────────────────────
+const keyMgmt = new Hono();
+// Ensure master seed is loaded before any route handler runs
+keyMgmt.use('*', async (c, next) => {
+    await getMasterSeed();
+    await next();
+});
+// Health - Ensure master seed + show status
+keyMgmt.get('/health', async (c) => {
+    try {
+        const attestation = await getAttestation();
+        return c.json({
+            status: 'ok',
+            contract: DEFAULT_MAINNET_CONTRACT,
+            network: 'mainnet',
+            timestamp: new Date().toISOString(),
+            master_seed_status: 'initialized',
+            attestation: attestation.provider,
+            attestation_pcr0: attestation.pcr0,
+            attestation_verified: attestation.verified,
+        });
+    }
+    catch (err) {
+        return c.json({ error: 'Health failed', details: err.message }, 500);
+    }
+});
+// GENERATE KEY - Deterministic from master seed
 keyMgmt.post('/generate_key', async (c) => {
-    const { group_id, owner } = await c.req.json();
+    const { group_id, owner, contract_id } = await c.req.json();
     if (!group_id)
         return c.json({ error: 'group_id required' }, 400);
-    // Verify group exists on-chain
-    const groupExists = await (0, shade_agent_js_1.agentView)({
-        contractId: NOVA_CONTRACT,
-        methodName: 'group_contains_key',
-        args: { group_id }
-    });
-    if (!groupExists)
-        return c.json({ error: 'Group does not exist on-chain' }, 404);
-    // Derive key in TEE (random 32 bytes)
-    const keyBytes = crypto_1.default.randomBytes(32);
-    const key = keyBytes.toString('base64');
-    // Encrypt and store (idempotent)
-    const encryptedKey = encryptKey(key);
-    db.prepare('INSERT OR REPLACE INTO keys (group_id, encrypted_key) VALUES (?, ?)').run(group_id, encryptedKey);
-    // Attest via agentInfo
-    const info = await (0, shade_agent_js_1.agentInfo)();
-    if (!info.checksum) {
-        return c.json({ error: 'Attestation failed' }, 500);
+    let resolved;
+    try {
+        resolved = resolveContract(contract_id);
     }
-    console.log(`Generated key for group ${group_id}, owner ${owner}`);
-    return c.json({ key, checksum: info.checksum });
+    catch (e) {
+        return c.json({ error: e.message }, 400);
+    }
+    const { contractId, network } = resolved;
+    // Verify group on-chain
+    const rpcUrl = getRpcUrl(network);
+    const groupExists = await viewFunction(rpcUrl, contractId, 'group_contains_key', { group_id });
+    if (!groupExists)
+        return c.json({ error: `Group not found on ${contractId}` }, 404);
+    // Derive group key deterministically
+    const salt = `group:${group_id}:${network}:${contractId}`;
+    const keyBytes = deriveKey(salt, 32);
+    const keyB64 = Buffer.from(keyBytes).toString('base64');
+    // Encrypt and store blob on KV
+    const encrypted = encryptBlob(keyBytes);
+    const keyId = crypto.createHash('sha256').update(salt).digest('hex');
+    await storeBlobToKV(keyId, encrypted);
+    const checksum = 'derived-' + crypto.createHash('sha256').update(keyBytes).digest('hex').slice(0, 16);
+    return c.json({ key: keyB64, checksum });
 });
-// Get key for authorized user
+// GET KEY - Derive and return
 keyMgmt.post('/get_key', async (c) => {
-    const { group_id, token } = await c.req.json();
-    if (!group_id || !token)
-        return c.json({ error: 'group_id and token required' }, 400);
-    const tokenInfo = await verifyToken(token);
-    if (!tokenInfo.valid || !tokenInfo.user_id) {
-        return c.json({ error: 'Invalid token' }, 403);
-    }
-    const user_id = tokenInfo.user_id;
-    const nonce = tokenInfo.nonce;
-    // Verify on-chain authorization (this is the key security check)
-    const authorized = await (0, shade_agent_js_1.agentView)({
-        contractId: NOVA_CONTRACT,
-        methodName: 'is_authorized',
-        args: { group_id, user_id }
-    });
-    if (!authorized)
-        return c.json({ error: 'Unauthorized: On-chain access denied' }, 403);
-    // Fetch key from DB
-    const row = db.prepare('SELECT encrypted_key FROM keys WHERE group_id = ?').get(group_id);
-    if (!row || !row.encrypted_key) {
-        return c.json({ error: 'Key not found' }, 404);
-    }
-    const key = decryptKey(row.encrypted_key);
-    // Attest
-    const info = await (0, shade_agent_js_1.agentInfo)();
-    console.log(`Retrieved key for group ${group_id}, user ${user_id}`);
-    return c.json({ key, checksum: info.checksum });
-});
-// Rotate key (called by NOVA contract when member is revoked)
-keyMgmt.post('/rotate_key', async (c) => {
-    const { group_id } = await c.req.json();
+    const { group_id, token, account_id, contract_id } = await c.req.json();
     if (!group_id)
         return c.json({ error: 'group_id required' }, 400);
-    // Verify group exists
-    const groupExists = await (0, shade_agent_js_1.agentView)({
-        contractId: NOVA_CONTRACT,
-        methodName: 'group_contains_key',
-        args: { group_id }
-    });
-    if (!groupExists)
-        return c.json({ error: 'Group does not exist' }, 404);
-    // Generate new key, encrypt, update DB (atomic)
-    const newKey = crypto_1.default.randomBytes(32).toString('base64');
-    const encryptedKey = encryptKey(newKey);
-    const result = db.prepare('UPDATE keys SET encrypted_key = ? WHERE group_id = ?').run(encryptedKey, group_id);
-    if (result.changes === 0) {
-        return c.json({ error: 'Key not found for rotation' }, 404);
+    let resolved;
+    try {
+        resolved = resolveContract(contract_id, group_id);
     }
-    // Attest
-    const info = await (0, shade_agent_js_1.agentInfo)();
-    console.log(`Rotated key for group ${group_id}`);
+    catch (e) {
+        return c.json({ error: e.message }, 400);
+    }
+    const { contractId, network } = resolved;
+    let user_id;
+    if (account_id) {
+        user_id = account_id;
+    }
+    else {
+        const tokenInfo = await verifyToken(token, contractId, network);
+        if (!tokenInfo.valid || !tokenInfo.user_id)
+            return c.json({ error: 'Invalid token' }, 403);
+        user_id = tokenInfo.user_id;
+    }
+    const authorized = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
+    if (!authorized)
+        return c.json({ error: 'Unauthorized' }, 403);
+    // Check if key has been rotated — look up stored version
+    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    const versionBlob = await getBlobFromKV(versionKeyId);
+    let version = null;
+    if (versionBlob) {
+        const combined = JSON.parse(Buffer.from(decryptBlob(versionBlob)).toString('utf8'));
+        version = combined.version ?? null;
+    }
+    const salt = version
+        ? `group:${group_id}:${network}:${contractId}:v${version}`
+        : `group:${group_id}:${network}:${contractId}`;
+    const keyBytes = deriveKey(salt, 32);
+    const keyB64 = Buffer.from(keyBytes).toString('base64');
+    return c.json({ key: keyB64, checksum: 'derived-verified' });
+});
+// REVOKE MEMBER + AUTO-ROTATE — single atomic operation
+// Clients call this instead of calling nova-sdk.near directly
+keyMgmt.post('/revoke_member', async (c) => {
+    const { group_id, user_id, contract_id } = await c.req.json();
+    if (!group_id || !user_id)
+        return c.json({ error: 'group_id and user_id required' }, 400);
+    let resolved;
+    try {
+        resolved = resolveContract(contract_id, group_id);
+    }
+    catch (e) {
+        return c.json({ error: e.message }, 400);
+    }
+    const { contractId, network } = resolved;
+    // 1. Verify group exists and user is currently a member
+    const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
+    if (!groupExists)
+        return c.json({ error: `Group not found on ${contractId}` }, 404);
+    const isMember = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
+    if (!isMember)
+        return c.json({ error: 'User is not a member' }, 400);
+    // 2. Broadcast revoke_group_member to nova-sdk.near
+    await broadcastContractCall(contractId, network, 'revoke_group_member', { group_id, user_id }, '0');
+    log('info', 'member_revoked_on_chain', { group_id, user_id });
+    // 3. Immediately rotate the group key
+    const version = Date.now();
+    const salt = `group:${group_id}:${network}:${contractId}:v${version}`;
+    const newKeyBytes = deriveKey(salt, 32);
+    const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
+    const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
+    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    await storeBlobToKV(versionKeyId, combinedEncrypted);
+    log('info', 'key_auto_rotated', { group_id, version, revokedUser: user_id });
     return c.json({
         success: true,
-        new_key_hash: crypto_1.default.createHash('sha256').update(newKey).digest('hex'),
-        checksum: info.checksum
+        group_id,
+        revoked_user_id: user_id,
+        version,
+        message: 'Member revoked and key rotated atomically',
     });
 });
-exports.default = keyMgmt;
-//# sourceMappingURL=key-management.js.map
+// ROTATE KEY - New deterministic key (different salt or version)
+keyMgmt.post('/rotate_key', async (c) => {
+    const { group_id, contract_id } = await c.req.json();
+    if (!group_id)
+        return c.json({ error: 'group_id required' }, 400);
+    let resolved;
+    try {
+        resolved = resolveContract(contract_id, group_id);
+    }
+    catch (e) {
+        return c.json({ error: e.message }, 400);
+    }
+    const { contractId, network } = resolved;
+    const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
+    if (!groupExists)
+        return c.json({ error: `Group not found (${contractId})` }, 404);
+    const version = Date.now();
+    const salt = `group:${group_id}:${network}:${contractId}:v${version}`;
+    const newKeyBytes = deriveKey(salt, 32);
+    // Store new blob
+    const encrypted = encryptBlob(newKeyBytes);
+    const versionStr = version.toString();
+    // Pack key + version into a single encrypted blob
+    const combined = JSON.stringify({ key: encrypted, version: versionStr });
+    const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
+    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    await storeBlobToKV(versionKeyId, combinedEncrypted);
+    const newKeyHash = crypto.createHash('sha256').update(newKeyBytes).digest('hex');
+    return c.json({
+        success: true,
+        new_key_hash: newKeyHash,
+        version,
+        checksum: 'derived-verified',
+    });
+});
+// Debug - List group IDs (view KV keys if possible, or placeholder)
+keyMgmt.get('/debug/groups', async (c) => {
+    // In real impl: view all keys from KV (if you add list method)
+    return c.json({
+        groups: ['example-group-1', 'example-group-2'],
+        count: 2,
+        contract: DEFAULT_MAINNET_CONTRACT,
+        note: 'Full list requires KV list method',
+    });
+});
+export default keyMgmt;

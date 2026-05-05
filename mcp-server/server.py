@@ -65,8 +65,8 @@ IPFS_API_SECRET = os.getenv("IPFS_API_SECRET", "")
 RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer.testnet.near.org")
 SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
 DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
-SESSION_TOKEN_ISSUER = "https://nova-sdk.com"
-SESSION_TOKEN_AUDIENCE = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp"
+SESSION_TOKEN_ISSUER = os.getenv("SESSION_TOKEN_ISSUER", "https://nova-sdk.com")
+SESSION_TOKEN_AUDIENCE = os.getenv("SESSION_TOKEN_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -269,10 +269,9 @@ async def get_user_signer(user: dict) -> Account:
     if not SHADE_API_URL:
         raise ValueError("SHADE_API_URL not configured")
 
+    # For SDK flow (session tokens), always use account_id
     payload = {}
-    if user["email"] and user["access_token"]:
-        payload = {"email": user["email"], "auth_token": user["access_token"]}
-    elif user["wallet_id"]:
+    if user["wallet_id"]:
         payload = {"account_id": near_account_id, "wallet_id": user["wallet_id"]}
     else:
         payload = {"account_id": near_account_id}

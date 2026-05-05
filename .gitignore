@@ -45,8 +45,13 @@ nova-sdk-rs/examples/simple_upload/target/
 nova-sdk-rs/examples/simple_upload/Cargo.lock
 
 # Shade agent
+shade-agent/agent-contract/target
+shade-agent/agent-contract/*.wasm
+shade-agent/agent-contract/Cargo.lock
 shade-agent/node_modules/
 shade-agent/.env
 shade-agent/.env*.local
+shade-agent/deployment.yaml
+shade-agent/docker-compose.yaml
 shade-agent/package-lock.json
 shade-agent/frontend/package-lock.json

@@ -1,192 +1,166 @@
-# NOVA Shade Agent: TEE-Secured Key Manager
+# shade-agent-template
 
 > [!WARNING]  
-> This technology has not yet undergone a formal audit. Please conduct your own due diligence and exercise caution before integrating or relying on it in production environments.
+> The Shade Agent Framework has not yet undergone a formal audit.
+> 
+> No representations or warranties are made regarding security, correctness, or fitness for any purpose. Use of this software is entirely at your own risk.
 
-This is a Shade Agent template customized for NOVA v2.2, implementing TEE-secured group key management for secure file-sharing on NEAR. The agent generates, stores (encrypted in SQLite), rotates, and distributes symmetric keys (AES-CBC, 32-byte base64) exclusively off-chain within Trusted Execution Environments (TEEs). It verifies ephemeral access tokens (ed25519-signed, nonce/timestamp-gated) from the NOVA contract, ensuring no keys are ever exposed on-chain.
+This repo contains a simple Shade Agent built with Hono and written in **TypeScript** that acts as a verifiable ETH price oracle. It fetches the price of Eth from two different APIs, takes the average, and then pushes the price to an Ethereum contract. 
 
-This setup hybridizes NOVA with Shade Agents for bullet-proof privacy: On-chain handles auditable groups/metadata; TEEs manage keys with attestations (checksums/code hashes) for verifiability. Multi-instance workers (identical code hashes) enable shared access without single points of failure.
+You can try the live demo [here](https://shade-agent-template-woad.vercel.app/) and view the full documentation [here](https://docs.near.org/ai/shade-agents/getting-started/quickstart/deploying).
 
-For full instructions on the Shade Agent Framework, please refer to this [docs](https://docs.near.org/ai/shade-agents/getting-started/introduction). For NOVA-specific information, see [NOVA Docs](https://nova-25.gitbook.io/nova-docs).
+There are two deployment scenarios:
+1. **Local Development**: Running the agent locally for rapid testing and development.
+2. **TEE Deployment**: Running the agent in a real Trusted Execution Environment (TEE).
 
 ## Prerequisites
 
-- First, `clone` this NOVA Shade Agent repo.
+- Install the [Shade Agent CLI](https://github.com/NearDeFi/shade-agent-cli):
 
-```bash
-git clone https://github.com/jcarbonnell/nova.git  # Or your fork
-cd nova/shade-agent
-```
+  ```bash
+  npm i -g @neardefi/shade-agent-cli
+  ```
 
-- Install NEAR and Shade Agent tooling:
+- Set up **Docker** if you have not already:
 
-```bash
-# Install the NEAR CLI
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/near-cli-rs/releases/latest/download/near-cli-rs-installer.sh | sh
+  - **Install** Docker for [Mac](https://docs.docker.com/desktop/setup/install/mac-install/) or [Linux](https://docs.docker.com/desktop/setup/install/linux/) and create an account.
 
-# Install the Shade Agent CLI
-npm i -g @neardefi/shade-agent-cli
-```
+  - **Log in** to Docker, using `docker login` for Mac or `sudo docker login` for Linux.
 
-- Create a `NEAR testnet account` and record the account name and `seed phrase`:
+- Set up a free **Phala Cloud** account at https://cloud.phala.network/register, then get an API key from https://cloud.phala.network/dashboard/tokens.
 
-```bash
-near account create-account sponsor-by-faucet-service <example-name.testnet> autogenerate-new-keypair print-to-terminal network-config testnet create
-```
+### What is a Phala Cloud?
 
-replacing <example-name.testnet> with a unique name.
-
-- Set up docker if you have not already:
-
-Install Docker for [Mac](https://docs.docker.com/desktop/setup/install/mac-install/) or [Linux](https://docs.docker.com/desktop/setup/install/linux/) and set up an account.
-
-Log in to docker, `docker login` for Mac or `sudo docker login` for Linux.
-
-- Set up a free Phala Cloud account at https://cloud.phala.network/register then get an API key from https://cloud.phala.network/dashboard/tokens.
-
-What is a Phala Cloud?
-
-Phala Cloud is a service that offers secure and private hosting in a TEE using [Dstack](https://docs.phala.network/overview/phala-network/dstack). Phala Cloud makes it easy to run a TEE, that's why we use it in our template!
+Phala Cloud is a cloud service that supports hosting applications in TEEs. It makes it easy to run an agent in TEE.
 
 ---
 
-## Set up
+## Set Up
 
-- Rename the `.env.development.local.example` file name to `.env.development.local` and configure your environment variables.
+- First set up **NEAR** and **Phala** credentials in the CLI:
+
+  ```bash
+  shade auth set all testnet create-new
+  ```
+
+- Set a unique `agent_contract.contract_id` (e.g. example-contract-123.testnet) and fill in your `build_docker_image.tag` (e.g. pivortex/my-first-agent) in the `deployment.yaml` file.
+
+- Create a `.env` file and configure your environment variables.
+
+```env
+AGENT_CONTRACT_ID= Set this to the agent contract ID you set in the deployment.yaml file
+SPONSOR_ACCOUNT_ID= Set this to the NEAR account ID generated by the CLI
+SPONSOR_PRIVATE_KEY= Set this to the private key generated by the CLI
+```
 
 - Start up Docker:
 
-For Mac
+    Linux: 
 
-Simply open the Docker Desktop application or run:
+    ```bash
+    sudo systemctl start docker
+    ```
 
-```bash
-open -a Docker
-```
+    Mac: 
 
-For Linux
+    Simply open the Docker Desktop application or run: 
 
-```bash
-sudo systemctl start docker
-```
+    ```bash
+    open -a Docker
+    ```
 
-- Install dependencies 
+- Install dependencies: 
 
-```bash
-npm i
-```
+  ```bash
+  npm i
+  ```
 
 ---
 
-## Local development
+## Local Development
 
-- Make sure the `NEXT_PUBLIC_contractId` prefix is set to `ac-proxy.` followed by your NEAR accountId.
+- Make sure `environment` is set to `local` in the `deployment.yaml` file.
 
 - In one terminal, run the Shade Agent CLI:
 
-```bash
-shade-agent-cli
-```
+  ```bash
+  shade deploy
+  ```
 
-The CLI on Linux may prompt you to enter your `sudo password`.
+  On Linux, the CLI may prompt you to enter your **sudo password**. 
 
-- In another terminal, start your app:
+- Then, start your app:
 
-```bash
-npm run dev
-```
+  ```bash
+  npm run dev
+  ```
 
-Your app will start on http://localhost:3000
+  Your app will start on http://localhost:3000
+
+- Lastly, you need to **whitelist** the agent in the agent contract (only needed for local development). In another terminal, run:
+
+  ```bash
+  shade whitelist 
+  ```
+  
+  Enter the agent account ID displayed when starting the app.
 
 ---
 
 ## TEE Deployment
 
-- Change the `NEXT_PUBLIC_contractId` prefix to `ac-sandbox.` followed by your NEAR accountId.
+- Change the `environment` to `TEE` in the `deployment.yaml` file.
 
 - Run the Shade Agent CLI
 
-```bash
-shade-agent-cli
-```
+  ```bash
+  shade deploy
+  ```
 
-The CLI on Linux may prompt for your sudo password. It builds, pushes Docker image, and deploys to Phala Cloud. The final URL (e.g., https://<hash>-3000.dstack-prod5.phala.network) hosts your agent.
+  The CLI on Linux may prompt you to enter your **sudo password**.
 
-Monitor deployment/logs in the Phala Dashboard. Update APP_CODEHASH in .env if needed (CLI auto-generates).
+The CLI will output the URL of your app.
 
-**Post-Deployment**:
-- Approve code hash on NOVA contract: near call nova-sdk-5.testnet approve_shade_code_hash '{"code_hash": "your-app-code-hash"}' --accountId nova-sdk-5.testnet.
-- Register worker: near call nova-sdk-5.testnet register_shade_worker '{"worker_id": "your-shade-account.testnet", "attestation": "base64-attestation-from-cli"}' --accountId nova-sdk-5.testnet.
+After deploying to Phala Cloud, monitor your deployments and delete unused ones to avoid unnecessary costs. You can manage your deployments from the[dashboard](https://cloud.phala.network/dashboard).
 
 ---
 
 ## Interacting with the Agent
 
-Interact via APIs (Hono routes) or the lightweight frontend for testing. For Phala deployments, use your deployment URL as base (e.g., https://<hash>-3000.dstack-prod5.phala.network).
+You can interact with your agent via the APIs directly or via the frontend contained in this repo.
 
-## Direct API Calls
+### Direct
 
-All routes under /api/key-management; require JSON POST with auth (e.g., from NOVA events/tokens).
+For Phala deployments, swap localhost:3000 for your deployment URL.
 
-- Generate Key (Triggered post-group creation):
+- Get information about the agent:
+
+  ```
+  http://localhost:3000/api/agent-info
+  ```
+
+- Get the derived Ethereum Sepolia price pusher account ID and its balance (you will need to fund this account):
+
+  ```
+  http://localhost:3000/api/eth-info
+  ```
+
+- Request the agent to update the price of Eth:
+
+  ```
+  http://localhost:3000/api/transaction
+  ```
+
+### Frontend
+
+To start the frontend, run:
+
 ```bash
-POST http://localhost:3000/api/key-management/generate_key
-Body: {"group_id": "test_group", "owner": "nova-sdk-5.testnet"}
+cd frontend
+npm i
+npm run dev
 ```
-Response: {"key": "base64-random-key", "checksum": "hex-tee-attestation"} (Update checksum on NOVA via update_checksum).
-- Get Key (For authorized users with token):
-```bash
-POST http://localhost:3000/api/key-management/get_key
-Body: {"group_id": "test_group", "token": "payload_b64.signature_hex"}
-```
-Response: {"key": "base64-group-key", "checksum": "hex-tee-attestation"} (Ephemeral; verify checksum on-chain).
 
-- Rotate Key (Triggered post-revocation):
-```bash
-POST http://localhost:3000/api/key-management/rotate_key
-Body: {"group_id": "test_group"}
-```
-Response: {"success": true, "new_key_hash": "sha256-hex", "checksum": "hex-tee-attestation"}.
+To use the frontend with your Phala deployment, change the `API_URL` to the Phala URL in your [config.js](https://github.com/NearDeFi/shade-agent-template/blob/main/frontend/src/config.js) file.
 
----
-
-## Security & Verification
-
-- **TEE Isolation**: Keys encrypted in SQLite with TEE-derived secret (AES-256-CBC); inaccessible outside enclave.
-- **Token Verification**: ed25519 sig on SHA256(payload) + nonce (contract-checked) + timestamp (5min window) + RPC pubkey fetch.
-- **Attestation**: Every response includes checksum from agentInfo()—verify via NOVA get_group_checksum.
-- **Multi-Instance**: Deploy multiple workers with same code hash for redundancy; shared DB access via TEE.
-- **Auditing**: Logs events; monitor Phala Dashboard. Prod: Use mainnet RPC, formal audits.
-
-For NOVA integration: Trigger routes via off-chain indexers (e.g., on EVENT_JSON: logs) or MCP server.
-
-## Troubleshooting
-
-- **CLI Errors**: Ensure Docker running, Phala API key valid. Check shade-agent-cli --help.
-- **Attestation Fails**: Verify code hash approved on NOVA; re-run CLI for fresh build.
-- **Key Mismatch**: Ensure TEE_SECRET consistent across deploys; test token claim first.
-- **Phala Logs**: Dashboard > Apps > Your App > Logs.
-
-## Contributing
-
-Contributions are welcome! We accept contributions for:
-- Bug fixes and improvements
-- New SDK features
-- Documentation enhancements
-- Integration examples
-- Test coverage
-
-## Resources
-
-- [NOVA Docs](https://nova-25.gitbook.io/nova-docs/)
-- [NEAR Docs](https://docs.near.org)
-- [Shade Agents Docs](https://docs.near.org/ai/shade-agents/)
-- [Phala Docs](https://docs.phala.com/)
-
-## License
-
-MIT License - see LICENSE for details.
-
----
-
-**Secure your keys in TEEs—build with NOVA today!** Questions? GitHub Issues.
+In the frontend, you can review the approved **measurements** and **PPID** in the contract and details of the registered agents.
