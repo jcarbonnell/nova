@@ -29,9 +29,6 @@ import httpx
 import jwt
 
 from fastmcp import FastMCP, Context
-from fastmcp.server.auth import RemoteAuthProvider
-from fastmcp.server.auth.providers.jwt import JWTVerifier
-from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 from fastmcp.server.dependencies import get_http_headers
 
 # ─────────────────
@@ -206,13 +203,28 @@ def get_current_user(
     }
 
 def require_auth(func):
+    """Auth decorator that preserves original function signature for MCP."""
+    
+    # Get the original function's signature
+    sig = signature(func)
+    
     @wraps(func)
-    async def wrapper(ctx: Context, *args, **kwargs):
+    async def wrapper(ctx: Context, **kwargs):  # Use **kwargs to accept named params
+        # Extract user from context
         user = get_current_user(ctx=ctx)
         if not user.get("near_account_id"):
             raise ValueError("No NEAR account configured")
-        return await func(ctx, user, *args, **kwargs)
-    wrapper.__inner__ = func  # explicit reference bypassing @wraps uncertainty
+        
+        # Call original function with user + original kwargs
+        return await func(ctx, user, **kwargs)
+    
+    # Preserve original signature for MCP introspection
+    # Remove 'user' param since it's injected by decorator
+    params = [p for name, p in sig.parameters.items() if name not in ('ctx', 'user')]
+    new_params = [sig.parameters['ctx']] + params
+    wrapper.__signature__ = sig.replace(parameters=new_params)
+    wrapper.__inner__ = func
+    
     return wrapper
 
 # ────────────────────────
@@ -480,7 +492,6 @@ cors_middleware = [
 
 mcp = FastMCP(
     name="nova-mcp",
-    auth=DebugTokenVerifier(),
     middleware=cors_middleware,
 )
 
@@ -682,23 +693,11 @@ async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> lis
         return json.loads(result) or []
     return result or []
 
-# ────────────────────────────────
-# Auth0 JWT Verification (global)
-# ────────────────────────────────
-
-token_verifier = JWTVerifier(
-    jwks_uri=f"https://{AUTH0_DOMAIN}/.well-known/jwks.json" if AUTH0_DOMAIN else None,
-    issuer=AUTH0_ISSUER if AUTH0_DOMAIN else None,
-    audience=AUTH0_AUDIENCE
-)
-
-auth_provider = None
-
 # ─────────────────
 # Custom Routes 
 # ─────────────────
 
-@mcp.custom_route("/", methods=["GET"])
+@mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request):
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
