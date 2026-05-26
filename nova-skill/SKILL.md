@@ -1,50 +1,89 @@
 ---
-name: nova-skill
-description: Securely retrieve encrypted files from NOVA groups. Users grant access to their groups, and the agent retrieves files confidentially within TEE.
+name: nova
+version: 1.0.0
+description: >
+  Securely store and retrieve encrypted files from NOVA groups using the NEAR protocol.
+  Use for accountancy records, client data, and any file that needs immutable encrypted
+  storage with group-based access control. Powered by NOVA v2.1 on Phala TEE.
+requires:
+  bins:
+    - bash
+    - curl
+    - jq
+    - python3
+  env:
+    - NOVA_API_KEY
+    - NOVA_MCP_URL
+    - NOVA_ACCOUNT_ID
 ---
 
-# NOVA File Sharing Skill
+# NOVA Skill
 
-### Retrieve and Decrypt File
+## Account
+This agent uses `near-launchpad-api.nova-sdk.near` as its NOVA identity.
+All scripts read credentials from environment variables — never hardcode them.
 
-**ALWAYS use this script to retrieve and decrypt files:**
+---
+
+## 1. Check authorization for a group
+
 ```bash
-~/openclaw/skills/nova-file-sharing/retrieve_and_decrypt.sh GROUP_ID IPFS_CID
+/opt/ironclaw/.ironclaw/skills/nova/check_auth.sh GROUP_ID
 ```
 
-Example:
+---
+
+## 2. Upload a file to a NOVA group
+
 ```bash
-~/openclaw/skills/nova-file-sharing/retrieve_and_decrypt.sh demo_campaign QmZBtuiHonPxguYFysU54N5CPHsReDDEfqYCX5ekih8Vby
+/opt/ironclaw/.ironclaw/skills/nova/upload_to_nova.sh GROUP_ID /path/to/file.json
 ```
 
-**DO NOT** try to run curl commands or Python scripts separately. The shell script handles everything: authentication, retrieval, and decryption.
+Returns the IPFS CID of the encrypted file. Store this CID — it is the permanent reference.
 
-## How to Check Authorization
+---
+
+## 3. Retrieve and decrypt a file from a NOVA group
+
 ```bash
-~/openclaw/skills/nova-file-sharing/check_auth.sh GROUP_ID
+/opt/ironclaw/.ironclaw/skills/nova/retrieve_and_decrypt.sh GROUP_ID IPFS_CID
 ```
 
-## Required User Information
+Outputs decrypted file contents to stdout.
 
-To retrieve files, user must provide:
-1. **Group ID** - NOVA group name (e.g., `demo_campaign`)
-2. **IPFS CID** - File hash starting with `Qm` or `bafy`
+---
 
-## Workflow for Email Campaigns
+## 4. Register a new NOVA group (owner only, costs 0.65 NEAR)
 
-Users upload two files to their NOVA group:
-1. `contacts.csv` - Contact list with email, full_name, and optional fields
-2. `payment_key.txt` - Their NEAR Email payment key
+```bash
+/opt/ironclaw/.ironclaw/skills/nova/register_group.sh GROUP_ID
+```
 
-Then grant access to `nova-bizdev.nova-sdk.near` and provide:
-- Group ID
-- IPFS CID for both files
-- Campaign instructions
+---
 
-## User Instructions
+## 5. Add a member to a group (owner only, costs 0.01 NEAR)
 
-1. **Create a NOVA account** at https://nova-sdk.com
-2. **Create a group** for your campaign data
-3. **Upload your files** (contacts.csv, payment_key.txt)
-4. **Grant access:** `nova group add-member GROUP_ID nova-bizdev.nova-sdk.near`
-5. **Provide IPFS CID** to the agent
+```bash
+/opt/ironclaw/.ironclaw/skills/nova/add_member.sh GROUP_ID MEMBER_ACCOUNT_ID
+```
+
+---
+
+## Accountancy workflow
+
+When a campaign payment is confirmed:
+1. Build invoice JSON at `/tmp/invoice-CAMPAIGN_ID.json`
+2. Run `upload_to_nova.sh launchpad-accountancy /tmp/invoice-CAMPAIGN_ID.json`
+3. Store the returned CID in the `invoices` PostgreSQL table
+
+To audit all invoices ever uploaded:
+```bash
+/opt/ironclaw/.ironclaw/skills/nova/list_group_transactions.sh launchpad-accountancy
+```
+
+---
+
+## DO NOT
+- Run raw curl commands against the MCP server directly
+- Hardcode NOVA_API_KEY, NOVA_MCP_URL, or NOVA_ACCOUNT_ID in any message
+- Share IPFS CIDs publicly — they reference encrypted files but CID exposure is unnecessary
