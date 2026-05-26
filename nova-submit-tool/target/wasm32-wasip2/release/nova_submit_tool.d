@@ -1,0 +1,1 @@
+/Users/juliencarbonnell/near/nova/nova-submit-tool/target/wasm32-wasip2/release/nova_submit_tool.wasm: /Users/juliencarbonnell/near/nova/nova-submit-tool/src/lib.rs /Users/juliencarbonnell/near/nova/nova-submit-tool/wit/tool.wit
