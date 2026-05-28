@@ -4,7 +4,7 @@
 #
 # Produces, in this directory:
 #   nova-submit.wasm                      the component, ready for `ironclaw tool install`
-#   nova-submit-tool.capabilities.json    the sidecar (already present; left in place)
+#   nova-submit.capabilities.json    the sidecar (already present; left in place)
 #
 # Prerequisites on the BUILD machine (not the agent):
 #   rustup target add wasm32-wasip2
@@ -46,7 +46,7 @@ wasm-tools strip "${OUT_NAME}.wasm" -o "${OUT_NAME}.wasm"
 echo
 echo "done:"
 echo "  $ROOT/${OUT_NAME}.wasm"
-echo "  $ROOT/${OUT_NAME}-tool.capabilities.json"
+echo "  $ROOT/${OUT_NAME}.capabilities.json"
 echo
 echo "Install on the agent with:"
 echo "  ironclaw tool install ${OUT_NAME}.wasm"
