@@ -187,46 +187,6 @@ function encryptBlob(data: Uint8Array): string {
 
 ---
 
-### MEDIUM — Massive code duplication across routes
-
-**Duplicated blocks (near-identical in 2-4 locations):**
-
-| Function/Location | user-keys.ts | key-management.ts | utils/derivation.ts | utils/kv-contract.ts |
-|---|---|---|---|---|
-| `encryptBlob` | :95-99 | :83-92 | — | — |
-| `decryptBlob` | :102-128 | :95-141 | — | — |
-| `getBlobFromKV` | :162-200+ | ~:330+ | — | :14-70 |
-| `storeBlobToKV` | ~:210-290+ | ~:257-320+ | — | :74-138 |
-| `borshString` / `borshBytes` / `borshU64` / `borshU128` | ~:130+ | ~:140+ | — | — |
-| `encodeFunctionCallAction` | ~:150+ | ~:160+ | — | — |
-| `encodeTransaction` | ~:170+ | ~:180+ | — | — |
-| `rpcCallWithRetry` | :138-160 | :~similar | — | — |
-| `log` helper | :134-136 | :~similar | — | — |
-| `getAttestation` (stub) | ~: | ~: | — | — |
-| HKDF derivation | :86-93 (Node crypto) | :66-75 (Node crypto) | :60+ (@noble/hashes) | — |
-
-**Impact:** Any bug fix or security improvement must be applied in 3-4 places. The `utils/` files exist but are **not imported by the route files** — each route reimplements everything inline. The utils use `@noble/hashes` for HKDF while routes use Node `crypto.hkdfSync` — these could produce different results if they diverge.
-
----
-
-### MEDIUM — Hardcoded mainnet RPC URL in all read operations
-
-**Files:** `src/routes/user-keys.ts:163`, `src/routes/key-management.ts:~330`, `src/utils/kv-contract.ts:9`
-
-```typescript
-// user-keys.ts:163
-const rpcUrl = 'https://rpc.mainnet.near.org'; // or testnet
-
-// kv-contract.ts:9
-const MAINNET_RPC = 'https://rpc.mainnet.near.org';
-```
-
-**What happens:** `getBlobFromKV` hardcodes mainnet RPC. Write operations (`storeBlobToKV`) do check `process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org'`.
-
-**Impact:** When deployed on testnet, all KV **reads** silently talk to mainnet RPC. This means testnet deployments cannot read stored blobs correctly — the mainnet KV contract won't have testnet data. The behavior is asymmetric (writes work, reads don't), making this bug extremely hard to diagnose.
-
----
-
 ### MEDIUM — TEE attestation entirely stubbed out
 
 **Files:** `src/routes/user-keys.ts`, `src/routes/key-management.ts` — `getAttestation()` in both
@@ -250,18 +210,6 @@ return { provider: 'local', pcr0: devPcr0, verified: false };
 **Files:** `src/routes/key-management.ts` — `GET /api/key-management/debug/groups`
 
 Returns `['example-group-1', 'example-group-2']` — not actual data. Should be removed or wired to real state.
-
----
-
-### LOW — Dead `void generateApiKey` statement
-
-**Files:** `src/routes/user-keys.ts:855`
-
-```typescript
-void generateApiKey;
-```
-
-A no-op referencing a local function. Appears to be leftover debugging code.
 
 ---
 
@@ -357,16 +305,6 @@ The component has 5+ `useEffect` hooks with overlapping dependency arrays (`!loa
 
 ---
 
-### MEDIUM — TanStack React Query unused
-
-**Files:** `src/components/Providers.tsx`
-
-`QueryClientProvider` wraps the entire app. Zero `useQuery`/`useMutation`/`useInfiniteQuery` calls exist anywhere. All data fetching uses raw `fetch()` with manual `useState` loading/error flags.
-
-**Impact:** Additional library weight with no benefit. No caching, deduplication, retry, or stale-while-revalidate patterns.
-
----
-
 ### MEDIUM — PII logged to console across codebase
 
 **Files:** `HomeClient.tsx`, `ChatInterface.tsx`, `LoginModal.tsx`, `WalletProvider.tsx`
@@ -374,39 +312,6 @@ The component has 5+ `useEffect` hooks with overlapping dependency arrays (`!loa
 Account IDs, wallet IDs, email addresses, and partial JWT tokens are logged via `console.log` throughout the client code.
 
 **Impact:** In production, this data appears in browser console and any log aggregation. Violates privacy best practices.
-
----
-
-### MEDIUM — Unawaited Promise in WalletProvider cleanup
-
-**Files:** `src/providers/WalletProvider.tsx`
-
-```typescript
-const cleanup = init();
-return () => {
-  mounted = false;
-  cleanup?.then(cleanupFn => cleanupFn?.());
-};
-```
-
-**What happens:** React `useEffect` cleanup does not await Promises. If the component unmounts before `init()` resolves, the unsubscribe function never executes.
-
-**Impact:** Wallet event listeners may leak on rapid mount/unmount cycles.
-
----
-
-### LOW — Next.js dev overlay hidden globally
-
-**Files:** `src/app/globals.css:74-77`
-
-```css
-#__next_dev_overlay,
-#__next_dev_overlay * {
-  display: none !important;
-}
-```
-
-Hides the Next.js error overlay. Makes debugging development errors impossible.
 
 ---
 
@@ -420,38 +325,6 @@ localStorage.clear();
 ```
 
 **Impact:** Clears ALL localStorage, including NEAR wallet keys injected by `src/lib/nearWallet.ts` and any other data stored by other scripts on the domain. A targeted key removal would be safer.
-
----
-
-### LOW — Dead `asChild` prop on Button component
-
-**Files:** `src/components/ui/button.tsx`
-
-The `asChild` prop (from shadcn/ui pattern) is defined but never used.
-
----
-
-### LOW — `eslint` script has no file arguments
-
-**Files:** `package.json`
-
-`"lint": "eslint"` — no target files specified. May not lint correctly depending on eslint config.
-
----
-
-### LOW — Duplicate `const shadeUrl` declaration
-
-**Files:** `src/app/api/auth/session-token/route.ts:37,79`
-
-Same variable declared twice in the same function body (in different conditional arms).
-
----
-
-### LOW — `reactCompiler: true` + `babel-plugin-react-compiler` redundancy
-
-**Files:** `next.config.ts:5`, `package.json` devDependencies
-
-Next.js 16 natively enables React Compiler. The `babel-plugin-react-compiler` in devDependencies is redundant.
 
 ---
 
@@ -541,10 +414,4 @@ Errors are handled inconsistently across services: some return JSON `{ error: ..
 
 Account IDs, email addresses, wallet IDs, and partial tokens appear in `console.log` across all services. The `log()` helper in the shade agent serializes to JSON but does not redact sensitive fields.
 
-### No CI/CD pipeline
 
-No GitHub Actions workflows, no linting/typecheck in CI, no automated tests. `bun` commands referenced in the orphaned `docs/epics/001-tech-debt.md` don't apply — this codebase uses neither `bun` nor `better-auth`.
-
-### Orphaned documentation
-
-`docs/epics/001-tech-debt.md` and `docs/_template.md` reference technologies that don't exist in this codebase: better-auth, Sputnik DAO, oRPC, TanStack Router, everything-dev, Railway, bun typecheck. These appear to be copied from another project.

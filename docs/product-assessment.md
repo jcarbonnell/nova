@@ -16,8 +16,6 @@ NOVA is an **end-to-end encrypted file storage pipeline** with three layers:
 
 A user creates a group, adds members, encrypts a file, uploads it to IPFS, and records the transaction on NEAR. Group members can retrieve and decrypt. Every file operation creates an on-chain transaction — an immutable, verifiable access log.
 
-The AI chat interface is a thin tool-calling wrapper around these primitives. It is not an agent, it has no persistent memory, and it does not "own" anything. It is a UI convenience, not a core feature.
-
 ## What It's Good At
 
 ### 1. Verifiable access logs
@@ -50,15 +48,11 @@ For sharing cat photos or team documents, Google Drive is faster, cheaper, and e
 
 Blockchain transaction confirmation takes 1-3 seconds. NOVA cannot support real-time co-editing, live cursors, or instant messaging. It is an async, batch-oriented system.
 
-### 3. Consumer AI chat
-
-The current implementation wraps a Claude chatbot with tool calls. There is no persistent agent memory, no autonomous behavior, no learning. Removing or rebuilding this layer would clarify the product.
-
-### 4. High-frequency write workloads
+### 3. High-frequency write workloads
 
 Pay-per-action gas fees (0.001-0.05 NEAR per operation) make thousands of writes per minute impractical. Needs sponsored transactions or flat-rate billing.
 
-### 5. Users who don't independently value auditability
+### 4. Users who don't independently value auditability
 
 If the verifiable access log is not the reason someone chooses NOVA, they are paying blockchain overhead for no benefit. The audit trail is the product. Everything else is implementation.
 
@@ -242,6 +236,6 @@ The AI has no persistent state, no learning, no autonomy. It is a chatbot with t
 
 NOVA is a technically sound prototype with a genuinely differentiated primitive: verifiable, encrypted, shared storage. The architecture (client-side encryption + TEE key management + on-chain access logs) is well-chosen for the problem.
 
-The product is currently unfocused. It presents as a consumer chat app when its real value is as infrastructure for auditable multi-party workflows. Narrowing to "verifiable, privacy-preserving shared storage for applications where access records must be audited by third parties" — and removing or properly rebuilding the AI layer — would make the value proposition clear.
+The product is currently unfocused. It presents as a consumer chat app when its real value is as infrastructure for auditable multi-party workflows. Narrowing to "verifiable, privacy-preserving shared storage for applications where access records must be audited by third parties" would make the value proposition clear.
 
 The hackathon use case validates the model. The multi-agent collaboration pattern is a promising expansion. Both rely on the same primitives: encrypted upload, membership-gated access, tamper-proof audit trail. That's the product.
