@@ -55,3 +55,6 @@ shade-agent/deployment.yaml
 shade-agent/docker-compose.yaml
 shade-agent/package-lock.json
 shade-agent/frontend/package-lock.json
+
+# UI
+nova-landing/
