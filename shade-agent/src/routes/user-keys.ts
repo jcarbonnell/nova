@@ -564,6 +564,16 @@ userKeys.post('/retrieve', async (c) => {
     const { email, auth_token, account_id, wallet_id: walletId } = await c.req.json();
 
     if (account_id && !email && !auth_token && !walletId) {
+      // ACCOUNT-ONLY RETRIEVE — internal signing path.
+      // Reachable ONLY through the X-Internal-Auth gate (see middleware above):
+      // MCP uses this when it must sign a NEAR transaction on a user's behalf,
+      // at which point no user token is present (the user authenticated to MCP
+      // earlier via session JWT). This branch returns a private key with no
+      // per-user auth, so it MUST remain behind the internal gate. Audit every use.
+      log('warn', 'account_only_retrieve', {
+        account_id_hash: crypto.createHash('sha256').update(account_id).digest('hex').slice(0, 12),
+      });
+
       const accountKeyId = crypto.createHash('sha256').update(`account:${account_id}`).digest('hex');
       const encryptedBlob = await getBlobFromKV(accountKeyId);
       
@@ -589,13 +599,25 @@ userKeys.post('/retrieve', async (c) => {
       verifiedUser = await verifyAuth0Token(auth_token);
       if (verifiedUser.email !== email) return c.json({ error: 'Unauthorized' }, 403);
     }
-    // Wallet users: no verification, but require wallet_id
-    else if (!walletId) {
-      return c.json({ error: 'Missing auth_token (email) or wallet_id (wallet)' }, 400);
+    // Wallet users: DISABLED in v0.3.2 — see WALLET_AUTH_PENDING_SELF_CUSTODY.
+    // The wallet path derived sub = `wallet|${walletId}` from an unauthenticated
+    // assertion. Custodial today; rebuilt as self-custody in v0.5. Reject until then.
+    else if (walletId) {
+      log('warn', 'wallet_retrieve_rejected_pending_self_custody', {
+        wallet_hash: crypto.createHash('sha256').update(walletId).digest('hex').slice(0, 12),
+      });
+      return c.json({
+        error: 'Wallet auth disabled pending self-custody migration (v0.5)',
+        code: 'WALLET_AUTH_PENDING_SELF_CUSTODY',
+      }, 501);
+    }
+    // Neither email+token nor wallet
+    else {
+      return c.json({ error: 'Missing auth_token (email)' }, 400);
     }
 
     // Derive sub for key lookup
-    const sub = verifiedUser?.sub || (walletId ? `wallet|${walletId}` : null);
+    const sub = verifiedUser?.sub;
     if (!sub) return c.json({ error: 'Cannot derive key id' }, 400);
     
     const keyId = crypto.createHash('sha256').update(`user:${sub}`).digest('hex');
