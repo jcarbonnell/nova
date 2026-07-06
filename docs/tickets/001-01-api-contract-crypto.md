@@ -4,7 +4,7 @@
 This is a child ticket of #001-rebuild-nova, blocking #002, #003, #004, #005, to define the full oRPC API surface and implement the core cryptographic layer. All other tickets depend on this contract being stable and the crypto utilities being available.
 
 ### Overview
-Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto in `api/src/lib/crypto.ts`. Extend existing auth middleware. Implement the master seed lifecycle. These are the foundation that every other API ticket builds on.
+Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto in `api/src/lib/crypto.ts`. Implement the master seed lifecycle. Auth is handled by better-near-auth (NEAR SIWN, session management, API keys) — no custom challenge-response or auth routes needed. These are the foundation that every other API ticket builds on.
 
 ### Acceptance Criteria
 
@@ -26,8 +26,6 @@ Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto
   - `retrieveFile` — get encrypted file + wrapped file key (auth required, member check)
   - `listFiles` — list files in a group (auth required, member check)
   - `getAuditLog` — query audit events with filters (auth required)
-  - `getAuthChallenge` — return nonce for wallet auth challenge
-  - `verifyAuthChallenge` — verify signed nonce + key ownership
 - [ ] Each route has typed Zod input/output schemas
 - [ ] Auth-protected routes declare error types (`UNAUTHORIZED`, `BAD_REQUEST`, `NOT_FOUND`, `FORBIDDEN`)
 - [ ] Contract uses `every-plugin/orpc` imports and patterns
@@ -54,14 +52,12 @@ Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto
 - [ ] Implement DB migration for `master_seed` table: `id`, `encrypted_seed (text)`, `version (int)`, `created_at`
 
 **Auth Middleware (`api/src/lib/auth.ts`):**
-- [ ] Extend existing `createAuthMiddleware` with wallet auth verification
-- [ ] Challenge-response flow: `getAuthChallenge` stores nonce → `verifyAuthChallenge` checks signature + nonce
-- [ ] Nonce generation: `crypto.randomBytes(32).toString('hex')` with 5-minute expiry
-- [ ] Nonce storage: in-memory + PostgreSQL table (for cross-process in production)
-- [ ] Ed25519 signature verification against NEAR public key
-- [ ] Public key ownership verification: check key is an access key of account_id on NEAR (via RPC)
-- [ ] Achieve atomic nonce consumption via single PostgreSQL transaction (INSERT with unique constraint)
-- [ ] No key material retrieval without verified session
+- [ ] Extend existing `createAuthMiddleware` with group membership verification
+- [ ] Group membership check: caller must be a member of the target group (source of truth: NEAR contract, mirrored in DB)
+- [ ] Ownership check: only group owner can rotate keys, revoke members, delete groups
+- [ ] API key auth: verify API key hash against DB, inject account_id into context
+- [ ] No key material retrieval without verified session (better-near-auth handles session creation)
+- [ ] Auth is provided by better-near-auth — no custom nonce/challenge/verify endpoints needed
 
 **Error Handling:**
 - [ ] Unified `ApiError` class with `statusCode`, `code`, `message`, `details`

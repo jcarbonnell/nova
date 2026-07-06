@@ -52,7 +52,8 @@ Replace all `console.log` with structured logging, implement a circuit breaker f
 - [ ] Apply rate limiting to all mutation endpoints (not just `/user-keys/store`):
   - `/generateApiKey`: 5 req/min
   - `/uploadFile`: 20 req/min
-  - `/verifyAuthChallenge`: 10 req/min
+  - `/rotateGroupKey`: 5 req/min
+  - `/revokeGroupMember`: 5 req/min
   - All others: 30 req/min
 - [ ] Simple in-memory Map-based limiter (fine for single-process)
 - [ ] Return `429 Too Many Requests` with `X-RateLimit-Reset` header

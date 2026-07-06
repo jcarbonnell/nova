@@ -43,7 +43,7 @@ Implement the audit logging service (`api/src/services/audit-logger.ts`) that em
 **Emit Audit Events From Services:**
 - [ ] `key-management.ts`: emit `key_access` on every key retrieval, `key_rotation` on rotation, `member_revoked` on revocation
 - [ ] `file-storage.ts`: emit `file_upload` on upload, `file_retrieve` on retrieval
-- [ ] `auth.ts`: emit `auth_success` on successful challenge verification, `auth_failure` on failed attempts, `api_key_used` on API key auth
+- [ ] `auth.ts`: emit `auth_success` on successful SIWN sign-in, `auth_failure` on failed auth attempts, `api_key_used` on API key auth
 - [ ] `api-key operations`: emit `api_key_generated` on creation
 - [ ] Inject audit logger into services during `initialize` lifecycle
 

@@ -1,7 +1,7 @@
 # Implement Key Hierarchy & Management
 
 ### Context
-This is a child ticket of #001-rebuild-nova, depends on #001-01 for the contract and crypto utilities, to implement the three-tier key hierarchy and group management API. Blocked until the oRPC contract routes and crypto primitives are defined.
+This is a child ticket of #001-rebuild-nova, depends on #001-01 for the contract and crypto utilities, to implement the three-tier key hierarchy and group management API. Auth is handled by better-near-auth — this ticket focuses on key operations, not authentication. Blocked until the oRPC contract routes and crypto primitives are defined.
 
 ### Overview
 Implement the key hierarchy from target-architecture.md §2: master seed → group key v{N} → file key. Build the key management service (`api/src/services/key-management.ts`) that handles group key generation, versioning, rotation on member revocation, re-wrapping, and user key storage/retrieval. Integrate with NEAR for on-chain group membership and transaction records.
@@ -50,13 +50,7 @@ Implement the key hierarchy from target-architecture.md §2: master seed → gro
 - [ ] `group_keys` table: `id`, `group_id`, `version (int)`, `encrypted_key (text)`, `created_at`, `created_by`
 - [ ] `user_keys` table: `id`, `user_sub (unique)`, `account_id (unique, indexed)`, `encrypted_key_data (text)`, `created_at`, `updated_at`
 - [ ] `api_keys` table: `id`, `account_id`, `version (int)`, `key_hash (text, unique)`, `created_at`, `created_by`
-- [ ] `group_members` table: `id`, `group_id`, `member_account_id`, `role (owner/member)`, `added_at`, `added_by` — mirrors on-chain state for fast lookups
-
-**Auth Routes Implementation:**
-- [ ] `GET /api/nova/getAuthChallenge` — returns `{ nonce, timestamp, expiresAt }`, stores nonce in DB with TTL
-- [ ] `POST /api/nova/verifyAuthChallenge` — verifies Ed25519 signature, checks key ownership on-chain, consumes nonce atomically, returns session
-- [ ] Nonce table: `id`, `nonce (text, unique)`, `account_id`, `created_at`, `expires_at` — auto-cleanup via TTL or cron
-- [ ] Session integration with better-auth after successful challenge verification
+  - [ ] `group_members` table: `id`, `group_id`, `member_account_id`, `role (owner/member)`, `added_at`, `added_by` — mirrors on-chain state for fast lookups
 
 ### Notes
 - [ ] Re-wrapping all file keys on member revocation is O(n) in number of files — acceptable for typical group sizes, but add a limit and warn
