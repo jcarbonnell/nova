@@ -143,7 +143,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
     // Step 3 — encrypt the file content in-process.
     let plaintext = p.file_content.as_bytes();
     let file_hash = hex::encode(Sha256::digest(plaintext));
-    let encrypted_b64 = encrypt_aes_gcm(&key_b64, plaintext)?;
+    let encrypted_b64 = encrypt_aes_gcm(&key_b64, plaintext, &upload_id)?;
 
     // Step 4 — finalize_upload: NOVA pins to IPFS + records on NEAR.
     let (cid, trans_id) = finalize_upload(
@@ -174,11 +174,21 @@ fn execute_inner(params: &str) -> Result<String, String> {
 //   decrypt_nova.py does `iv = encrypted[:12]; ciphertext_and_tag = encrypted[12:]`
 // The RustCrypto `aes-gcm` crate appends the 16-byte tag to the ciphertext,
 // so `nonce(12) || ciphertext || tag(16)` is exactly NOVA's `iv + ciphertext_and_tag`.
-// A fresh random 12-byte nonce is generated per call via host.now-millis-seeded
-// entropy combined with a counter — see note below.
+//
+// Nonce derivation: WASI Preview 2 exposes no RNG to the WASM tool, so a CSPRNG
+// is unavailable. NOVA's `prepare_upload` returns a server-generated `upload_id`
+// (UUID) that is unique per call by construction. We derive the 12-byte AES-GCM
+// nonce as SHA-256(upload_id)[..12]. This guarantees the (key, nonce) pair is
+// fresh for every encryption — even when the same per-group key is reused
+// across uploads — closing the keystream-reuse exposure that a clock-derived
+// nonce would have under NOVA's per-group cached-key model.
 // ---------------------------------------------------------------------------
 
-fn encrypt_aes_gcm(key_b64: &str, plaintext: &[u8]) -> Result<String, String> {
+fn encrypt_aes_gcm(
+    key_b64: &str,
+    plaintext: &[u8],
+    upload_id: &str,
+) -> Result<String, String> {
     let key_bytes = B64
         .decode(key_b64)
         .map_err(|e| format!("prepare_upload returned a non-base64 key: {}", e))?;
@@ -192,11 +202,8 @@ fn encrypt_aes_gcm(key_b64: &str, plaintext: &[u8]) -> Result<String, String> {
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)
         .map_err(|e| format!("failed to construct AES-256-GCM cipher: {}", e))?;
 
-    // 12-byte nonce. WASI p2 has no std RNG by default; we derive 12 bytes from
-    // host.now-millis. NOTE: this is sufficient for unique-per-upload nonces in
-    // a hackathon submission flow (one upload per participant per few minutes),
-    // but it is NOT a cryptographically strong RNG. See the README security note.
-    let nonce_bytes = derive_nonce();
+    // Derive a unique 12-byte nonce from the server-generated upload_id.
+    let nonce_bytes = derive_nonce_from_upload_id(upload_id);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext_and_tag = cipher
@@ -211,11 +218,15 @@ fn encrypt_aes_gcm(key_b64: &str, plaintext: &[u8]) -> Result<String, String> {
     Ok(B64.encode(out))
 }
 
-/// Derive a 12-byte nonce from host time. See the note in encrypt_aes_gcm.
-fn derive_nonce() -> [u8; 12] {
-    let millis = host::now_millis();
-    // Mix the 64-bit millis with a SHA-256 to spread entropy across 12 bytes.
-    let digest = Sha256::digest(millis.to_le_bytes());
+/// Derive a 12-byte AES-GCM nonce from the server-generated `upload_id`.
+///
+/// `upload_id` is a UUID minted by NOVA's `prepare_upload` and is unique per
+/// call by construction, so SHA-256(upload_id)[..12] gives a fresh nonce for
+/// every encryption — sufficient to prevent (key, nonce) reuse under NOVA's
+/// per-group cached-key model. No host RNG required, so this works on the
+/// `wasm32-wasip2` target where ambient randomness is unavailable.
+fn derive_nonce_from_upload_id(upload_id: &str) -> [u8; 12] {
+    let digest = Sha256::digest(upload_id.as_bytes());
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&digest[..12]);
     nonce
