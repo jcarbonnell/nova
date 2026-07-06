@@ -61,6 +61,7 @@ IPFS_API_KEY = os.getenv("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.getenv("IPFS_API_SECRET", "")
 RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer.testnet.near.org")
 SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
 SESSION_TOKEN_ISSUER = os.getenv("SESSION_TOKEN_ISSUER", "https://nova-sdk.com")
 SESSION_TOKEN_AUDIENCE = os.getenv("SESSION_TOKEN_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network")
@@ -291,7 +292,11 @@ async def get_user_signer(user: dict) -> Account:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             f"{SHADE_API_URL}/api/user-keys/retrieve",
-            json=payload, headers={"Content-Type": "application/json"}
+            json=payload, 
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Auth": INTERNAL_API_SECRET,
+            },
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Shade key retrieval failed: {resp.status_code}")
@@ -409,6 +414,7 @@ async def _get_shade_key_internal(group_id: str, user: dict) -> str:
         resp = await client.post(
             f"{SHADE_API_URL}/api/key-management/get_key",
             json=body,
+            headers={"X-Internal-Auth": INTERNAL_API_SECRET},
             timeout=15
         )
         if resp.status_code != 200:
@@ -505,7 +511,10 @@ async def register_group(ctx: Context, user: dict, group_id: str) -> str:
     await call_contract(user, "register_group", {"group_id": group_id}, "register_group")
     
     config = get_config(user["near_account_id"])
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Auth": INTERNAL_API_SECRET,
+    }
     if user.get("wallet_id"):
         headers["Authorization"] = f"Bearer wallet:{user['wallet_id']}"
     elif user.get("access_token"):
@@ -549,7 +558,10 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
                 "user_id": member_id,
                 "contract_id": config["contract_id"],
             },
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Auth": INTERNAL_API_SECRET,                
+            },
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Atomic revoke failed: {resp.status_code} - {resp.text[:200]}")
