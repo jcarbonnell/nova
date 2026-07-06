@@ -1,7 +1,7 @@
 # TEE Attestation (Phase 2 / Stretch Goal)
 
 ### Context
-This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract + crypto) and #001-02 (key hierarchy), to integrate with the NEAR agent-contract and KV contract for TEE attestation verification. When deployed on Phala CVM, the API can cryptographically prove it is running untampered code inside a genuine hardware enclave (AWS Nitro). This protects the master seed with hardware-level encryption (TEE_KEY_SECRET) rather than a software secret.
+This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract + crypto) and #001-03 (key hierarchy), to integrate with the NEAR agent-contract and KV contract for TEE attestation verification. When deployed on Phala CVM, the API can cryptographically prove it is running untampered code inside a genuine hardware enclave (AWS Nitro). This protects the master seed with hardware-level encryption (TEE_KEY_SECRET) rather than a software secret.
 
 ### Overview
 Integrate the NOVA API with the NEAR contracts for TEE attestation. Register as a trusted worker via `approve_shade_code_hash` + `register_shade_worker`. Store encrypted keys in the KV contract (`store`) which gates writes by TEE code hash. Expose attestation status via an endpoint. When running on Phala: full TEE security. When running locally: fall back to software secrets.

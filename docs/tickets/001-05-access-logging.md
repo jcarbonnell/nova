@@ -39,8 +39,8 @@ Implement the audit logging service (`api/src/services/audit-logger.ts`) that em
 - [ ] No PII — account IDs only, no emails, no raw tokens
 
 **Emit Audit Events From Services:**
-- [ ] `key-management.ts` (#001-02): emit `key_access` on every key retrieval, `key_rotation` on rotation, `member_revoked` on revocation
-- [ ] `file-storage.ts` (#001-03): emit `file_upload` on upload, `file_retrieve` on retrieval
+- [ ] `key-management.ts` (#001-03): emit `key_access` on every key retrieval, `key_rotation` on rotation, `member_revoked` on revocation
+- [ ] `file-storage.ts` (#001-04): emit `file_upload` on upload, `file_retrieve` on retrieval
 - [ ] Log on auth events: `auth_success` on SIWN sign-in, `auth_failure` on failed attempts (integration with better-near-auth hooks if available, or in middleware)
 - [ ] Inject audit logger into services during `initialize` lifecycle
 

@@ -69,17 +69,21 @@ Key methods used by the API:
 - `add_group_member`, `revoke_group_member`
 - `update_checksum`, `record_transaction`, `get_transactions_for_group`
 - `kv.store`, `kv.get`
-- `register_shade_worker`, `approve_shade_code_hash` (TEE — ticket #7)
+- `register_shade_worker`, `approve_shade_code_hash` (TEE — ticket #6)
 
 ## Tickets
 
 | # | Ticket | Depends On |
 |---|--------|------------|
 | 1 | [API Contract, Crypto, Logging & Core Utilities](#ticket-1) | — |
-| 2 | [Key Hierarchy, Group Management & NEAR Integration](#ticket-2) | #1 |
-| 3 | [Encrypted File Operations](#ticket-3) | #1, #2 |
-| 4 | [Access Logging, Audit Trail & Retention](#ticket-4) | #1 |
-| 5 | [UI Migration — Landing & Dashboard](#ticket-5) | #1, #3 |
-| 7 | [TEE Attestation (Phase 2)](#ticket-7) | #1, #2 |
+| 2 | [UI Migration — Landing & Dashboard](#ticket-2) | #1 |
+| 3 | [Key Hierarchy, Group Management & NEAR Integration](#ticket-3) | #1 |
+| 4 | [Encrypted File Operations](#ticket-4) | #1, #3 |
+| 5 | [Access Logging, Audit Trail & Retention](#ticket-5) | #1 |
+| 6 | [TEE Attestation (Phase 2)](#ticket-6) | #1, #3 |
 
-Tickets 2, 3, and 4 can proceed in parallel after #1. Ticket 5 can start after contracts are defined. Ticket 7 is a stretch goal for Phala CVM deployment.
+Ticket #1 defines the contract surface. Tickets #2, #3, #4, #5 can all proceed in parallel after #1 — the UI (#2) builds against contract types while the backend (#3, #4) implements the routes. Ticket #6 is a stretch goal for Phala CVM deployment.
+
+### End State
+
+Verifiable, end-to-end encrypted shared storage where access records are cryptographically auditable by third parties — every key retrieval, file operation, and membership change is logged and traceable per-group, with configurable data retention.

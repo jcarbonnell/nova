@@ -1,7 +1,7 @@
 # Encrypted File Operations
 
 ### Context
-This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract + crypto) and #001-02 (key hierarchy), to implement end-to-end encrypted file upload, retrieval, and listing. This is where the system stores and retrieves encrypted data — the core product value prop.
+This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract + crypto) and #001-03 (key hierarchy), to implement end-to-end encrypted file upload, retrieval, and listing. This is where the system stores and retrieves encrypted data — the core product value prop.
 
 ### Overview
 Implement the file storage service (`api/src/services/file-storage.ts`) that handles encrypted file upload and retrieval. Files are encrypted client-side with AES-256-GCM using a per-file key. The file key is wrapped with the group key and stored alongside the encrypted blob. Replace IPFS with PostgreSQL blob storage (with NEAR FastKV as an alternative backend). Every file operation records an on-chain transaction via `contract.record_transaction` for the immutable audit trail.
@@ -42,7 +42,7 @@ Implement the file storage service (`api/src/services/file-storage.ts`) that han
 - [ ] Re-encrypt file key with new group key
 - [ ] Update stored wrapped file key in DB
 - [ ] Update group key version on file record
-- [ ] Called by key rotation service (#001-02) for each file in group
+- [ ] Called by key rotation service (#001-03) for each file in group
 
 **Database Schema:**
 - [ ] `files` table:

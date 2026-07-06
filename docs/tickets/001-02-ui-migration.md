@@ -1,7 +1,7 @@
 # Migrate UI — Landing Page & Authenticated Dashboard
 
 ### Context
-This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract typed surface) and #001-03 (file operations contract), to port the nova-landing UI into the everything-dev React 19 + TanStack Router framework. Blocked until the oRPC contract is defined so UI can consume typed API clients.
+This is a child ticket of #001-rebuild-nova, depends on #001-01 (contract typed surface), to port the nova-landing UI into the everything-dev React 19 + TanStack Router framework. The UI can start building against the oRPC contract types as soon as #001-01 is done — backend implementation proceeds in parallel.
 
 ### Overview
 Rebuild NOVA's landing page and create authenticated dashboard pages for group and file management. Follow everything-dev conventions: semantic Tailwind, kebab-case component naming, no comments in implementation, TanStack Router best practices, and TanStack Query for all data fetching. Auth is handled by better-near-auth — the dashboard uses the existing `_authenticated.tsx` layout guard. API key management UI is provided by better-near-auth.

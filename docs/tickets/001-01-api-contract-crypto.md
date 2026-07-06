@@ -1,10 +1,10 @@
 # API Contract, Crypto, Logging & Core Utilities
 
 ### Context
-This is a child ticket of #001-rebuild-nova, blocking #002, #003, #004, #005, to define the full oRPC API surface, implement the core cryptographic layer, structured logging, and startup lifecycle. All other tickets depend on this contract being stable and the crypto utilities being available.
+This is a child ticket of #001-rebuild-nova, blocking #002, #003, #004, #005, #006, to define the full oRPC API surface, implement the core cryptographic layer, structured logging, and startup lifecycle. All other tickets depend on this contract being stable and the crypto utilities being available.
 
 ### Overview
-Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto in `api/src/lib/crypto.ts`. Implement the master seed lifecycle with graceful startup. Add structured logging. Auth is handled by better-near-auth (NEAR SIWN, session management, API keys, permission scoping) — no custom auth routes or API key derivation needed.
+Define the NOVA oRPC contract in `api/src/contract.ts` and implement core crypto in `api/src/lib/crypto.ts`. Implement the master seed lifecycle with graceful startup. Add structured logging. In this proposal, auth is handled by better-near-auth (NEAR SIWN, session management, API keys, permission scoping) — no custom auth routes or API key derivation needed.
 
 ### Acceptance Criteria
 
