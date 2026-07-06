@@ -1,0 +1,28 @@
+{
+  "extends": "bos://dev.everything.near/dev.everything.dev",
+  "account": "nova-sdk.near",
+  "domain": "nova-sdk.com",
+  "title": "everything.dev",
+  "description": "Open runtime for apps on NEAR, composed from published config and loaded through a shared host, UI, and API runtime.",
+  "staging": {
+    "domain": "dev.everything.dev"
+  },
+  "repository": "https://github.com/jcarbonnell/nova",
+  "ci": {
+    "railway": {
+      "service": "app"
+    }
+  },
+  "app": {
+    "ui": {
+      "development": "local:ui"
+    },
+    "api": {
+      "development": "local:api",
+      "secrets": [
+        "API_DATABASE_URL"
+      ]
+    }
+  },
+  "plugins": {}
+}
