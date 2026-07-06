@@ -561,8 +561,38 @@ async function getAttestation(): Promise<{ provider: string; pcr0: string; verif
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
-
 const keyMgmt = new Hono();
+
+// ────────────────────────────────────────────────
+// Internal Auth (MCP / frontend → Shade Agent)
+// ────────────────────────────────────────────────
+// Public HTTPS endpoint on Phala. Only MCP and the frontend's server-side
+// routes should reach key operations; both hold INTERNAL_API_SECRET.
+// SDKs never call these routes directly (they go through MCP /tools/*).
+// Health endpoints are exempt so monitoring/liveness probes still work.
+function checkInternalAuth(provided: string | undefined): boolean {
+  const secret = process.env.INTERNAL_API_SECRET;
+  if (!secret || !/^[0-9a-f]{64}$/i.test(secret)) {
+    log('error', 'internal_auth_misconfigured');
+    return false; // fail closed
+  }
+  if (!provided) return false;
+  const a = Buffer.from(secret, 'utf8');
+  const b = Buffer.from(provided, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+keyMgmt.use('*', async (c, next) => {
+  // Exempt health check (GET /health on this router)
+  if (c.req.method === 'GET' && c.req.path === '/api/key-management/health') {
+    return next();
+  }
+  if (!checkInternalAuth(c.req.header('x-internal-auth'))) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  await next();
+});
 
 // Validate env vars once when first request comes in
 let envValidated = false;
