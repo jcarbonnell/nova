@@ -461,61 +461,64 @@ async function verifyToken(token: string, contractId: string, network: string): 
     }
     console.log('Token verify: Nonce valid');
     
-    // Prefer payload PK if present; fallback to RPC
-    let userPkBytes;
-    if (signing_pk_b58) {
-      try {
-        userPkBytes = bs58.decode(signing_pk_b58);
-        if (userPkBytes.length !== 32) {
-          console.error('Token verify: Invalid signing PK length');
-          return { valid: false };
-        }
-        console.log('Token verify: Using payload PK', signing_pk_b58.slice(0, 20) + '...');
-      } catch (e) {
-        console.error('Token verify: PK decode error, falling back to RPC', e);
-      }
-    }
-    
-    if (!userPkBytes) {  
-      // Fallback: RPC fetch (use correct network RPC)
-      const rpcUrl = getRpcUrl(network);
-      const rpcRes = await axios.post(rpcUrl, {
-        jsonrpc: '2.0',
-        id: 'dontcare',
-        method: 'query',
-        params: {
-          request_type: 'view_access_key_list',
-          finality: 'final',
-          account_id: user_id
-        }
-      });
-      if (rpcRes.status !== 200) {
-        console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
-        return { valid: false };
-      }
-      const keys = rpcRes.data.result?.keys || [];
-      if (keys.length === 0) {
-        console.error('Token verify: No access keys for', user_id);
-        return { valid: false };
-      }
-      const keyView = keys.find((k: { public_key: string }) => k.public_key.startsWith('ed25519:')) || keys[0];
-      if (!keyView.public_key.startsWith('ed25519:')) {
-        console.error('Token verify: No ed25519 key found');
-        return { valid: false };
-      }
-      const userPkStr = keyView.public_key;
-      userPkBytes = bs58.decode(userPkStr.slice(8));
-      console.log('Token verify: Using RPC PK', userPkStr.slice(0, 20) + '...');
-    }
-    
-    // Verify ed25519 on raw payload_bytes
-    const sigBytes = Buffer.from(sigHex, 'hex');
-    const validSig = await ed25519.verifyAsync(sigBytes, payloadBytes, userPkBytes);
-    if (!validSig) {
-      console.error('Token verify: Sig invalid');
+    // SECURITY: always fetch the account's on-chain access keys and verify the signature. 
+    // signing_pk_b58, if present, is used as a hint to select which on-chain key to check first (accounts may hold multiple keys); 
+    // it must match an actual on-chain access key of user_id or the token is rejected.
+    const rpcUrl = getRpcUrl(network);
+    const rpcRes = await axios.post(rpcUrl, {
+      jsonrpc: '2.0',
+      id: 'dontcare',
+      method: 'query',
+      params: {
+        request_type: 'view_access_key_list',
+        finality: 'final',
+        account_id: user_id,
+      },
+    });
+    if (rpcRes.status !== 200) {
+      console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
       return { valid: false };
     }
-    console.log('Token verify: Sig valid');
+    const keys: { public_key: string }[] = rpcRes.data.result?.keys || [];
+    if (keys.length === 0) {
+      console.error('Token verify: No access keys for', user_id);
+      return { valid: false };
+    }
+
+    // Collect all on-chain ed25519 keys for this account.
+    const ed25519Keys = keys
+      .map(k => k.public_key)
+      .filter(pk => pk.startsWith('ed25519:'));
+    if (ed25519Keys.length === 0) {
+      console.error('Token verify: No ed25519 key found for', user_id);
+      return { valid: false };
+    }
+
+    // If the caller supplied a hint key, it MUST be one of the on-chain keys.
+    if (signing_pk_b58) {
+      const hintFull = `ed25519:${signing_pk_b58}`;
+      if (!ed25519Keys.includes(hintFull)) {
+        console.error('Token verify: signing_pk_b58 not an on-chain key of', user_id);
+        return { valid: false };
+      }
+    }
+
+    // Verify the signature against each candidate on-chain key; accept if any match.
+    // (If a hint was given and validated above, it is among these candidates.)
+    const sigBytes = Buffer.from(sigHex, 'hex');
+    let userPkBytes: Uint8Array | null = null;
+    for (const pk of ed25519Keys) {
+      const candidate = bs58.decode(pk.slice(8)); // strip "ed25519:"
+      if (candidate.length !== 32) continue;
+      if (await ed25519.verifyAsync(sigBytes, payloadBytes, candidate)) {
+        userPkBytes = candidate;
+        break;
+      }
+    }
+    if (!userPkBytes) {
+      console.error('Token verify: Sig does not match any on-chain key of', user_id);
+      return { valid: false };
+    }
     
     return { 
       valid: true, 
