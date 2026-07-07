@@ -87,16 +87,21 @@ function deriveKey(salt: string, length: number = 32): Uint8Array {
   return new Uint8Array(derived);
 }
 
+// GCM stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext]
+// New blobs are written with AES-256-GCM. Legacy CBC blobs remain readable via decryptBlob's fallback
+const GCM_MAGIC = Buffer.from([0x4e, 0x4f, 0x56, 0x47]); // "NOVG"
+
 function encryptBlob(data: Uint8Array): string {
   const TEE_SECRET = process.env.TEE_KEY_SECRET!;
   if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
     throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
   }
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-  let encrypted = cipher.update(data);
-  encrypted = Buffer.concat([encrypted, cipher.final()]);
-  return iv.toString('hex') + ':' + encrypted.toString('hex');
+  const iv = crypto.randomBytes(12); // GCM standard IV length
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(TEE_SECRET, 'hex'), iv);
+  const encrypted = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
+  const tag = cipher.getAuthTag(); // 16 bytes
+  // Return the COMPLETE stored layout as a single hex string (no colons).
+  return Buffer.concat([GCM_MAGIC, iv, tag, encrypted]).toString('hex');
 }
 
 function decryptBlob(enc: string | number[]): Uint8Array {
@@ -104,27 +109,40 @@ function decryptBlob(enc: string | number[]): Uint8Array {
   if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
     throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
   }
+  const key = Buffer.from(TEE_SECRET, 'hex');
 
-  // Handle raw byte array returned directly from NEAR KV (16-byte IV + ciphertext)
+  // Normalize input to the raw stored bytes.
+  let raw: Buffer;
   if (Array.isArray(enc)) {
-    const raw = Buffer.from(enc);
-    if (raw.length < 17) throw new Error('Encrypted blob too short');
-    const iv = raw.subarray(0, 16);
-    const encrypted = raw.subarray(16);
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let decrypted = decipher.update(encrypted);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted;
+    raw = Buffer.from(enc);
+  } else if (enc.includes(':')) {
+    // Legacy CBC string form "ivhex:encryptedhex"
+    const [ivStr, encStr] = enc.split(':');
+    if (!ivStr || !encStr) throw new Error('Invalid encrypted blob format');
+    const iv = Buffer.from(ivStr, 'hex');
+    const encrypted = Buffer.from(encStr, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
+  } else {
+    raw = Buffer.from(enc, 'hex'); // new complete-layout hex
   }
-  // Handle legacy hex-string format "ivhex:encryptedhex"
-  const [ivStr, encStr] = enc.split(':');
-  if (!ivStr || !encStr) throw new Error('Invalid encrypted blob format');
-  const iv = Buffer.from(ivStr, 'hex');
-  const encrypted = Buffer.from(encStr, 'hex');
-  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-  let decrypted = decipher.update(encrypted);
-  decrypted = Buffer.concat([decrypted, decipher.final()]);
-  return decrypted;
+
+  // GCM? magic present and enough bytes for framing (4 magic + 12 iv + 16 tag).
+  if (raw.length >= 32 && raw.subarray(0, 4).equals(GCM_MAGIC)) {
+    const iv = raw.subarray(4, 16);   // 12 bytes
+    const tag = raw.subarray(16, 32); // 16 bytes
+    const ciphertext = raw.subarray(32);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
+  }
+
+  // Legacy CBC raw bytes: [16-byte IV][ciphertext].
+  if (raw.length < 17) throw new Error('Encrypted blob too short');
+  const iv = raw.subarray(0, 16);
+  const encrypted = raw.subarray(16);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
 }
 
 // ──────────────────────
@@ -279,8 +297,8 @@ async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> 
   const blockHash = bs58.decode(accessKeyResult.block_hash);
 
   // 3. Encode FunctionCall action + full transaction
-  const [ivHex, encHex] = encryptedBlob.split(':');
-  const rawBytes = Buffer.concat([Buffer.from(ivHex, 'hex'), Buffer.from(encHex, 'hex')]);
+  // encryptBlob now returns the COMPLETE stored layout as a single hex string
+  const rawBytes = Buffer.from(encryptedBlob, 'hex');
   const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
   const action = encodeFunctionCallAction('store', callArgs, 30_000_000_000_000n, 0n);
   const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
