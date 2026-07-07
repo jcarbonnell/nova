@@ -26,41 +26,42 @@ let masterSeed: Uint8Array | null = null;
 async function getMasterSeed(): Promise<Uint8Array> {
   if (masterSeed) return masterSeed;
 
-  const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
-  
-  // If MASTER_SEED_INIT_ALLOWED is true, force re-initialization
-  if (MASTER_SEED_INIT_ALLOWED) {
-    console.warn('⚠️  MASTER_SEED_INIT_ALLOWED=true: Force re-initializing master seed!');
-    const sponsorKey = process.env.SPONSOR_PRIVATE_KEY as string;
-    const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
-    const newSeed = crypto.createHash('sha256')
-      .update(Buffer.concat([
-        sponsorKeyBytes,
-        Buffer.from('nova-master-seed-v1', 'utf8')
-      ]))
-      .digest();
-
-    // SET MASTER SEED FIRST (before storing!)
-    masterSeed = newSeed;  
-    const encrypted = encryptBlob(newSeed);
-    await storeBlobToKV('master-root', encrypted);
-    console.log('✅ Master seed initialized and stored on-chain');
-    return masterSeed;
-  }
-
-  // Otherwise, try to load existing seed
-  const encryptedBlob = await getBlobFromKV('master-root');  
-  if (encryptedBlob) {      
+  // SECURITY: ALWAYS load from KV first. The master seed is the root of all
+  // derived keys — overwriting an existing seed makes every account, group key,
+  // file key and API key permanently underivable. MASTER_SEED_INIT_ALLOWED can
+  // ONLY cause a *first* initialization when KV is empty; it can NEVER overwrite
+  // an existing seed, even if left set to 'true' across a redeploy.
+  const encryptedBlob = await getBlobFromKV('master-root');
+  if (encryptedBlob) {
     masterSeed = decryptBlob(encryptedBlob);
     console.log('✅ Master seed loaded from KV');
     return masterSeed;
   }
 
-  // No seed exists and init not allowed
-  throw new Error(
-    'Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
-    'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.'
-  );
+  // KV is empty — first-time init only, and only if explicitly allowed.
+  const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
+  if (!MASTER_SEED_INIT_ALLOWED) {
+    throw new Error(
+      'Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
+      'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.'
+    );
+  }
+
+  console.warn('⚠️  Initializing NEW master seed — this must run ONLY once, ever.');
+  const sponsorKey = process.env.SPONSOR_PRIVATE_KEY as string;
+  const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
+  const newSeed = crypto.createHash('sha256')
+    .update(Buffer.concat([
+      sponsorKeyBytes,
+      Buffer.from('nova-master-seed-v1', 'utf8'),
+    ]))
+    .digest();
+
+  masterSeed = newSeed; // set before storing so a store failure doesn't half-init
+  const encrypted = encryptBlob(newSeed);
+  await storeBlobToKV('master-root', encrypted);
+  console.log('✅ Master seed initialized and stored on-chain');
+  return masterSeed;
 }
 
 function deriveKey(salt: string, length: number = 32): Uint8Array {
