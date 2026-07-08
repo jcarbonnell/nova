@@ -463,7 +463,8 @@ function checkInternalAuth(provided: string | undefined): boolean {
 
 userKeys.use('*', async (c, next) => {
   // Exempt health check (GET / on this router)
-  if (c.req.method === 'GET' && c.req.path === '/api/user-keys/') {
+  const p = c.req.path;
+  if (c.req.method === 'GET' && (p === '/api/user-keys' || p === '/api/user-keys/')) {
     return next();
   }
   if (!checkInternalAuth(c.req.header('x-internal-auth'))) {

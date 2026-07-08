@@ -607,7 +607,8 @@ function checkInternalAuth(provided: string | undefined): boolean {
 
 keyMgmt.use('*', async (c, next) => {
   // Exempt health check (GET /health on this router)
-  if (c.req.method === 'GET' && c.req.path === '/api/key-management/health') {
+  const p = c.req.path;
+  if (c.req.method === 'GET' && (p === '/api/key-management/health' || p === '/api/key-management/health/')) {
     return next();
   }
   if (!checkInternalAuth(c.req.header('x-internal-auth'))) {
