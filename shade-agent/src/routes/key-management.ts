@@ -17,6 +17,12 @@ import {
 import { initializeMasterSeed } from '../lib/seed.js';
 import { log } from '../lib/logger.js';
 
+import { ApiError, errorHandler } from '../lib/errors.js';
+import {
+  validate, body, type ValidatedEnv,
+  GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema,
+} from '../lib/schemas.js';
+
 // ────────────────────────────────────────────────
 // Configuration
 // ────────────────────────────────────────────────
@@ -286,7 +292,8 @@ async function getAttestation(): Promise<{ provider: string; pcr0: string; verif
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
-const keyMgmt = new Hono();
+const keyMgmt = new Hono<ValidatedEnv>();
+keyMgmt.onError(errorHandler);
 
 // ────────────────────────────────────────────────
 // Internal Auth (MCP / frontend → Shade Agent)
@@ -339,40 +346,28 @@ keyMgmt.use('*', async (c, next) => {
 
 // Health - Ensure master seed + show status
 keyMgmt.get('/health', async (c) => {
-  try {
-    const attestation = await getAttestation();
-    return c.json({
-      status: 'ok',
-      contract: DEFAULT_MAINNET_CONTRACT,
-      network: 'mainnet',
-      timestamp: new Date().toISOString(),
-      master_seed_status: 'initialized',
-      attestation: attestation.provider,
-      attestation_pcr0: attestation.pcr0,
-      attestation_verified: attestation.verified,
-    });
-  } catch (err) {
-    return c.json({ error: 'Health failed', details: (err as Error).message }, 500);
-  }
+  const attestation = await getAttestation();
+  return c.json({
+    status: 'ok',
+    contract: DEFAULT_MAINNET_CONTRACT,
+    network: 'mainnet',
+    timestamp: new Date().toISOString(),
+    master_seed_status: 'initialized',
+    attestation: attestation.provider,
+    attestation_pcr0: attestation.pcr0,
+    attestation_verified: attestation.verified,
+  });
 });
 
 // GENERATE KEY - Deterministic from master seed
-keyMgmt.post('/generate_key', async (c) => {
-  const { group_id, owner, contract_id } = await c.req.json();
-  if (!group_id) return c.json({ error: 'group_id required' }, 400);
+keyMgmt.post('/generate_key', validate(GenerateKeySchema), async (c) => {
+  const { group_id, contract_id } = body(c, GenerateKeySchema);
 
-  let resolved;
-  try {
-    resolved = resolveContract(contract_id);
-  } catch (e: unknown) {
-    return c.json({ error: (e as Error).message }, 400);
-  }
-  const { contractId, network } = resolved;
+  const { contractId, network } = resolveContract(contract_id);
 
   // Verify group on-chain
-  const rpcUrl = getRpcUrl(network);
-  const groupExists = await viewFunction(rpcUrl, contractId, 'group_contains_key', { group_id });
-  if (!groupExists) return c.json({ error: `Group not found on ${contractId}` }, 404);
+  const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
+  if (!groupExists) throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found on ${contractId}`);
 
   // Derive group key deterministically
   const salt = `group:${group_id}:${network}:${contractId}`;
@@ -390,33 +385,28 @@ keyMgmt.post('/generate_key', async (c) => {
 });
 
 // GET KEY - Derive and return
-keyMgmt.post('/get_key', async (c) => {
-  const { group_id, token, account_id, contract_id } = await c.req.json();
-  if (!group_id) return c.json({ error: 'group_id required' }, 400);
+keyMgmt.post('/get_key', validate(GetKeySchema), async (c) => {
+  const { group_id, token, account_id, contract_id } = body(c, GetKeySchema);
 
-  let resolved;
-  try {
-    resolved = resolveContract(contract_id, group_id);
-  } catch (e: unknown) {
-    return c.json({ error: (e as Error).message }, 400);
-  }
-  const { contractId, network } = resolved;
+  const { contractId, network } = resolveContract(contract_id, group_id);
 
   let user_id: string;
 
   if (account_id) {
     user_id = account_id;
   } else {
+    if (!token) throw new ApiError(400, 'AUTH_REQUIRED', 'account_id or token required');
     const tokenInfo = await verifyToken(token, contractId, network);
-    if (!tokenInfo.valid || !tokenInfo.user_id) return c.json({ error: 'Invalid token' }, 403);
+    if (!tokenInfo.valid || !tokenInfo.user_id) throw new ApiError(403, 'INVALID_TOKEN', 'Invalid token');
     user_id = tokenInfo.user_id;
   }
 
   const authorized = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
-  if (!authorized) return c.json({ error: 'Unauthorized' }, 403);
+  if (!authorized) throw new ApiError(403, 'UNAUTHORIZED', 'Unauthorized');
 
   // Check if key has been rotated — look up stored version
-  const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+  const versionKeyId = crypto.createHash('sha256')
+    .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
   const versionBlob = await getBlobFromKV(versionKeyId);
   let version: string | null = null;
   if (versionBlob) {
@@ -435,34 +425,20 @@ keyMgmt.post('/get_key', async (c) => {
 });
 
 // REVOKE MEMBER + AUTO-ROTATE — single atomic operation
-// Clients call this instead of calling nova-sdk.near directly
-keyMgmt.post('/revoke_member', async (c) => {
-  const { group_id, user_id, contract_id } = await c.req.json();
-  if (!group_id || !user_id) return c.json({ error: 'group_id and user_id required' }, 400);
+keyMgmt.post('/revoke_member', validate(RevokeMemberSchema), async (c) => {
+  const { group_id, user_id, contract_id } = body(c, RevokeMemberSchema);
 
-  let resolved;
-  try {
-    resolved = resolveContract(contract_id, group_id);
-  } catch (e: unknown) {
-    return c.json({ error: (e as Error).message }, 400);
-  }
-  const { contractId, network } = resolved;
+  const { contractId, network } = resolveContract(contract_id, group_id);
 
   // 1. Verify group exists and user is currently a member
   const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
-  if (!groupExists) return c.json({ error: `Group not found on ${contractId}` }, 404);
+  if (!groupExists) throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found on ${contractId}`);
 
   const isMember = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
-  if (!isMember) return c.json({ error: 'User is not a member' }, 400);
+  if (!isMember) throw new ApiError(400, 'NOT_A_MEMBER', 'User is not a member');
 
   // 2. Broadcast revoke_group_member to nova-sdk.near
-  await broadcastContractCall(
-    contractId,
-    network,
-    'revoke_group_member',
-    { group_id, user_id },
-    '0',
-  );
+  await broadcastContractCall(contractId, network, 'revoke_group_member', { group_id, user_id }, '0');
   log('info', 'member_revoked_on_chain', { group_id, user_id });
 
   // 3. Immediately rotate the group key
@@ -471,7 +447,8 @@ keyMgmt.post('/revoke_member', async (c) => {
   const newKeyBytes = deriveKey(salt, 32);
   const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
   const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
-  const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+  const versionKeyId = crypto.createHash('sha256')
+    .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
   await storeBlobToKV(versionKeyId, combinedEncrypted);
 
   log('info', 'key_auto_rotated', { group_id, version, revokedUser: user_id });
@@ -486,33 +463,23 @@ keyMgmt.post('/revoke_member', async (c) => {
 });
 
 // ROTATE KEY - New deterministic key (different salt or version)
-keyMgmt.post('/rotate_key', async (c) => {
-  const { group_id, contract_id } = await c.req.json();
-  if (!group_id) return c.json({ error: 'group_id required' }, 400);
+keyMgmt.post('/rotate_key', validate(RotateKeySchema), async (c) => {
+  const { group_id, contract_id } = body(c, RotateKeySchema);
 
-  let resolved;
-  try {
-    resolved = resolveContract(contract_id, group_id);
-  } catch (e: unknown) {
-    return c.json({ error: (e as Error).message }, 400);
-  }
-  const { contractId, network } = resolved;
+  const { contractId, network } = resolveContract(contract_id, group_id);
 
   const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
-  if (!groupExists) return c.json({ error: `Group not found (${contractId})` }, 404);
+  if (!groupExists) throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found (${contractId})`);
 
   const version = Date.now();
   const salt = `group:${group_id}:${network}:${contractId}:v${version}`;
   const newKeyBytes = deriveKey(salt, 32);
 
-  // Store new blob
-  const encrypted = encryptBlob(newKeyBytes);
-  const versionStr = version.toString();
-
   // Pack key + version into a single encrypted blob
-  const combined = JSON.stringify({ key: encrypted, version: versionStr });
+  const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
   const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
-  const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+  const versionKeyId = crypto.createHash('sha256')
+    .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
   await storeBlobToKV(versionKeyId, combinedEncrypted);
 
   const newKeyHash = crypto.createHash('sha256').update(newKeyBytes).digest('hex');

@@ -28,7 +28,8 @@
     "jsonwebtoken": "^9.0.3",
     "jwks-rsa": "^3.2.2",
     "near-api-js": "^5.1.1",
-    "tsx": "4.21.0"
+    "tsx": "4.21.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "25.5.0",

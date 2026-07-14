@@ -1,174 +1,21 @@
 // Shade agent manages keys for NOVA groups in shade agent
 import { Hono } from 'hono';
-import crypto, { hkdfSync } from 'crypto';
+import crypto from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
+import { encryptBlob, decryptBlob, deriveKey } from '../lib/crypto.js';
+import { getBlobFromKV, storeBlobToKV, rpcCallWithRetry, encodeFunctionCallAction, encodeTransaction, KV_CONTRACT, } from '../lib/kv.js';
+import { initializeMasterSeed } from '../lib/seed.js';
+import { log } from '../lib/logger.js';
+import { ApiError, errorHandler } from '../lib/errors.js';
+import { validate, body, GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema, } from '../lib/schemas.js';
 // ────────────────────────────────────────────────
 // Configuration
 // ────────────────────────────────────────────────
-const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
-const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
 const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
 const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
 const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
-// ────────────────────────────────────────────────
-// Master Seed & Derivation (shared with user-keys)
-// ────────────────────────────────────────────────
-let masterSeed = null;
-async function getMasterSeed() {
-    if (masterSeed)
-        return masterSeed;
-    // SECURITY: ALWAYS load from KV first. The master seed is the root of all
-    // derived keys — overwriting an existing seed makes every account, group key,
-    // file key and API key permanently underivable. MASTER_SEED_INIT_ALLOWED can
-    // ONLY cause a *first* initialization when KV is empty; it can NEVER overwrite
-    // an existing seed, even if left set to 'true' across a redeploy.
-    const encryptedBlob = await getBlobFromKV('master-root');
-    if (encryptedBlob) {
-        masterSeed = decryptBlob(encryptedBlob);
-        console.log('✅ Master seed loaded from KV');
-        return masterSeed;
-    }
-    // KV is empty — first-time init only, and only if explicitly allowed.
-    const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
-    if (!MASTER_SEED_INIT_ALLOWED) {
-        throw new Error('Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
-            'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.');
-    }
-    console.warn('⚠️  Initializing NEW master seed — this must run ONLY once, ever.');
-    const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
-    const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
-    const newSeed = crypto.createHash('sha256')
-        .update(Buffer.concat([
-        sponsorKeyBytes,
-        Buffer.from('nova-master-seed-v1', 'utf8'),
-    ]))
-        .digest();
-    masterSeed = newSeed; // set before storing so a store failure doesn't half-init
-    const encrypted = encryptBlob(newSeed);
-    await storeBlobToKV('master-root', encrypted);
-    console.log('✅ Master seed initialized and stored on-chain');
-    return masterSeed;
-}
-function deriveKey(salt, length = 32) {
-    const master = getMasterSeedSync();
-    const derived = hkdfSync('sha256', master, Buffer.from(salt), Buffer.from('nova-v1'), length);
-    return new Uint8Array(derived);
-}
-function getMasterSeedSync() {
-    if (!masterSeed)
-        throw new Error('Master seed not initialized');
-    return masterSeed;
-}
-// GCM stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext]
-// New blobs are written with AES-256-GCM. Legacy CBC blobs remain readable via decryptBlob's fallback
-const GCM_MAGIC = Buffer.from([0x4e, 0x4f, 0x56, 0x47]); // "NOVG"
-function encryptBlob(data) {
-    const TEE_SECRET = process.env.TEE_KEY_SECRET;
-    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
-        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
-    }
-    const iv = crypto.randomBytes(12); // GCM standard IV length
-    const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(TEE_SECRET, 'hex'), iv);
-    const encrypted = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
-    const tag = cipher.getAuthTag(); // 16 bytes
-    // Return the COMPLETE stored layout as a single hex string (no colons).
-    return Buffer.concat([GCM_MAGIC, iv, tag, encrypted]).toString('hex');
-}
-function decryptBlob(enc) {
-    const TEE_SECRET = process.env.TEE_KEY_SECRET;
-    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
-        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
-    }
-    const key = Buffer.from(TEE_SECRET, 'hex');
-    // Normalize input to the raw stored bytes.
-    let raw;
-    if (Array.isArray(enc)) {
-        raw = Buffer.from(enc);
-    }
-    else if (enc.includes(':')) {
-        // Legacy CBC string form "ivhex:encryptedhex"
-        const [ivStr, encStr] = enc.split(':');
-        if (!ivStr || !encStr)
-            throw new Error('Invalid encrypted blob format');
-        const iv = Buffer.from(ivStr, 'hex');
-        const encrypted = Buffer.from(encStr, 'hex');
-        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-        return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
-    }
-    else {
-        raw = Buffer.from(enc, 'hex'); // new complete-layout hex
-    }
-    // GCM? magic present and enough bytes for framing (4 magic + 12 iv + 16 tag).
-    if (raw.length >= 32 && raw.subarray(0, 4).equals(GCM_MAGIC)) {
-        const iv = raw.subarray(4, 16); // 12 bytes
-        const tag = raw.subarray(16, 32); // 16 bytes
-        const ciphertext = raw.subarray(32);
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-        decipher.setAuthTag(tag);
-        return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
-    }
-    // Legacy CBC raw bytes: [16-byte IV][ciphertext].
-    if (raw.length < 17)
-        throw new Error('Encrypted blob too short');
-    const iv = raw.subarray(0, 16);
-    const encrypted = raw.subarray(16);
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-    return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
-}
-// ────────────────────────────────────────────────
-// KV Helpers (same as user-keys)
-// ────────────────────────────────────────────────
-function log(level, event, meta) {
-    console[level](JSON.stringify({ ts: new Date().toISOString(), level, event, ...meta }));
-}
-// Borsh primitives for manual NEAR transaction serialization
-function borshString(s) {
-    const b = Buffer.from(s, 'utf8');
-    const len = Buffer.alloc(4);
-    len.writeUInt32LE(b.length, 0);
-    return Buffer.concat([len, b]);
-}
-function borshBytes(b) {
-    const len = Buffer.alloc(4);
-    len.writeUInt32LE(b.length, 0);
-    return Buffer.concat([len, b]);
-}
-function borshU64(n) {
-    const buf = Buffer.alloc(8);
-    buf.writeBigUInt64LE(n, 0);
-    return buf;
-}
-function borshU128(n) {
-    const buf = Buffer.alloc(16);
-    buf.writeBigUInt64LE(n & 0xffffffffffffffffn, 0);
-    buf.writeBigUInt64LE(n >> 64n, 8);
-    return buf;
-}
-function encodeFunctionCallAction(methodName, args, gas, deposit) {
-    return Buffer.concat([
-        Buffer.from([2]),
-        borshString(methodName),
-        borshBytes(args),
-        borshU64(gas),
-        borshU128(deposit),
-    ]);
-}
-function encodeTransaction(signerId, publicKey, nonce, receiverId, blockHash, actions) {
-    const actionsCount = Buffer.alloc(4);
-    actionsCount.writeUInt32LE(actions.length, 0);
-    return Buffer.concat([
-        borshString(signerId),
-        Buffer.from([0]),
-        publicKey,
-        borshU64(nonce),
-        borshString(receiverId),
-        blockHash,
-        actionsCount,
-        ...actions,
-    ]);
-}
 // Generic contract call broadcaster — reuses same signer keypair as storeBlobToKV
 async function broadcastContractCall(contractId, network, methodName, args, depositYocto = '0') {
     const rpcUrl = network === 'testnet'
@@ -217,105 +64,8 @@ async function broadcastContractCall(contractId, network, methodName, args, depo
         contractId, methodName, txHash: broadcastResult?.transaction?.hash,
     });
 }
-// Signed transaction broadcast
-async function storeBlobToKV(key, encryptedBlob) {
-    const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
-    const signerAccountId = KV_CONTRACT_OWNER;
-    const signerPriv = deriveKey('kv-owner-signer-v1', 32);
-    const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
-    const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
-    const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
-        jsonrpc: '2.0', id: 'access-key',
-        method: 'query',
-        params: {
-            request_type: 'view_access_key',
-            finality: 'final',
-            account_id: signerAccountId,
-            public_key: signerPubBs58,
-        },
-    });
-    if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
-        throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
-            `Please add the key with:\n` +
-            `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`);
-    }
-    const nonce = BigInt(accessKeyResult.nonce) + 1n;
-    const blockHash = bs58.decode(accessKeyResult.block_hash);
-    // encryptBlob now returns the COMPLETE stored layout as a single hex string
-    const rawBytes = Buffer.from(encryptedBlob, 'hex');
-    const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
-    const action = encodeFunctionCallAction('store', callArgs, 30000000000000n, 0n);
-    const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
-    const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
-    const signature = await ed25519.signAsync(txHash, signerPriv);
-    const signedTx = Buffer.concat([
-        txBytes,
-        Buffer.from([0]),
-        signature,
-    ]);
-    const broadcastResult = await rpcCallWithRetry(rpcUrl, {
-        jsonrpc: '2.0', id: 'broadcast',
-        method: 'broadcast_tx_commit',
-        params: [signedTx.toString('base64')],
-    });
-    if (broadcastResult?.status?.Failure) {
-        throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
-    }
-    log('info', 'kv_store_committed', { key, txHash: broadcastResult?.transaction?.hash });
-}
-async function rpcCallWithRetry(rpcUrl, payload, retries = 3) {
-    for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-            const res = await axios.post(rpcUrl, payload, { timeout: 10_000 });
-            if (res.data.error) {
-                const msg = res.data.error.message || res.data.error.cause?.name || JSON.stringify(res.data.error);
-                throw new Error(`RPC error: ${msg}`);
-            }
-            return res.data.result;
-        }
-        catch (err) {
-            const isLast = attempt === retries - 1;
-            if (isLast)
-                throw err;
-            const backoffMs = 1_000 * (attempt + 1);
-            log('warn', 'rpc_retry', { attempt: attempt + 1, backoffMs, error: err.message });
-            await new Promise(r => setTimeout(r, backoffMs));
-        }
-    }
-    throw new Error('rpcCallWithRetry: exhausted retries without throwing');
-}
-async function getBlobFromKV(key) {
-    const rpcUrl = 'https://rpc.mainnet.near.org';
-    const payload = {
-        jsonrpc: '2.0',
-        id: 'kv-get',
-        method: 'query',
-        params: {
-            request_type: 'call_function',
-            finality: 'final',
-            account_id: KV_CONTRACT,
-            method_name: 'get',
-            args_base64: Buffer.from(JSON.stringify({ key })).toString('base64'),
-        },
-    };
-    try {
-        const result = await rpcCallWithRetry(rpcUrl, payload);
-        if (result?.result && result.result.length > 0) {
-            const jsonStr = Buffer.from(result.result).toString('utf8');
-            const parsed = JSON.parse(jsonStr);
-            if (!parsed || parsed.length === 0)
-                return null;
-            return parsed;
-        }
-        return null;
-    }
-    catch (err) {
-        console.error('KV get failed after retries:', err.message);
-        return null;
-    }
-}
 // ────────────────────────────────────────────────
-// RPC View Helper (unchanged)
+// RPC View Helper
 // ────────────────────────────────────────────────
 async function viewFunction(rpcUrl, contractId, methodName, args) {
     const response = await axios.post(rpcUrl, {
@@ -494,6 +244,7 @@ async function getAttestation() {
 // Routes
 // ────────────────────────────────────────────────
 const keyMgmt = new Hono();
+keyMgmt.onError(errorHandler);
 // ────────────────────────────────────────────────
 // Internal Auth (MCP / frontend → Shade Agent)
 // ────────────────────────────────────────────────
@@ -539,51 +290,31 @@ keyMgmt.use('*', async (c, next) => {
         }
         envValidated = true;
     }
-    await getMasterSeed();
-    await next();
-});
-// Ensure master seed is loaded before any route handler runs
-keyMgmt.use('*', async (c, next) => {
-    await getMasterSeed();
+    await initializeMasterSeed();
     await next();
 });
 // Health - Ensure master seed + show status
 keyMgmt.get('/health', async (c) => {
-    try {
-        const attestation = await getAttestation();
-        return c.json({
-            status: 'ok',
-            contract: DEFAULT_MAINNET_CONTRACT,
-            network: 'mainnet',
-            timestamp: new Date().toISOString(),
-            master_seed_status: 'initialized',
-            attestation: attestation.provider,
-            attestation_pcr0: attestation.pcr0,
-            attestation_verified: attestation.verified,
-        });
-    }
-    catch (err) {
-        return c.json({ error: 'Health failed', details: err.message }, 500);
-    }
+    const attestation = await getAttestation();
+    return c.json({
+        status: 'ok',
+        contract: DEFAULT_MAINNET_CONTRACT,
+        network: 'mainnet',
+        timestamp: new Date().toISOString(),
+        master_seed_status: 'initialized',
+        attestation: attestation.provider,
+        attestation_pcr0: attestation.pcr0,
+        attestation_verified: attestation.verified,
+    });
 });
 // GENERATE KEY - Deterministic from master seed
-keyMgmt.post('/generate_key', async (c) => {
-    const { group_id, owner, contract_id } = await c.req.json();
-    if (!group_id)
-        return c.json({ error: 'group_id required' }, 400);
-    let resolved;
-    try {
-        resolved = resolveContract(contract_id);
-    }
-    catch (e) {
-        return c.json({ error: e.message }, 400);
-    }
-    const { contractId, network } = resolved;
+keyMgmt.post('/generate_key', validate(GenerateKeySchema), async (c) => {
+    const { group_id, contract_id } = body(c, GenerateKeySchema);
+    const { contractId, network } = resolveContract(contract_id);
     // Verify group on-chain
-    const rpcUrl = getRpcUrl(network);
-    const groupExists = await viewFunction(rpcUrl, contractId, 'group_contains_key', { group_id });
+    const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
     if (!groupExists)
-        return c.json({ error: `Group not found on ${contractId}` }, 404);
+        throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found on ${contractId}`);
     // Derive group key deterministically
     const salt = `group:${group_id}:${network}:${contractId}`;
     const keyBytes = deriveKey(salt, 32);
@@ -596,33 +327,27 @@ keyMgmt.post('/generate_key', async (c) => {
     return c.json({ key: keyB64, checksum });
 });
 // GET KEY - Derive and return
-keyMgmt.post('/get_key', async (c) => {
-    const { group_id, token, account_id, contract_id } = await c.req.json();
-    if (!group_id)
-        return c.json({ error: 'group_id required' }, 400);
-    let resolved;
-    try {
-        resolved = resolveContract(contract_id, group_id);
-    }
-    catch (e) {
-        return c.json({ error: e.message }, 400);
-    }
-    const { contractId, network } = resolved;
+keyMgmt.post('/get_key', validate(GetKeySchema), async (c) => {
+    const { group_id, token, account_id, contract_id } = body(c, GetKeySchema);
+    const { contractId, network } = resolveContract(contract_id, group_id);
     let user_id;
     if (account_id) {
         user_id = account_id;
     }
     else {
+        if (!token)
+            throw new ApiError(400, 'AUTH_REQUIRED', 'account_id or token required');
         const tokenInfo = await verifyToken(token, contractId, network);
         if (!tokenInfo.valid || !tokenInfo.user_id)
-            return c.json({ error: 'Invalid token' }, 403);
+            throw new ApiError(403, 'INVALID_TOKEN', 'Invalid token');
         user_id = tokenInfo.user_id;
     }
     const authorized = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
     if (!authorized)
-        return c.json({ error: 'Unauthorized' }, 403);
+        throw new ApiError(403, 'UNAUTHORIZED', 'Unauthorized');
     // Check if key has been rotated — look up stored version
-    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    const versionKeyId = crypto.createHash('sha256')
+        .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
     const versionBlob = await getBlobFromKV(versionKeyId);
     let version = null;
     if (versionBlob) {
@@ -637,26 +362,16 @@ keyMgmt.post('/get_key', async (c) => {
     return c.json({ key: keyB64, checksum: 'derived-verified' });
 });
 // REVOKE MEMBER + AUTO-ROTATE — single atomic operation
-// Clients call this instead of calling nova-sdk.near directly
-keyMgmt.post('/revoke_member', async (c) => {
-    const { group_id, user_id, contract_id } = await c.req.json();
-    if (!group_id || !user_id)
-        return c.json({ error: 'group_id and user_id required' }, 400);
-    let resolved;
-    try {
-        resolved = resolveContract(contract_id, group_id);
-    }
-    catch (e) {
-        return c.json({ error: e.message }, 400);
-    }
-    const { contractId, network } = resolved;
+keyMgmt.post('/revoke_member', validate(RevokeMemberSchema), async (c) => {
+    const { group_id, user_id, contract_id } = body(c, RevokeMemberSchema);
+    const { contractId, network } = resolveContract(contract_id, group_id);
     // 1. Verify group exists and user is currently a member
     const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
     if (!groupExists)
-        return c.json({ error: `Group not found on ${contractId}` }, 404);
+        throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found on ${contractId}`);
     const isMember = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
     if (!isMember)
-        return c.json({ error: 'User is not a member' }, 400);
+        throw new ApiError(400, 'NOT_A_MEMBER', 'User is not a member');
     // 2. Broadcast revoke_group_member to nova-sdk.near
     await broadcastContractCall(contractId, network, 'revoke_group_member', { group_id, user_id }, '0');
     log('info', 'member_revoked_on_chain', { group_id, user_id });
@@ -666,7 +381,8 @@ keyMgmt.post('/revoke_member', async (c) => {
     const newKeyBytes = deriveKey(salt, 32);
     const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
     const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
-    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    const versionKeyId = crypto.createHash('sha256')
+        .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
     await storeBlobToKV(versionKeyId, combinedEncrypted);
     log('info', 'key_auto_rotated', { group_id, version, revokedUser: user_id });
     return c.json({
@@ -678,31 +394,20 @@ keyMgmt.post('/revoke_member', async (c) => {
     });
 });
 // ROTATE KEY - New deterministic key (different salt or version)
-keyMgmt.post('/rotate_key', async (c) => {
-    const { group_id, contract_id } = await c.req.json();
-    if (!group_id)
-        return c.json({ error: 'group_id required' }, 400);
-    let resolved;
-    try {
-        resolved = resolveContract(contract_id, group_id);
-    }
-    catch (e) {
-        return c.json({ error: e.message }, 400);
-    }
-    const { contractId, network } = resolved;
+keyMgmt.post('/rotate_key', validate(RotateKeySchema), async (c) => {
+    const { group_id, contract_id } = body(c, RotateKeySchema);
+    const { contractId, network } = resolveContract(contract_id, group_id);
     const groupExists = await viewFunction(getRpcUrl(network), contractId, 'group_contains_key', { group_id });
     if (!groupExists)
-        return c.json({ error: `Group not found (${contractId})` }, 404);
+        throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found (${contractId})`);
     const version = Date.now();
     const salt = `group:${group_id}:${network}:${contractId}:v${version}`;
     const newKeyBytes = deriveKey(salt, 32);
-    // Store new blob
-    const encrypted = encryptBlob(newKeyBytes);
-    const versionStr = version.toString();
     // Pack key + version into a single encrypted blob
-    const combined = JSON.stringify({ key: encrypted, version: versionStr });
+    const combined = JSON.stringify({ key: encryptBlob(newKeyBytes), version: version.toString() });
     const combinedEncrypted = encryptBlob(Buffer.from(combined, 'utf8'));
-    const versionKeyId = crypto.createHash('sha256').update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
+    const versionKeyId = crypto.createHash('sha256')
+        .update(`group-version:${group_id}:${network}:${contractId}`).digest('hex');
     await storeBlobToKV(versionKeyId, combinedEncrypted);
     const newKeyHash = crypto.createHash('sha256').update(newKeyBytes).digest('hex');
     return c.json({
