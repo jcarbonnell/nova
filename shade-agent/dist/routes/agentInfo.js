@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { agent } from "../index";
+import { agent } from "../index.js";
 const app = new Hono();
 app.get("/", async (c) => {
     try {

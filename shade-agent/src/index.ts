@@ -7,8 +7,8 @@ import { cors } from "hono/cors";
 import { ShadeClient } from "@neardefi/shade-agent-js";
 
 // Import routes AFTER dotenv is loaded
-import userKeys from "./routes/user-keys";
-import keyManagement from "./routes/key-management";
+import userKeys from "./routes/user-keys.js";
+import keyManagement from "./routes/key-management.js";
 
 // Validate required environment variables
 const agentContractId = process.env.AGENT_CONTRACT_ID;
