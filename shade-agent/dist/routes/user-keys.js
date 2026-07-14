@@ -10,51 +10,57 @@ import axios from 'axios';
 // Configuration
 // ─────────────────
 const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
-const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
-const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
-const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE || 'https://nova-mcp.fastmcp.app';
-const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
-if (!AUTH0_DOMAIN)
-    throw new Error('AUTH0_DOMAIN required');
-if (!SHADE_AGENT_ACCOUNT_ID)
-    throw new Error('SHADE_AGENT_ACCOUNT_ID required');
-if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET))
-    throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
+const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
 // Initialize JWKS client for Auth0 public key verification
-const JWKS_CLIENT = jwksClient({
-    jwksUri: `https://${AUTH0_DOMAIN}/.well-known/jwks.json`,
-    cache: true,
-    cacheMaxAge: 86400000,
-});
+let JWKS_CLIENT = null;
+function getJwksClient() {
+    if (!JWKS_CLIENT) {
+        const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
+        if (!AUTH0_DOMAIN)
+            throw new Error('AUTH0_DOMAIN required');
+        JWKS_CLIENT = jwksClient({
+            jwksUri: `https://${AUTH0_DOMAIN}/.well-known/jwks.json`,
+            cache: true,
+            cacheMaxAge: 86400000,
+        });
+    }
+    return JWKS_CLIENT;
+}
 const BASE62_CHARSET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 // ────────────────────────────────────────────────
 // Master Seed & Deterministic Derivation
 // ────────────────────────────────────────────────
 let masterSeed = null;
-// ⚠️  FIRST-DEPLOY SAFETY: After the initial deployment confirms the master seed
-// is stored on-chain, set MASTER_SEED_INIT_ALLOWED=false (or remove the env var)
-// to prevent accidental re-initialization on subsequent deploys.
-const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
 async function initializeMasterSeedIfNeeded() {
     if (masterSeed)
         return;
+    // ALWAYS try to load from KV first (even if MASTER_SEED_INIT_ALLOWED=true)
     const encryptedBlob = await getBlobFromKV('master-root');
     if (encryptedBlob) {
         masterSeed = decryptBlob(encryptedBlob);
         console.log('Master seed loaded from KV');
         return;
     }
+    // Only initialize if nothing exists in KV
+    const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
     if (!MASTER_SEED_INIT_ALLOWED) {
         throw new Error('Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
             'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.');
     }
-    // First-time init — runs ONCE when no blob exists and flag is explicitly set
+    // Initialize new seed deterministically(only runs if KV is empty)
     console.warn('⚠️  Initializing new master seed — this should run ONLY once!');
-    const newSeed = crypto.randomBytes(32);
+    const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
+    const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
+    const newSeed = crypto.createHash('sha256')
+        .update(Buffer.concat([
+        sponsorKeyBytes,
+        Buffer.from('nova-master-seed-v1', 'utf8')
+    ]))
+        .digest();
+    masterSeed = newSeed;
     const encrypted = encryptBlob(newSeed);
     await storeBlobToKV('master-root', encrypted);
-    masterSeed = newSeed;
-    console.log('Master seed initialized and stored on-chain');
+    console.log('✅ Master seed initialized and stored on-chain');
 }
 function deriveKey(salt, length = 32) {
     if (!masterSeed)
@@ -62,34 +68,61 @@ function deriveKey(salt, length = 32) {
     const derived = hkdfSync('sha256', masterSeed, Buffer.from(salt), Buffer.from('nova-v1'), length);
     return new Uint8Array(derived);
 }
+// GCM stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext]
+// New blobs are written with AES-256-GCM. Legacy CBC blobs remain readable via decryptBlob's fallback
+const GCM_MAGIC = Buffer.from([0x4e, 0x4f, 0x56, 0x47]); // "NOVG"
 function encryptBlob(data) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let encrypted = cipher.update(data);
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return iv.toString('hex') + ':' + encrypted.toString('hex');
+    const TEE_SECRET = process.env.TEE_KEY_SECRET;
+    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
+    }
+    const iv = crypto.randomBytes(12); // GCM standard IV length
+    const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(TEE_SECRET, 'hex'), iv);
+    const encrypted = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
+    const tag = cipher.getAuthTag(); // 16 bytes
+    // Return the COMPLETE stored layout as a single hex string (no colons).
+    return Buffer.concat([GCM_MAGIC, iv, tag, encrypted]).toString('hex');
 }
 function decryptBlob(enc) {
-    // Handle raw byte array returned directly from NEAR KV (16-byte IV + ciphertext)
-    if (Array.isArray(enc)) {
-        const raw = Buffer.from(enc);
-        const iv = raw.subarray(0, 16);
-        const encrypted = raw.subarray(16);
-        const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-        let decrypted = decipher.update(encrypted);
-        decrypted = Buffer.concat([decrypted, decipher.final()]);
-        return decrypted;
+    const TEE_SECRET = process.env.TEE_KEY_SECRET;
+    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
     }
-    // Handle legacy hex-string format "ivhex:encryptedhex"
-    const [ivStr, encStr] = enc.split(':');
-    if (!ivStr || !encStr)
-        throw new Error('Invalid encrypted blob format');
-    const iv = Buffer.from(ivStr, 'hex');
-    const encrypted = Buffer.from(encStr, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let decrypted = decipher.update(encrypted);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted;
+    const key = Buffer.from(TEE_SECRET, 'hex');
+    // Normalize input to the raw stored bytes.
+    let raw;
+    if (Array.isArray(enc)) {
+        raw = Buffer.from(enc);
+    }
+    else if (enc.includes(':')) {
+        // Legacy CBC string form "ivhex:encryptedhex"
+        const [ivStr, encStr] = enc.split(':');
+        if (!ivStr || !encStr)
+            throw new Error('Invalid encrypted blob format');
+        const iv = Buffer.from(ivStr, 'hex');
+        const encrypted = Buffer.from(encStr, 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+        return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
+    }
+    else {
+        raw = Buffer.from(enc, 'hex'); // new complete-layout hex
+    }
+    // GCM? magic present and enough bytes for framing (4 magic + 12 iv + 16 tag).
+    if (raw.length >= 32 && raw.subarray(0, 4).equals(GCM_MAGIC)) {
+        const iv = raw.subarray(4, 16); // 12 bytes
+        const tag = raw.subarray(16, 32); // 16 bytes
+        const ciphertext = raw.subarray(32);
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(tag);
+        return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
+    }
+    // Legacy CBC raw bytes: [16-byte IV][ciphertext].
+    if (raw.length < 17)
+        throw new Error('Encrypted blob too short');
+    const iv = raw.subarray(0, 16);
+    const encrypted = raw.subarray(16);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
 }
 // ──────────────────────
 // KV Contract Helpers
@@ -198,9 +231,9 @@ function encodeTransaction(signerId, publicKey, nonce, receiverId, blockHash, ac
 }
 async function storeBlobToKV(key, encryptedBlob) {
     const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
-    const signerAccountId = SHADE_AGENT_ACCOUNT_ID;
+    const signerAccountId = KV_CONTRACT_OWNER;
     // 1. Derive deterministic signer keypair from master seed
-    const signerPriv = deriveKey('kv-signer-v1', 32);
+    const signerPriv = deriveKey('kv-owner-signer-v1', 32);
     const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
     const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
     // 2. Fetch current nonce + recent block hash for the signer access key
@@ -217,8 +250,8 @@ async function storeBlobToKV(key, encryptedBlob) {
     const nonce = BigInt(accessKeyResult.nonce) + 1n;
     const blockHash = bs58.decode(accessKeyResult.block_hash);
     // 3. Encode FunctionCall action + full transaction
-    const [ivHex, encHex] = encryptedBlob.split(':');
-    const rawBytes = Buffer.concat([Buffer.from(ivHex, 'hex'), Buffer.from(encHex, 'hex')]);
+    // encryptBlob now returns the COMPLETE stored layout as a single hex string
+    const rawBytes = Buffer.from(encryptedBlob, 'hex');
     const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
     const action = encodeFunctionCallAction('store', callArgs, 30000000000000n, 0n);
     const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
@@ -247,12 +280,16 @@ async function storeBlobToKV(key, encryptedBlob) {
 // ──────────────────────────
 // Get signing key from Auth0
 function getKey(header, callback) {
-    JWKS_CLIENT.getSigningKey(header.kid, (err, key) => {
+    getJwksClient().getSigningKey(header.kid, (err, key) => {
         callback(err || null, key?.getPublicKey());
     });
 }
 // Verify Auth0 JWT
 async function verifyAuth0Token(token) {
+    const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
+    const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE || 'https://nova-mcp.fastmcp.app';
+    if (!AUTH0_DOMAIN)
+        throw new Error('AUTH0_DOMAIN required');
     return new Promise((resolve, reject) => {
         const decoded = jwt.decode(token, { complete: true });
         if (!decoded?.payload)
@@ -276,7 +313,7 @@ async function verifyAuth0Token(token) {
     });
 }
 // ────────────────────────────────────────────────
-// API Key Helpers (deterministic now)
+// API Key Helpers (deterministic)
 // ────────────────────────────────────────────────
 function generateApiKey() {
     const randomBytes = crypto.randomBytes(32);
@@ -332,6 +369,58 @@ function checkRateLimit(key) {
     return true;
 }
 const userKeys = new Hono();
+// ────────────────────────────────────────────────
+// Internal Auth (MCP / frontend → Shade Agent)
+// ────────────────────────────────────────────────
+// Public HTTPS endpoint on Phala. Only MCP and the frontend's server-side
+// routes should reach key operations; both hold INTERNAL_API_SECRET.
+// SDKs never call these routes directly (they go through MCP /tools/*).
+// Health endpoints are exempt so monitoring/liveness probes still work.
+function checkInternalAuth(provided) {
+    const secret = process.env.INTERNAL_API_SECRET;
+    if (!secret || !/^[0-9a-f]{64}$/i.test(secret)) {
+        log('error', 'internal_auth_misconfigured');
+        return false; // fail closed
+    }
+    if (!provided)
+        return false;
+    const a = Buffer.from(secret, 'utf8');
+    const b = Buffer.from(provided, 'utf8');
+    if (a.length !== b.length)
+        return false;
+    return crypto.timingSafeEqual(a, b);
+}
+userKeys.use('*', async (c, next) => {
+    // Exempt health check (GET / on this router)
+    const p = c.req.path;
+    if (c.req.method === 'GET' && (p === '/api/user-keys' || p === '/api/user-keys/')) {
+        return next();
+    }
+    if (!checkInternalAuth(c.req.header('x-internal-auth'))) {
+        return c.json({ error: 'Forbidden' }, 403);
+    }
+    await next();
+});
+// Validate env vars once when first request comes in
+let envValidated = false;
+userKeys.use('*', async (c, next) => {
+    if (!envValidated) {
+        // Read env vars here, not at module level
+        const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
+        const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+        const TEE_SECRET = process.env.TEE_KEY_SECRET || '';
+        if (!AUTH0_DOMAIN)
+            throw new Error('AUTH0_DOMAIN required');
+        if (!SHADE_AGENT_ACCOUNT_ID)
+            throw new Error('SHADE_AGENT_ACCOUNT_ID required');
+        if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+            throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
+        }
+        envValidated = true;
+    }
+    await initializeMasterSeedIfNeeded();
+    await next();
+});
 // Ensure master seed is loaded before any route handler runs
 userKeys.use('*', async (c, next) => {
     await initializeMasterSeedIfNeeded();
@@ -345,6 +434,12 @@ userKeys.post('/store', async (c) => {
     }
     try {
         const { email, account_id, private_key, public_key, network, auth_token, wallet_id } = await c.req.json();
+        console.log('💾 STORE request received:', {
+            email: email ? `${email.substring(0, 5)}...` : undefined,
+            account_id,
+            has_token: !!auth_token,
+            wallet_id
+        });
         if (!email || !account_id || !private_key || !public_key || !network) {
             return c.json({ error: 'Missing required fields' }, 400);
         }
@@ -353,9 +448,17 @@ userKeys.post('/store', async (c) => {
             verifiedUser = await verifyAuth0Token(auth_token);
             if (verifiedUser.email !== email)
                 return c.json({ error: 'Email mismatch' }, 403);
+            console.log('✅ Token verified for STORE, sub:', verifiedUser.sub?.substring(0, 20) + '...');
         }
         else if (wallet_id) {
-            verifiedUser = { email, sub: `wallet|${wallet_id}` };
+            // DISABLED (v0.4). Re-enabled in v0.5 with self-custody wallet auth.
+            log('warn', 'store_wallet_branch_rejected', {
+                wallet_hash: crypto.createHash('sha256').update(wallet_id).digest('hex').slice(0, 12),
+            });
+            return c.json({
+                error: 'Wallet auth disabled pending self-custody migration (v0.5)',
+                code: 'WALLET_AUTH_PENDING_SELF_CUSTODY',
+            }, 501);
         }
         else {
             return c.json({ error: 'auth_token or wallet_id required' }, 400);
@@ -364,15 +467,27 @@ userKeys.post('/store', async (c) => {
             return c.json({ error: 'Invalid private key format' }, 400);
         if (!['testnet', 'mainnet'].includes(network))
             return c.json({ error: 'Invalid network' }, 400);
-        // Deterministic salt for this user
-        const salt = `user:${verifiedUser.sub}:${account_id}`;
-        const derivedWrapper = deriveKey(salt); // 32-byte wrapper key
-        // Encrypt the actual private key with derived wrapper
-        const encryptedPrivateKey = encryptBlob(Buffer.from(private_key, 'utf8'));
-        // Store encrypted blob on KV
-        const keyId = crypto.createHash('sha256').update(salt).digest('hex');
-        await storeBlobToKV(keyId, encryptedPrivateKey);
-        const checksum = 'derived-' + crypto.createHash('sha256').update(derivedWrapper).digest('hex').slice(0, 16);
+        // Create data structure to store
+        const userData = {
+            account_id,
+            private_key,
+            public_key,
+            network,
+            wallet_id: wallet_id || null,
+            created_at: new Date().toISOString(),
+        };
+        // Encrypt the entire data structure
+        const encryptedBlob = encryptBlob(Buffer.from(JSON.stringify(userData), 'utf8'));
+        // Store encrypted blob on KV using simple sub-based key
+        const sub = verifiedUser.sub;
+        console.log('🔑 Derived sub for STORE:', sub.substring(0, 30) + '...');
+        const keyId = crypto.createHash('sha256').update(`user:${sub}`).digest('hex');
+        console.log('🔑 Computed keyId for STORE:', keyId);
+        await storeBlobToKV(keyId, encryptedBlob);
+        console.log('✅ Key stored successfully for account:', account_id);
+        const accountKeyId = crypto.createHash('sha256').update(`account:${account_id}`).digest('hex');
+        await storeBlobToKV(accountKeyId, encryptedBlob);
+        const checksum = 'tee-verified';
         return c.json({
             success: true,
             account_id,
@@ -391,38 +506,71 @@ userKeys.post('/store', async (c) => {
 userKeys.post('/retrieve', async (c) => {
     try {
         const { email, auth_token, account_id, wallet_id: walletId } = await c.req.json();
-        let verifiedUser = null;
-        let targetAccountId;
-        if (account_id) {
-            targetAccountId = account_id;
+        if (account_id && !email && !auth_token && !walletId) {
+            // ACCOUNT-ONLY RETRIEVE — internal signing path.
+            // Reachable ONLY through the X-Internal-Auth gate (see middleware above):
+            // MCP uses this when it must sign a NEAR transaction on a user's behalf,
+            // at which point no user token is present (the user authenticated to MCP
+            // earlier via session JWT). This branch returns a private key with no
+            // per-user auth, so it MUST remain behind the internal gate. Audit every use.
+            log('warn', 'account_only_retrieve', {
+                account_id_hash: crypto.createHash('sha256').update(account_id).digest('hex').slice(0, 12),
+            });
+            const accountKeyId = crypto.createHash('sha256').update(`account:${account_id}`).digest('hex');
+            const encryptedBlob = await getBlobFromKV(accountKeyId);
+            if (!encryptedBlob)
+                return c.json({ error: 'Account not found' }, 404);
+            const decrypted = Buffer.from(decryptBlob(encryptedBlob)).toString('utf8');
+            const userData = JSON.parse(decrypted);
+            return c.json({
+                account_id: userData.account_id,
+                private_key: userData.private_key,
+                public_key: userData.public_key,
+                network: userData.network,
+                wallet_id: userData.wallet_id,
+                checksum: 'derived-verified',
+            });
         }
-        else if (email && auth_token) {
+        let verifiedUser = null;
+        // Email users: verify auth_token
+        if (email && auth_token) {
             verifiedUser = await verifyAuth0Token(auth_token);
             if (verifiedUser.email !== email)
                 return c.json({ error: 'Unauthorized' }, 403);
-            targetAccountId = account_id || 'derived';
         }
+        // Wallet users: DISABLED in v0.3.2 — see WALLET_AUTH_PENDING_SELF_CUSTODY.
+        // The wallet path derived sub = `wallet|${walletId}` from an unauthenticated
+        // assertion. Custodial today; rebuilt as self-custody in v0.5. Reject until then.
+        else if (walletId) {
+            log('warn', 'wallet_retrieve_rejected_pending_self_custody', {
+                wallet_hash: crypto.createHash('sha256').update(walletId).digest('hex').slice(0, 12),
+            });
+            return c.json({
+                error: 'Wallet auth disabled pending self-custody migration (v0.5)',
+                code: 'WALLET_AUTH_PENDING_SELF_CUSTODY',
+            }, 501);
+        }
+        // Neither email+token nor wallet
         else {
-            return c.json({ error: 'Missing fields' }, 400);
+            return c.json({ error: 'Missing auth_token (email)' }, 400);
         }
-        // Reconstruct the exact same salt used in /store
-        // wallet_id path: sub = 'wallet|{wallet_id}'
-        // auth_token path: sub = verifiedUser.sub
-        const sub = verifiedUser?.sub || (walletId ? `wallet|${walletId}` : null);
+        // Derive sub for key lookup
+        const sub = verifiedUser?.sub;
         if (!sub)
-            return c.json({ error: 'Cannot derive key id without auth_token or wallet_id' }, 400);
-        const keyId = crypto.createHash('sha256').update(`user:${sub}:${targetAccountId}`).digest('hex');
+            return c.json({ error: 'Cannot derive key id' }, 400);
+        const keyId = crypto.createHash('sha256').update(`user:${sub}`).digest('hex');
         const encryptedBlob = await getBlobFromKV(keyId);
         if (!encryptedBlob)
             return c.json({ error: 'Account not found' }, 404);
-        const privateKey = Buffer.from(decryptBlob(encryptedBlob)).toString('utf8');
+        const decrypted = Buffer.from(decryptBlob(encryptedBlob)).toString('utf8');
+        const userData = JSON.parse(decrypted);
         const checksum = 'derived-verified';
         return c.json({
-            account_id: targetAccountId,
-            private_key: privateKey,
-            public_key: 'derived-from-seed',
-            network: 'mainnet',
-            wallet_id: null,
+            account_id: userData.account_id,
+            private_key: userData.private_key,
+            public_key: userData.public_key,
+            network: userData.network,
+            wallet_id: userData.wallet_id,
             checksum,
         });
     }
@@ -435,37 +583,73 @@ userKeys.post('/retrieve', async (c) => {
 userKeys.post('/check', async (c) => {
     try {
         const { email, auth_token, wallet_id, account_id } = await c.req.json();
-        let targetAccountId;
+        console.log('🔍 CHECK request received:', {
+            email: email ? `${email.substring(0, 5)}...` : undefined,
+            has_token: !!auth_token,
+            wallet_id,
+            account_id
+        });
         let verifiedSub;
-        if (account_id && !auth_token && !wallet_id) {
-            targetAccountId = account_id;
+        // Email users: verify auth_token
+        if (email && auth_token) {
+            try {
+                const verified = await verifyAuth0Token(auth_token);
+                console.log('✅ Token verified, sub:', verified.sub?.substring(0, 20) + '...');
+                if (verified.email !== email) {
+                    console.log('❌ Email mismatch:', { verified: verified.email, requested: email });
+                    return c.json({ error: 'Unauthorized' }, 403);
+                }
+                verifiedSub = verified.sub;
+            }
+            catch (tokenError) {
+                console.error('❌ Token verification failed:', tokenError);
+                return c.json({ error: 'Token verification failed' }, 401);
+            }
         }
-        else if (email && auth_token) {
-            const verified = await verifyAuth0Token(auth_token);
-            if (verified.email !== email)
-                return c.json({ error: 'Unauthorized' }, 403);
-            verifiedSub = verified.sub;
-            targetAccountId = account_id || 'unknown';
+        // Wallet users: no verification, but require wallet_id
+        else if (!wallet_id) {
+            console.log('❌ Missing auth_token and wallet_id');
+            return c.json({ error: 'Missing auth_token (email) or wallet_id (wallet)' }, 400);
         }
-        else if (wallet_id) {
-            targetAccountId = account_id || 'wallet-derived';
+        // Derive sub for key lookup
+        const sub = verifiedSub || (wallet_id ? `wallet|${wallet_id}` : null);
+        if (!sub) {
+            console.log('❌ Cannot derive sub');
+            return c.json({ error: 'Cannot derive key id' }, 400);
         }
-        else {
-            return c.json({ error: 'Missing fields' }, 400);
-        }
-        const sub = verifiedSub
-            ? verifiedSub
-            : wallet_id
-                ? `wallet|${wallet_id}`
-                : email || 'unknown';
-        const salt = `user:${sub}:${targetAccountId}`;
-        const keyId = crypto.createHash('sha256').update(salt).digest('hex');
+        console.log('🔑 Derived sub:', sub.substring(0, 30) + '...');
+        const keyId = crypto.createHash('sha256').update(`user:${sub}`).digest('hex');
+        console.log('🔑 Computed keyId:', keyId);
         const blob = await getBlobFromKV(keyId);
-        const exists = !!blob;
+        if (!blob) {
+            console.log('❌ No blob found in KV for keyId:', keyId);
+            return c.json({ exists: false, account_id: null });
+        }
+        console.log('✅ Blob found in KV, decrypting...');
+        // Decrypt and parse to get the real account_id
+        const decrypted = Buffer.from(decryptBlob(blob)).toString('utf8');
+        const userData = JSON.parse(decrypted);
+        console.log('✅ Account found:', userData.account_id);
+        // SELF-HEALING BACKFILL (v0.4)
+        // /store dual-writes user:{sub} AND account:{account_id}. 
+        // pre-existing accounts only have user:{sub}, and get 404 on MCP's account-only signing.
+        // this block heals accounts on next login.
+        if (userData.account_id) {
+            const accountKeyId = crypto.createHash('sha256')
+                .update(`account:${userData.account_id}`).digest('hex');
+            const existing = await getBlobFromKV(accountKeyId);
+            if (!existing) {
+                const raw = Array.isArray(blob) ? Buffer.from(blob) : Buffer.from(blob, 'hex');
+                await storeBlobToKV(accountKeyId, raw.toString('hex'));
+                log('warn', 'account_key_backfilled', {
+                    account_id_hash: crypto.createHash('sha256')
+                        .update(userData.account_id).digest('hex').slice(0, 12),
+                });
+            }
+        }
         return c.json({
-            exists,
-            account_id: targetAccountId,
-            // minimal info - no sensitive data
+            exists: true,
+            account_id: userData.account_id,
         });
     }
     catch (error) {
@@ -476,20 +660,40 @@ userKeys.post('/check', async (c) => {
 // GENERATE API KEY - Deterministic salt-based
 userKeys.post('/generate-api-key', async (c) => {
     try {
-        const { email, auth_token, account_id } = await c.req.json();
+        const { email, auth_token, account_id, wallet_id } = await c.req.json();
         let targetAccountId;
-        if (account_id) {
-            targetAccountId = account_id;
-        }
-        else if (email && auth_token) {
+        let verifiedSub;
+        // Email users: verify token and lookup account_id
+        if (email && auth_token) {
             const verified = await verifyAuth0Token(auth_token);
             if (verified.email !== email)
                 return c.json({ error: 'Unauthorized' }, 403);
-            targetAccountId = account_id || 'unknown';
+            verifiedSub = verified.sub;
+            // Lookup account_id from stored user data
+            const keyId = crypto.createHash('sha256').update(`user:${verifiedSub}`).digest('hex');
+            const blob = await getBlobFromKV(keyId);
+            if (!blob) {
+                return c.json({ error: 'No NOVA account found. Create one first.' }, 404);
+            }
+            const decrypted = Buffer.from(decryptBlob(blob)).toString('utf8');
+            const userData = JSON.parse(decrypted);
+            targetAccountId = userData.account_id;
+        }
+        // Wallet + bare account-id DISABLED (v0.4)
+        else if (account_id || wallet_id) {
+            log('warn', 'generate_api_key_unauth_branch_rejected', {
+                account_hash: crypto.createHash('sha256')
+                    .update(account_id || wallet_id).digest('hex').slice(0, 12),
+            });
+            return c.json({
+                error: 'Wallet auth disabled pending self-custody migration (v0.5)',
+                code: 'WALLET_AUTH_PENDING_SELF_CUSTODY',
+            }, 501);
         }
         else {
-            return c.json({ error: 'Missing fields' }, 400);
+            return c.json({ error: 'Missing fields: email+auth_token, account_id, or wallet_id' }, 400);
         }
+        console.log('🔑 Generating API key for account:', targetAccountId);
         // Derive deterministic API key from master seed + salt
         const salt = `api-key:${targetAccountId}`;
         const apiKeyBytes = deriveKey(salt, 32);
@@ -539,20 +743,38 @@ userKeys.post('/verify-api-key', async (c) => {
 // HAS-API-KEY - Check if hash blob exists
 userKeys.post('/has-api-key', async (c) => {
     try {
-        const { email, auth_token, account_id } = await c.req.json();
+        const { email, auth_token, account_id, wallet_id } = await c.req.json();
         let targetAccountId;
-        if (account_id) {
-            targetAccountId = account_id;
-        }
-        else if (email && auth_token) {
+        // Email users: verify token and lookup account_id
+        if (email && auth_token) {
             const verified = await verifyAuth0Token(auth_token);
             if (verified.email !== email)
                 return c.json({ error: 'Unauthorized' }, 403);
-            targetAccountId = account_id || 'unknown';
+            // Lookup account_id from stored user data
+            const keyId = crypto.createHash('sha256').update(`user:${verified.sub}`).digest('hex');
+            const blob = await getBlobFromKV(keyId);
+            if (!blob) {
+                return c.json({ error: 'No NOVA account found' }, 404);
+            }
+            const decrypted = Buffer.from(decryptBlob(blob)).toString('utf8');
+            const userData = JSON.parse(decrypted);
+            targetAccountId = userData.account_id;
+        }
+        // Wallet + bare account-id DISABLED (v0.4).
+        else if (account_id || wallet_id) {
+            log('warn', 'generate_api_key_unauth_branch_rejected', {
+                account_hash: crypto.createHash('sha256')
+                    .update(account_id || wallet_id).digest('hex').slice(0, 12),
+            });
+            return c.json({
+                error: 'Wallet auth disabled pending self-custody migration (v0.5)',
+                code: 'WALLET_AUTH_PENDING_SELF_CUSTODY',
+            }, 501);
         }
         else {
-            return c.json({ error: 'Missing fields' }, 400);
+            return c.json({ error: 'Missing fields: email+auth_token, account_id, or wallet_id' }, 400);
         }
+        console.log('🔍 Checking API key for account:', targetAccountId);
         const hashKeyId = crypto.createHash('sha256').update(`api-hash:${targetAccountId}`).digest('hex');
         const hashBlob = await getBlobFromKV(hashKeyId);
         return c.json({

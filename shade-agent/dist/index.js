@@ -1,15 +1,12 @@
+import dotenv from "dotenv";
+dotenv.config();
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
-import dotenv from "dotenv";
 import { ShadeClient } from "@neardefi/shade-agent-js";
-// Import NOVA routes
+// Import routes AFTER dotenv is loaded
 import userKeys from "./routes/user-keys";
 import keyManagement from "./routes/key-management";
-// Load environment variables
-if (process.env.NODE_ENV !== "production") {
-    dotenv.config();
-}
 // Validate required environment variables
 const agentContractId = process.env.AGENT_CONTRACT_ID;
 const sponsorAccountId = process.env.SPONSOR_ACCOUNT_ID;
@@ -23,13 +20,13 @@ if (!agentContractId || !sponsorAccountId || !sponsorPrivateKey) {
 if (!teeKeySecret || !kvContractId || !auth0Domain) {
     throw new Error("Missing NOVA environment variables: TEE_KEY_SECRET, KV_CONTRACT_ID, AUTH0_DOMAIN");
 }
+const isProduction = process.env.NODE_ENV === "production";
 console.log("🔧 Initializing NOVA Shade Agent 2.0...");
-console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`📍 Environment: ${isProduction ? "production (Phala CVM)" : "development (local)"}`);
 console.log(`🔐 KV Contract: ${kvContractId}`);
 console.log(`🌐 Sponsor Account: ${sponsorAccountId}`);
 console.log(`📜 Agent Contract: ${agentContractId}`);
 // Initialize Shade Agent client
-// This handles TEE attestation and registration
 export const agent = await ShadeClient.create({
     networkId: agentContractId.endsWith(".testnet") ? "testnet" : "mainnet",
     agentContractId: agentContractId,
@@ -37,7 +34,6 @@ export const agent = await ShadeClient.create({
         accountId: sponsorAccountId,
         privateKey: sponsorPrivateKey,
     },
-    // Derivation path for deterministic agent account ID
     derivationPath: sponsorPrivateKey,
 });
 const agentAccountId = agent.accountId();
@@ -46,13 +42,13 @@ console.log(`🤖 Agent Account ID: ${agentAccountId}`);
 process.env.SHADE_AGENT_ACCOUNT_ID = agentAccountId;
 // Fund agent if balance is low
 const balance = await agent.balance();
-console.log(`💰 Agent Balance: ${balance} NEAR`);
+console.log(`💰 Agent Balance: ${balance.toFixed(4)} NEAR`);
 if (balance < 0.2) {
     console.log("💸 Funding agent with 0.3 NEAR...");
     await agent.fund(0.3);
     console.log("✅ Agent funded");
 }
-// Register agent with contract (handles TEE attestation)
+// Register agent with contract
 console.log("🔐 Registering agent with contract...");
 while (true) {
     try {
@@ -71,7 +67,7 @@ while (true) {
     console.log("⏳ Waiting for whitelist... (run 'shade whitelist' in another terminal)");
     await new Promise((resolve) => setTimeout(resolve, 10000));
 }
-// Re-register every 6 days (attestation expires after 7 days)
+// Re-register every 6 days
 const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 setInterval(async () => {
     try {
@@ -94,9 +90,10 @@ app.get("/", (c) => c.json({
     service: "nova-shade-agent-2.0",
     version: "2.0.0",
     agent_account: agentAccountId,
+    environment: isProduction ? "production" : "development",
     timestamp: new Date().toISOString()
 }));
-// Agent info route (shows attestation status)
+// Agent info route
 app.get("/api/agent-info", async (c) => {
     try {
         const accountId = agent.accountId();
@@ -109,8 +106,9 @@ app.get("/api/agent-info", async (c) => {
             network: agentContractId.endsWith(".testnet") ? "testnet" : "mainnet",
             isWhitelisted,
             kvContract: kvContractId,
-            novaMainnet: process.env.NOVA_CONTRACT_ID || "nova-sdk.near",
-            novaTestnet: process.env.NOVA_TESTNET_CONTRACT_ID || "nova-sdk-6.testnet",
+            novaMainnet: process.env.NOVA_MAINNET_CONTRACT || "nova-sdk.near",
+            novaTestnet: process.env.NOVA_TESTNET_CONTRACT || "nova-sdk-6.testnet",
+            environment: isProduction ? "production" : "development",
         });
     }
     catch (error) {
@@ -136,9 +134,7 @@ console.log(`   - GET  /api/agent-info                (agent status & attestatio
 console.log(`   - GET  /api/user-keys/                (user keys health)`);
 console.log(`   - POST /api/user-keys/store           (store user key)`);
 console.log(`   - POST /api/user-keys/retrieve        (retrieve user key)`);
-console.log(`   - POST /api/user-keys/check           (check key exists)`);
 console.log(`   - GET  /api/key-management/health     (group keys health)`);
-console.log(`   - POST /api/key-management/generate_key  (generate group key)`);
-console.log(`   - POST /api/key-management/get_key    (get group key)`);
-console.log(`   - POST /api/key-management/revoke_member (revoke + rotate)`);
+console.log(`   - POST /api/key-management/generate_key`);
+console.log(`   - POST /api/key-management/get_key`);
 serve({ fetch: app.fetch, port });

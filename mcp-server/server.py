@@ -150,6 +150,15 @@ def get_current_user(
     ctx: Context | None = None,
     request: Request | None = None
 ) -> dict:
+    """Resolve the caller's identity from a verified nova_session token.
+
+    v0.4 SECURITY FIX: this previously fell back to trusting bare `x-account-id`
+    + `x-user-email` headers when no valid token was present. /tools/* is a public
+    endpoint, so that fallback allowed ANY caller to impersonate ANY account by
+    asserting its (public, on-chain) account ID — MCP would then use its own
+    INTERNAL_API_SECRET to retrieve that account's private key from Shade and sign
+    as them. There is now NO unauthenticated path. Fails closed.
+    """
     if ctx is not None:
         headers = get_http_headers()
         token = ctx.token or ""
@@ -159,48 +168,39 @@ def get_current_user(
     else:
         raise ValueError("Must provide either ctx or request")
 
-    user_email = headers.get("x-user-email")
-    account_id = headers.get("x-account-id")
-    wallet_id = headers.get("x-wallet-id")
+    if not SESSION_TOKEN_SECRET:
+        logger.error("SESSION_TOKEN_SECRET not configured — refusing all requests")
+        raise ValueError("Server misconfigured: token verification unavailable")
 
-    if token and SESSION_TOKEN_SECRET:
-        try:
-            payload = jwt.decode(
-                token, SESSION_TOKEN_SECRET, algorithms=["HS256"],
-                issuer=SESSION_TOKEN_ISSUER, audience=SESSION_TOKEN_AUDIENCE,
-            )
-            if payload.get("type") != "nova_session" or not payload.get("account_id"):
-                raise ValueError("Invalid session token")
-            verified_id = payload["account_id"]
-            if account_id and account_id != verified_id:
-                raise ValueError("Account ID mismatch")
-            subject = payload.get("sub", "")
-            return {
-                "email": subject[6:] if subject.startswith("email|") else None,
-                "wallet_id": subject[7:] if subject.startswith("wallet|") else None,
-                "near_account_id": verified_id,
-                "access_token": token,
-                "session_token": hashlib.sha256(token.encode()).hexdigest(),
-            }
-        except Exception as e:
-            logger.warning(f"SDK token invalid: {e}")
+    if not token:
+        raise ValueError("Auth required: missing Bearer session token")
 
-    if not account_id:
-        raise ValueError("Missing x-account-id header")
+    try:
+        payload = jwt.decode(
+            token, SESSION_TOKEN_SECRET, algorithms=["HS256"],
+            issuer=SESSION_TOKEN_ISSUER, audience=SESSION_TOKEN_AUDIENCE,
+        )
+    except Exception as e:
+        logger.warning(f"Session token rejected: {e}")
+        raise ValueError("Auth failed: invalid session token")
 
-    if not (user_email or wallet_id):
-        raise ValueError("Auth required: missing x-user-email or x-wallet-id")
+    if payload.get("type") != "nova_session" or not payload.get("account_id"):
+        raise ValueError("Auth failed: not a NOVA session token")
 
-    session_token = hashlib.sha256(
-        f"{wallet_id or user_email or account_id}:{token or 'wallet-only'}".encode()
-    ).hexdigest()
+    verified_id = payload["account_id"]
 
+    # x-account-id is a client HINT only. Never trust it; only cross-check it.
+    asserted_id = headers.get("x-account-id")
+    if asserted_id and asserted_id != verified_id:
+        raise ValueError("Auth failed: account ID mismatch")
+
+    subject = payload.get("sub", "")
     return {
-        "email": user_email or None,
-        "wallet_id": wallet_id or None,
-        "near_account_id": account_id,
-        "access_token": token if token else None,
-        "session_token": session_token,
+        "email": subject[6:] if subject.startswith("email|") else None,
+        "wallet_id": subject[7:] if subject.startswith("wallet|") else None,
+        "near_account_id": verified_id,
+        "access_token": token,
+        "session_token": hashlib.sha256(token.encode()).hexdigest(),
     }
 
 def require_auth(func):
@@ -245,7 +245,11 @@ def expose_as_rest(path: str, methods: list[str] = ["POST"]):
             except:
                 body = {}
 
-            user = get_current_user(request=request)
+            try:
+                user = get_current_user(request=request)
+            except Exception as e:
+                logger.warning(f"REST {path} auth rejected: {e}")
+                return JSONResponse({"error": str(e)}, status_code=401)
 
             sig = signature(original_func)
             kwargs = {}

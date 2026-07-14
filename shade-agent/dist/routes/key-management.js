@@ -8,43 +8,47 @@ import * as ed25519 from '@noble/ed25519';
 // Configuration
 // ────────────────────────────────────────────────
 const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
-const TEE_SECRET = process.env.TEE_KEY_SECRET || crypto.randomBytes(32).toString('hex');
-const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
 const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
 const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
 const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
-if (!process.env.SHADE_AGENT_ACCOUNT_ID)
-    throw new Error('SHADE_AGENT_ACCOUNT_ID required');
-if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET))
-    throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
 // ────────────────────────────────────────────────
 // Master Seed & Derivation (shared with user-keys)
 // ────────────────────────────────────────────────
 let masterSeed = null;
-// ⚠️  FIRST-DEPLOY SAFETY: After the initial deployment confirms the master seed
-// is stored on-chain, set MASTER_SEED_INIT_ALLOWED=false (or remove the env var)
-// to prevent accidental re-initialization on subsequent deploys.
-const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
 async function getMasterSeed() {
     if (masterSeed)
         return masterSeed;
+    // SECURITY: ALWAYS load from KV first. The master seed is the root of all
+    // derived keys — overwriting an existing seed makes every account, group key,
+    // file key and API key permanently underivable. MASTER_SEED_INIT_ALLOWED can
+    // ONLY cause a *first* initialization when KV is empty; it can NEVER overwrite
+    // an existing seed, even if left set to 'true' across a redeploy.
     const encryptedBlob = await getBlobFromKV('master-root');
     if (encryptedBlob) {
         masterSeed = decryptBlob(encryptedBlob);
-        console.log('Master seed loaded from KV');
+        console.log('✅ Master seed loaded from KV');
         return masterSeed;
     }
+    // KV is empty — first-time init only, and only if explicitly allowed.
+    const MASTER_SEED_INIT_ALLOWED = process.env.MASTER_SEED_INIT_ALLOWED === 'true';
     if (!MASTER_SEED_INIT_ALLOWED) {
         throw new Error('Master seed not found in KV and MASTER_SEED_INIT_ALLOWED is not set. ' +
             'Set MASTER_SEED_INIT_ALLOWED=true on first deploy only, then remove it.');
     }
-    // First-time init — runs ONCE when no blob exists and flag is explicitly set
-    console.warn('⚠️  Initializing new master seed — this should run ONLY once!');
-    const newSeed = crypto.randomBytes(32);
+    console.warn('⚠️  Initializing NEW master seed — this must run ONLY once, ever.');
+    const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
+    const sponsorKeyBytes = Buffer.from(sponsorKey.replace('ed25519:', ''), 'base64');
+    const newSeed = crypto.createHash('sha256')
+        .update(Buffer.concat([
+        sponsorKeyBytes,
+        Buffer.from('nova-master-seed-v1', 'utf8'),
+    ]))
+        .digest();
+    masterSeed = newSeed; // set before storing so a store failure doesn't half-init
     const encrypted = encryptBlob(newSeed);
     await storeBlobToKV('master-root', encrypted);
-    masterSeed = newSeed;
-    console.log('Master seed initialized and stored on-chain');
+    console.log('✅ Master seed initialized and stored on-chain');
     return masterSeed;
 }
 function deriveKey(salt, length = 32) {
@@ -57,34 +61,61 @@ function getMasterSeedSync() {
         throw new Error('Master seed not initialized');
     return masterSeed;
 }
+// GCM stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext]
+// New blobs are written with AES-256-GCM. Legacy CBC blobs remain readable via decryptBlob's fallback
+const GCM_MAGIC = Buffer.from([0x4e, 0x4f, 0x56, 0x47]); // "NOVG"
 function encryptBlob(data) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let encrypted = cipher.update(data);
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
-    return iv.toString('hex') + ':' + encrypted.toString('hex');
+    const TEE_SECRET = process.env.TEE_KEY_SECRET;
+    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
+    }
+    const iv = crypto.randomBytes(12); // GCM standard IV length
+    const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(TEE_SECRET, 'hex'), iv);
+    const encrypted = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
+    const tag = cipher.getAuthTag(); // 16 bytes
+    // Return the COMPLETE stored layout as a single hex string (no colons).
+    return Buffer.concat([GCM_MAGIC, iv, tag, encrypted]).toString('hex');
 }
 function decryptBlob(enc) {
-    // Handle raw byte array returned directly from NEAR KV (16-byte IV + ciphertext)
-    if (Array.isArray(enc)) {
-        const raw = Buffer.from(enc);
-        const iv = raw.subarray(0, 16);
-        const encrypted = raw.subarray(16);
-        const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-        let decrypted = decipher.update(encrypted);
-        decrypted = Buffer.concat([decrypted, decipher.final()]);
-        return decrypted;
+    const TEE_SECRET = process.env.TEE_KEY_SECRET;
+    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
     }
-    // Handle legacy hex-string format "ivhex:encryptedhex"
-    const [ivStr, encStr] = enc.split(':');
-    if (!ivStr || !encStr)
-        throw new Error('Invalid encrypted blob format');
-    const iv = Buffer.from(ivStr, 'hex');
-    const encrypted = Buffer.from(encStr, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(TEE_SECRET, 'hex'), iv);
-    let decrypted = decipher.update(encrypted);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted;
+    const key = Buffer.from(TEE_SECRET, 'hex');
+    // Normalize input to the raw stored bytes.
+    let raw;
+    if (Array.isArray(enc)) {
+        raw = Buffer.from(enc);
+    }
+    else if (enc.includes(':')) {
+        // Legacy CBC string form "ivhex:encryptedhex"
+        const [ivStr, encStr] = enc.split(':');
+        if (!ivStr || !encStr)
+            throw new Error('Invalid encrypted blob format');
+        const iv = Buffer.from(ivStr, 'hex');
+        const encrypted = Buffer.from(encStr, 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+        return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
+    }
+    else {
+        raw = Buffer.from(enc, 'hex'); // new complete-layout hex
+    }
+    // GCM? magic present and enough bytes for framing (4 magic + 12 iv + 16 tag).
+    if (raw.length >= 32 && raw.subarray(0, 4).equals(GCM_MAGIC)) {
+        const iv = raw.subarray(4, 16); // 12 bytes
+        const tag = raw.subarray(16, 32); // 16 bytes
+        const ciphertext = raw.subarray(32);
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(tag);
+        return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
+    }
+    // Legacy CBC raw bytes: [16-byte IV][ciphertext].
+    if (raw.length < 17)
+        throw new Error('Encrypted blob too short');
+    const iv = raw.subarray(0, 16);
+    const encrypted = raw.subarray(16);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
 }
 // ────────────────────────────────────────────────
 // KV Helpers (same as user-keys)
@@ -143,7 +174,7 @@ async function broadcastContractCall(contractId, network, methodName, args, depo
     const rpcUrl = network === 'testnet'
         ? 'https://rpc.testnet.near.org'
         : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
-    const signerAccountId = SHADE_AGENT_ACCOUNT_ID;
+    const signerAccountId = `kv-signer.${KV_CONTRACT}`;
     const signerPriv = deriveKey('nova-signer-v1', 32);
     const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
     const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
@@ -189,8 +220,8 @@ async function broadcastContractCall(contractId, network, methodName, args, depo
 // Signed transaction broadcast
 async function storeBlobToKV(key, encryptedBlob) {
     const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
-    const signerAccountId = SHADE_AGENT_ACCOUNT_ID;
-    const signerPriv = deriveKey('kv-signer-v1', 32);
+    const signerAccountId = KV_CONTRACT_OWNER;
+    const signerPriv = deriveKey('kv-owner-signer-v1', 32);
     const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
     const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
     const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
@@ -203,10 +234,15 @@ async function storeBlobToKV(key, encryptedBlob) {
             public_key: signerPubBs58,
         },
     });
+    if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
+        throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
+            `Please add the key with:\n` +
+            `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`);
+    }
     const nonce = BigInt(accessKeyResult.nonce) + 1n;
     const blockHash = bs58.decode(accessKeyResult.block_hash);
-    const [ivHex, encHex] = encryptedBlob.split(':');
-    const rawBytes = Buffer.concat([Buffer.from(ivHex, 'hex'), Buffer.from(encHex, 'hex')]);
+    // encryptBlob now returns the COMPLETE stored layout as a single hex string
+    const rawBytes = Buffer.from(encryptedBlob, 'hex');
     const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
     const action = encodeFunctionCallAction('store', callArgs, 30000000000000n, 0n);
     const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
@@ -361,60 +397,62 @@ async function verifyToken(token, contractId, network) {
             return { valid: false };
         }
         console.log('Token verify: Nonce valid');
-        // Prefer payload PK if present; fallback to RPC
-        let userPkBytes;
+        // SECURITY: always fetch the account's on-chain access keys and verify the signature. 
+        // signing_pk_b58, if present, is used as a hint to select which on-chain key to check first (accounts may hold multiple keys); 
+        // it must match an actual on-chain access key of user_id or the token is rejected.
+        const rpcUrl = getRpcUrl(network);
+        const rpcRes = await axios.post(rpcUrl, {
+            jsonrpc: '2.0',
+            id: 'dontcare',
+            method: 'query',
+            params: {
+                request_type: 'view_access_key_list',
+                finality: 'final',
+                account_id: user_id,
+            },
+        });
+        if (rpcRes.status !== 200) {
+            console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
+            return { valid: false };
+        }
+        const keys = rpcRes.data.result?.keys || [];
+        if (keys.length === 0) {
+            console.error('Token verify: No access keys for', user_id);
+            return { valid: false };
+        }
+        // Collect all on-chain ed25519 keys for this account.
+        const ed25519Keys = keys
+            .map(k => k.public_key)
+            .filter(pk => pk.startsWith('ed25519:'));
+        if (ed25519Keys.length === 0) {
+            console.error('Token verify: No ed25519 key found for', user_id);
+            return { valid: false };
+        }
+        // If the caller supplied a hint key, it MUST be one of the on-chain keys.
         if (signing_pk_b58) {
-            try {
-                userPkBytes = bs58.decode(signing_pk_b58);
-                if (userPkBytes.length !== 32) {
-                    console.error('Token verify: Invalid signing PK length');
-                    return { valid: false };
-                }
-                console.log('Token verify: Using payload PK', signing_pk_b58.slice(0, 20) + '...');
+            const hintFull = `ed25519:${signing_pk_b58}`;
+            if (!ed25519Keys.includes(hintFull)) {
+                console.error('Token verify: signing_pk_b58 not an on-chain key of', user_id);
+                return { valid: false };
             }
-            catch (e) {
-                console.error('Token verify: PK decode error, falling back to RPC', e);
+        }
+        // Verify the signature against each candidate on-chain key; accept if any match.
+        // (If a hint was given and validated above, it is among these candidates.)
+        const sigBytes = Buffer.from(sigHex, 'hex');
+        let userPkBytes = null;
+        for (const pk of ed25519Keys) {
+            const candidate = bs58.decode(pk.slice(8)); // strip "ed25519:"
+            if (candidate.length !== 32)
+                continue;
+            if (await ed25519.verifyAsync(sigBytes, payloadBytes, candidate)) {
+                userPkBytes = candidate;
+                break;
             }
         }
         if (!userPkBytes) {
-            // Fallback: RPC fetch (use correct network RPC)
-            const rpcUrl = getRpcUrl(network);
-            const rpcRes = await axios.post(rpcUrl, {
-                jsonrpc: '2.0',
-                id: 'dontcare',
-                method: 'query',
-                params: {
-                    request_type: 'view_access_key_list',
-                    finality: 'final',
-                    account_id: user_id
-                }
-            });
-            if (rpcRes.status !== 200) {
-                console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
-                return { valid: false };
-            }
-            const keys = rpcRes.data.result?.keys || [];
-            if (keys.length === 0) {
-                console.error('Token verify: No access keys for', user_id);
-                return { valid: false };
-            }
-            const keyView = keys.find((k) => k.public_key.startsWith('ed25519:')) || keys[0];
-            if (!keyView.public_key.startsWith('ed25519:')) {
-                console.error('Token verify: No ed25519 key found');
-                return { valid: false };
-            }
-            const userPkStr = keyView.public_key;
-            userPkBytes = bs58.decode(userPkStr.slice(8));
-            console.log('Token verify: Using RPC PK', userPkStr.slice(0, 20) + '...');
-        }
-        // Verify ed25519 on raw payload_bytes
-        const sigBytes = Buffer.from(sigHex, 'hex');
-        const validSig = await ed25519.verifyAsync(sigBytes, payloadBytes, userPkBytes);
-        if (!validSig) {
-            console.error('Token verify: Sig invalid');
+            console.error('Token verify: Sig does not match any on-chain key of', user_id);
             return { valid: false };
         }
-        console.log('Token verify: Sig valid');
         return {
             valid: true,
             user_id,
@@ -456,6 +494,54 @@ async function getAttestation() {
 // Routes
 // ────────────────────────────────────────────────
 const keyMgmt = new Hono();
+// ────────────────────────────────────────────────
+// Internal Auth (MCP / frontend → Shade Agent)
+// ────────────────────────────────────────────────
+// Public HTTPS endpoint on Phala. Only MCP and the frontend's server-side
+// routes should reach key operations; both hold INTERNAL_API_SECRET.
+// SDKs never call these routes directly (they go through MCP /tools/*).
+// Health endpoints are exempt so monitoring/liveness probes still work.
+function checkInternalAuth(provided) {
+    const secret = process.env.INTERNAL_API_SECRET;
+    if (!secret || !/^[0-9a-f]{64}$/i.test(secret)) {
+        log('error', 'internal_auth_misconfigured');
+        return false; // fail closed
+    }
+    if (!provided)
+        return false;
+    const a = Buffer.from(secret, 'utf8');
+    const b = Buffer.from(provided, 'utf8');
+    if (a.length !== b.length)
+        return false;
+    return crypto.timingSafeEqual(a, b);
+}
+keyMgmt.use('*', async (c, next) => {
+    // Exempt health check (GET /health on this router)
+    const p = c.req.path;
+    if (c.req.method === 'GET' && (p === '/api/key-management/health' || p === '/api/key-management/health/')) {
+        return next();
+    }
+    if (!checkInternalAuth(c.req.header('x-internal-auth'))) {
+        return c.json({ error: 'Forbidden' }, 403);
+    }
+    await next();
+});
+// Validate env vars once when first request comes in
+let envValidated = false;
+keyMgmt.use('*', async (c, next) => {
+    if (!envValidated) {
+        const SHADE_AGENT_ACCOUNT_ID = process.env.SHADE_AGENT_ACCOUNT_ID;
+        const TEE_SECRET = process.env.TEE_KEY_SECRET || '';
+        if (!SHADE_AGENT_ACCOUNT_ID)
+            throw new Error('SHADE_AGENT_ACCOUNT_ID required');
+        if (!/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
+            throw new Error('TEE_KEY_SECRET must be a 64-char hex string (32 bytes)');
+        }
+        envValidated = true;
+    }
+    await getMasterSeed();
+    await next();
+});
 // Ensure master seed is loaded before any route handler runs
 keyMgmt.use('*', async (c, next) => {
     await getMasterSeed();
