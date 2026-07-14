@@ -1,0 +1,687 @@
+{
+  "info": {
+    "title": "NOVA Shade Agent (internal)",
+    "version": "0.4.0",
+    "description": "Internal key-management API. Every endpoint requires the X-Internal-Auth shared secret and is reachable only by the MCP server and the nova-landing server-side routes. NOT a public API."
+  },
+  "openapi": "3.1.1",
+  "paths": {
+    "/user-keys/store": {
+      "post": {
+        "operationId": "userKeys.store",
+        "summary": "Store a user keypair (encrypted) in KV",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "account_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "private_key": {
+                    "type": "string",
+                    "pattern": "^ed25519:.*"
+                  },
+                  "public_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "network": {
+                    "enum": [
+                      "testnet",
+                      "mainnet"
+                    ],
+                    "type": "string"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "wallet_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "account_id",
+                  "private_key",
+                  "public_key",
+                  "network"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "account_id": {
+                      "type": "string"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "wallet_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "checksum": {
+                      "type": "string"
+                    },
+                    "key_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "account_id",
+                    "network",
+                    "wallet_id",
+                    "checksum",
+                    "key_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-keys/retrieve": {
+      "post": {
+        "operationId": "userKeys.retrieve",
+        "summary": "⚠️ Returns a PRIVATE KEY. Internal signing path only.",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "wallet_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "account_id": {
+                      "type": "string"
+                    },
+                    "private_key": {
+                      "type": "string"
+                    },
+                    "public_key": {
+                      "type": "string"
+                    },
+                    "network": {
+                      "type": "string"
+                    },
+                    "wallet_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "checksum": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "account_id",
+                    "private_key",
+                    "public_key",
+                    "network",
+                    "wallet_id",
+                    "checksum"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-keys/check": {
+      "post": {
+        "operationId": "userKeys.check",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "wallet_id": {
+                    "type": "string"
+                  },
+                  "account_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "exists": {
+                      "type": "boolean"
+                    },
+                    "account_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "exists",
+                    "account_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-keys/generate-api-key": {
+      "post": {
+        "operationId": "userKeys.generateApiKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "wallet_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "api_key": {
+                      "type": "string"
+                    },
+                    "account_id": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "api_key",
+                    "account_id",
+                    "message"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-keys/has-api-key": {
+      "post": {
+        "operationId": "userKeys.hasApiKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "wallet_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "has_api_key": {
+                      "type": "boolean"
+                    },
+                    "account_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "has_api_key",
+                    "account_id"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-keys/verify-api-key": {
+      "post": {
+        "operationId": "userKeys.verifyApiKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "api_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "account_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "api_key",
+                  "account_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "valid": {
+                      "type": "boolean"
+                    },
+                    "account_id": {
+                      "type": "string"
+                    },
+                    "network": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "valid",
+                    "account_id",
+                    "network"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/key-management/generate_key": {
+      "post": {
+        "operationId": "keyManagement.generateKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "owner": {
+                    "type": "string"
+                  },
+                  "contract_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "checksum": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "checksum"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/key-management/get_key": {
+      "post": {
+        "operationId": "keyManagement.getKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "token": {
+                    "type": "string"
+                  },
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "contract_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "checksum": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "checksum"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/key-management/revoke_member": {
+      "post": {
+        "operationId": "keyManagement.revokeMember",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "user_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "contract_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id",
+                  "user_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "group_id": {
+                      "type": "string"
+                    },
+                    "revoked_user_id": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "number"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "group_id",
+                    "revoked_user_id",
+                    "version",
+                    "message"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/key-management/rotate_key": {
+      "post": {
+        "operationId": "keyManagement.rotateKey",
+        "tags": [
+          "internal"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "contract_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "new_key_hash": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "number"
+                    },
+                    "checksum": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "new_key_hash",
+                    "version",
+                    "checksum"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

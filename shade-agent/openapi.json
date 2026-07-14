@@ -1,0 +1,8 @@
+{
+  "info": {
+    "title": "NOVA Shade Agent (public)",
+    "version": "0.4.0",
+    "description": "Internal key-management API. Every endpoint requires the X-Internal-Auth shared secret and is reachable only by the MCP server and the nova-landing server-side routes. NOT a public API."
+  },
+  "openapi": "3.1.1"
+}

@@ -9,6 +9,7 @@ import { ShadeClient } from "@neardefi/shade-agent-js";
 // Import routes AFTER dotenv is loaded
 import userKeys from "./routes/user-keys.js";
 import keyManagement from "./routes/key-management.js";
+import { mountRpc } from "./rpc/mount.js";
 
 // Validate required environment variables
 const agentContractId = process.env.AGENT_CONTRACT_ID;
@@ -100,6 +101,7 @@ const app = new Hono();
 
 // Middleware
 app.use(cors());
+mountRpc(app);
 
 // Root health check
 app.get("/", (c) => c.json({ 

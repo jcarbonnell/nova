@@ -141,3 +141,85 @@ export const RotateKeySchema = z.object({
     group_id: z.string().min(1),
     contract_id: z.string().optional(),
 });
+// ════════════════════════════════════════════════════════════════════════════
+// OUTPUT SCHEMAS (oRPC)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// These describe what each service RETURNS. The Hono routes never needed them;
+// oRPC uses them to (a) type the handler's return value and (b) generate the
+// OpenAPI spec. They must match the services EXACTLY — an output schema that is
+// stricter than reality throws at runtime, on the response, after the work is done.
+//
+// Same rule as the input schemas: NEVER add .strict().
+// ── user-keys ───────────────────────────────────────────────────────────────
+export const StoreOutput = z.object({
+    success: z.boolean(),
+    account_id: z.string(),
+    network: z.string(),
+    wallet_id: z.string().nullable(),
+    checksum: z.string(),
+    key_id: z.string(),
+});
+/**
+ * ⚠️  RETURNS A PRIVATE KEY. This procedure is tagged `internal` and is excluded
+ * from any published OpenAPI spec (see rpc/router.ts). It exists so MCP can sign
+ * on a user's behalf. Never surface it in a public contract.
+ */
+export const RetrieveOutput = z.object({
+    account_id: z.string(),
+    private_key: z.string(),
+    public_key: z.string(),
+    network: z.string(),
+    wallet_id: z.string().nullable(),
+    checksum: z.string(),
+});
+export const CheckOutput = z.object({
+    exists: z.boolean(),
+    account_id: z.string().nullable(),
+});
+export const GenerateApiKeyOutput = z.object({
+    success: z.boolean(),
+    api_key: z.string(),
+    account_id: z.string(),
+    message: z.string(),
+});
+export const HasApiKeyOutput = z.object({
+    has_api_key: z.boolean(),
+    account_id: z.string(),
+});
+/**
+ * Only the 200 case. The Hono route's two 401 shapes
+ * (`{ valid: false, error: 'Invalid format' }` / `'No API key configured'`)
+ * become ORPCErrors on the oRPC surface — i.e. `{ error, code }`, like every
+ * other error. This NORMALISES the one non-uniform wire contract in the codebase.
+ * Safe: the frontend's session-token Path 0 reads `errorData.error` on !ok and
+ * `verifyData.valid` on ok, so it never reads `valid` from a 401 body.
+ * The Hono surface keeps the old bytes until consumers are flipped (step 6.4).
+ */
+export const VerifyApiKeyOutput = z.object({
+    valid: z.boolean(),
+    account_id: z.string(),
+    network: z.string(),
+});
+// ── key-management ──────────────────────────────────────────────────────────
+export const GenerateKeyOutput = z.object({
+    key: z.string(),
+    checksum: z.string(),
+});
+export const GetKeyOutput = z.object({
+    key: z.string(),
+    checksum: z.string(),
+});
+export const RevokeMemberOutput = z.object({
+    success: z.boolean(),
+    group_id: z.string(),
+    revoked_user_id: z.string(),
+    version: z.number(),
+    message: z.string(),
+});
+export const RotateKeyOutput = z.object({
+    success: z.boolean(),
+    new_key_hash: z.string(),
+    version: z.number(),
+    checksum: z.string(),
+});
