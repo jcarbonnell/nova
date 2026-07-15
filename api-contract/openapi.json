@@ -1,0 +1,634 @@
+{
+  "info": {
+    "title": "NOVA Public API",
+    "version": "0.4.0",
+    "description": "Verifiable, privacy-preserving shared storage. Public wire protocol (MCP /tools/*). Authenticate with a nova_session bearer token from nova-sdk.com. Every success response is wrapped in { \"result\": ... }."
+  },
+  "servers": [
+    {
+      "url": "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network",
+      "description": "Production MCP (v19)"
+    }
+  ],
+  "security": [
+    {
+      "novaSession": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "novaSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "nova_session token from nova-sdk.com/api/auth/session-token"
+      }
+    }
+  },
+  "openapi": "3.1.1",
+  "paths": {
+    "/tools/get_owned_groups": {
+      "post": {
+        "operationId": "getOwnedGroups",
+        "summary": "List groups the authenticated account owns",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/auth_status": {
+      "post": {
+        "operationId": "authStatus",
+        "summary": "Report authentication and (optionally) group authorization",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string",
+                    "default": "test_group"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "authenticated": {
+                          "type": "boolean"
+                        },
+                        "near_account_id": {
+                          "type": "string"
+                        },
+                        "group_id": {
+                          "type": "string"
+                        },
+                        "authorized_for_group": {
+                          "type": "boolean"
+                        },
+                        "auth_error": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "authenticated",
+                        "near_account_id",
+                        "group_id"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/get_member_groups": {
+      "post": {
+        "operationId": "getMemberGroups",
+        "summary": "List groups the authenticated account is a member of",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/get_group_members": {
+      "post": {
+        "operationId": "getGroupMembers",
+        "summary": "List members of a group",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/get_group_transactions": {
+      "post": {
+        "operationId": "getGroupTransactions",
+        "summary": "List a group’s file transactions (audit trail)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "group_id": {
+                            "type": "string"
+                          },
+                          "user_id": {
+                            "type": "string"
+                          },
+                          "file_hash": {
+                            "type": "string"
+                          },
+                          "ipfs_hash": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "group_id",
+                          "user_id",
+                          "file_hash",
+                          "ipfs_hash"
+                        ],
+                        "additionalProperties": {}
+                      }
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/register_group": {
+      "post": {
+        "operationId": "registerGroup",
+        "summary": "Register a group (caller becomes owner)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/add_group_member": {
+      "post": {
+        "operationId": "addGroupMember",
+        "summary": "Grant a member access to a group",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  },
+                  "member_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id",
+                  "member_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/revoke_group_member": {
+      "post": {
+        "operationId": "revokeGroupMember",
+        "summary": "Revoke a member from a group",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  },
+                  "member_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id",
+                  "member_id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/prepare_upload": {
+      "post": {
+        "operationId": "prepareUpload",
+        "summary": "Begin an upload; returns the group key + upload_id",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  },
+                  "filename": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "group_id",
+                  "filename"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "upload_id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "group_id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "upload_id",
+                        "key",
+                        "group_id",
+                        "filename"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/finalize_upload": {
+      "post": {
+        "operationId": "finalizeUpload",
+        "summary": "Store ciphertext + record the transaction on-chain",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "upload_id": {
+                    "type": "string"
+                  },
+                  "encrypted_data": {
+                    "type": "string"
+                  },
+                  "file_hash": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "upload_id",
+                  "encrypted_data",
+                  "file_hash"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "cid": {
+                          "type": "string"
+                        },
+                        "trans_id": {
+                          "type": "string"
+                        },
+                        "file_hash": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "cid",
+                        "trans_id",
+                        "file_hash"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/prepare_retrieve": {
+      "post": {
+        "operationId": "prepareRetrieve",
+        "summary": "Fetch ciphertext + the group key for decryption",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "group_id": {
+                    "type": "string"
+                  },
+                  "ipfs_hash": {
+                    "type": "string",
+                    "pattern": "^(Qm|bafy)"
+                  }
+                },
+                "required": [
+                  "group_id",
+                  "ipfs_hash"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "encrypted_b64": {
+                          "type": "string"
+                        },
+                        "ipfs_hash": {
+                          "type": "string"
+                        },
+                        "group_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "encrypted_b64",
+                        "ipfs_hash",
+                        "group_id"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
