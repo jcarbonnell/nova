@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RevokeMemberOutput, RotateKeyOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -106,11 +106,6 @@ const getKey = pub
     .input(GetKeySchema)
     .output(GetKeyOutput)
     .handler(({ input }) => keyMgmtService.getGroupKey(input));
-const revokeMember = pub
-    .route({ method: 'POST', path: '/key-management/revoke_member', tags: INTERNAL })
-    .input(RevokeMemberSchema)
-    .output(RevokeMemberOutput)
-    .handler(({ input }) => keyMgmtService.revokeMember(input));
 const rotateKey = pub
     .route({ method: 'POST', path: '/key-management/rotate_key', tags: INTERNAL })
     .input(RotateKeySchema)
@@ -119,5 +114,5 @@ const rotateKey = pub
 // ────────────────────────────────────────────────
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey },
-    keyManagement: { generateKey, getKey, revokeMember, rotateKey },
+    keyManagement: { generateKey, getKey, rotateKey },
 };

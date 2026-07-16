@@ -19,12 +19,11 @@ import { DEFAULT_MAINNET_CONTRACT } from '../lib/near.js';
 import { errorHandler } from '../lib/errors.js';
 import {
   validate, body, type ValidatedEnv,
-  GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema,
+  GenerateKeySchema, GetKeySchema, RotateKeySchema,
 } from '../lib/schemas.js';
 import {
   generateGroupKey,
   getGroupKey,
-  revokeMember,
   rotateGroupKey,
 } from '../lib/services/key-management.js';
 
@@ -83,9 +82,6 @@ keyMgmt.post('/generate_key', validate(GenerateKeySchema), async (c) =>
 
 keyMgmt.post('/get_key', validate(GetKeySchema), async (c) =>
   c.json(await getGroupKey(body(c, GetKeySchema))));
-
-keyMgmt.post('/revoke_member', validate(RevokeMemberSchema), async (c) =>
-  c.json(await revokeMember(body(c, RevokeMemberSchema))));
 
 keyMgmt.post('/rotate_key', validate(RotateKeySchema), async (c) =>
   c.json(await rotateGroupKey(body(c, RotateKeySchema))));

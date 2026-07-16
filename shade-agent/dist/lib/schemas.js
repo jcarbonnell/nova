@@ -130,12 +130,6 @@ export const GetKeySchema = z.object({
     account_id: z.string().optional(),
     contract_id: z.string().optional(),
 });
-/** POST /revoke_member — inline: if (!group_id || !user_id) → 400 */
-export const RevokeMemberSchema = z.object({
-    group_id: z.string().min(1),
-    user_id: z.string().min(1),
-    contract_id: z.string().optional(),
-});
 /** POST /rotate_key — inline: if (!group_id) → 400 */
 export const RotateKeySchema = z.object({
     group_id: z.string().min(1),

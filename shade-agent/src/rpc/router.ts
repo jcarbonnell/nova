@@ -16,9 +16,9 @@
 import { pub } from './base.js';
 import {
   StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema,
-  GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema,
+  GenerateKeySchema, GetKeySchema, RotateKeySchema,
   StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput,
-  VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RevokeMemberOutput, RotateKeyOutput,
+  VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput,
 } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
@@ -125,12 +125,6 @@ const getKey = pub
   .output(GetKeyOutput)
   .handler(({ input }) => keyMgmtService.getGroupKey(input));
 
-const revokeMember = pub
-  .route({ method: 'POST', path: '/key-management/revoke_member', tags: INTERNAL })
-  .input(RevokeMemberSchema)
-  .output(RevokeMemberOutput)
-  .handler(({ input }) => keyMgmtService.revokeMember(input));
-
 const rotateKey = pub
   .route({ method: 'POST', path: '/key-management/rotate_key', tags: INTERNAL })
   .input(RotateKeySchema)
@@ -141,7 +135,7 @@ const rotateKey = pub
 
 export const router = {
   userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey },
-  keyManagement: { generateKey, getKey, revokeMember, rotateKey },
+  keyManagement: { generateKey, getKey, rotateKey },
 };
 
 export type Router = typeof router;

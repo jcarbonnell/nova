@@ -11,17 +11,16 @@ import type { z } from 'zod';
 
 import { encryptBlob, decryptBlob, deriveKey, sha256Hex } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
-import { getRpcUrl, viewFunction, resolveContract, broadcastContractCall } from '../near.js';
+import { getRpcUrl, viewFunction, resolveContract } from '../near.js';
 import { verifyToken } from '../auth.js';
 import { log } from '../logger.js';
 import { ApiError } from '../errors.js';
 import type {
-  GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema,
+  GenerateKeySchema, GetKeySchema, RotateKeySchema,
 } from '../schemas.js';
 
 type GenerateKeyInput = z.infer<typeof GenerateKeySchema>;
 type GetKeyInput = z.infer<typeof GetKeySchema>;
-type RevokeMemberInput = z.infer<typeof RevokeMemberSchema>;
 type RotateKeyInput = z.infer<typeof RotateKeySchema>;
 
 // Group keys are derived, never stored:
@@ -120,45 +119,6 @@ export async function getGroupKey(input: GetKeyInput) {
   const keyBytes = deriveKey(groupSalt(group_id, network, contractId, version), 32);
 
   return { key: Buffer.from(keyBytes).toString('base64'), checksum: 'derived-verified' };
-}
-
-// ────────────────────────────────────────────────
-// REVOKE MEMBER (+ atomic rotate)
-// ────────────────────────────────────────────────
-
-export async function revokeMember(input: RevokeMemberInput) {
-  const { group_id, user_id, contract_id } = input;
-  const { contractId, network } = resolveContract(contract_id, group_id);
-
-  const groupExists = await viewFunction(
-    getRpcUrl(network), contractId, 'group_contains_key', { group_id },
-  );
-  if (!groupExists) throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found on ${contractId}`);
-
-  const isMember = await viewFunction(
-    getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id },
-  );
-  if (!isMember) throw new ApiError(400, 'NOT_A_MEMBER', 'User is not a member');
-
-  // On-chain revoke, then key rotation — presented to callers as one atomic op.
-  // NOT atomic in the strict sense: if the KV write below fails after the
-  // contract call succeeds, the member is revoked on-chain but the group key is
-  // NOT rotated. Pre-existing; preserved. (Resilience work: Step 7.)
-  await broadcastContractCall(contractId, network, 'revoke_group_member', { group_id, user_id }, '0');
-  log('info', 'member_revoked_on_chain', { group_id, user_id });
-
-  const version = Date.now();
-  await rotateTo(group_id, network, contractId, version);
-
-  log('info', 'key_auto_rotated', { group_id, version, revokedUser: user_id });
-
-  return {
-    success: true,
-    group_id,
-    revoked_user_id: user_id,
-    version,
-    message: 'Member revoked and key rotated atomically',
-  };
 }
 
 // ────────────────────────────────────────────────

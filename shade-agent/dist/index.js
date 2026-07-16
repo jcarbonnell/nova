@@ -1,3 +1,4 @@
+// nova/shade-agent/src/index.ts
 import dotenv from "dotenv";
 dotenv.config();
 import { Hono } from "hono";

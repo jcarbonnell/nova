@@ -553,23 +553,34 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
 async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
     member_id = normalize_account_id(member_id)
     config = get_config(user["near_account_id"])
-    # Use shade agent atomic endpoint — revokes on-chain AND rotates key in one call
+
+    # Step 1 — on-chain revoke, signed AS THE USER (the group owner)
+    await call_contract(
+        user=user,
+        method_name="revoke_group_member",
+        args={"group_id": group_id, "user_id": member_id},
+        fee_action="revoke_group_member",
+    )
+
+    # Step 2 — rotate the group key so the revoked member can't decrypt future uploads.
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
-            f"{SHADE_API_URL}/api/key-management/revoke_member",
+            f"{SHADE_API_URL}/api/key-management/rotate_key",
             json={
                 "group_id": group_id,
-                "user_id": member_id,
                 "contract_id": config["contract_id"],
             },
             headers={
                 "Content-Type": "application/json",
-                "X-Internal-Auth": INTERNAL_API_SECRET,                
+                "X-Internal-Auth": INTERNAL_API_SECRET,
             },
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"Atomic revoke failed: {resp.status_code} - {resp.text[:200]}")
-    return f"Revoked {member_id} from group '{group_id}' (key rotated atomically)"
+            raise RuntimeError(
+                f"Revoked on-chain, but key rotation failed: {resp.status_code} - {resp.text[:200]}"
+            )
+
+    return f"Revoked {member_id} from group '{group_id}' (key rotated)"
 
 @expose_as_rest("/tools/prepare_upload")
 @require_auth

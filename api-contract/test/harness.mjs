@@ -177,7 +177,7 @@ async function main() {
       }
     }
 
-    // 5. revoke_group_member — clean up the member, exercises the atomic path.
+    // 5. revoke_group_member — clean up the member, rotates the key.
     {
       const { status, body } = await call('revokeGroupMember', { group_id: WRITE_GROUP, member_id: 'nova-sdk.near' });
       const r = verify('revokeGroupMember', status, body);

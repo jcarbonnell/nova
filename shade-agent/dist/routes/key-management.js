@@ -15,8 +15,8 @@ import { checkInternalAuth } from '../lib/auth.js';
 import { getAttestation } from '../lib/attestation.js';
 import { DEFAULT_MAINNET_CONTRACT } from '../lib/near.js';
 import { errorHandler } from '../lib/errors.js';
-import { validate, body, GenerateKeySchema, GetKeySchema, RevokeMemberSchema, RotateKeySchema, } from '../lib/schemas.js';
-import { generateGroupKey, getGroupKey, revokeMember, rotateGroupKey, } from '../lib/services/key-management.js';
+import { validate, body, GenerateKeySchema, GetKeySchema, RotateKeySchema, } from '../lib/schemas.js';
+import { generateGroupKey, getGroupKey, rotateGroupKey, } from '../lib/services/key-management.js';
 const keyMgmt = new Hono();
 keyMgmt.onError(errorHandler);
 // Internal gate (v0.3.2 Fix 3). Health is exempt.
@@ -64,6 +64,5 @@ keyMgmt.get('/health', async (c) => {
 });
 keyMgmt.post('/generate_key', validate(GenerateKeySchema), async (c) => c.json(await generateGroupKey(body(c, GenerateKeySchema))));
 keyMgmt.post('/get_key', validate(GetKeySchema), async (c) => c.json(await getGroupKey(body(c, GetKeySchema))));
-keyMgmt.post('/revoke_member', validate(RevokeMemberSchema), async (c) => c.json(await revokeMember(body(c, RevokeMemberSchema))));
 keyMgmt.post('/rotate_key', validate(RotateKeySchema), async (c) => c.json(await rotateGroupKey(body(c, RotateKeySchema))));
 export default keyMgmt;

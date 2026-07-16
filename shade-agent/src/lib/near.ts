@@ -8,7 +8,7 @@
 //
 // ⚠️  THREE SIGNER IDENTITIES EXIST. Do not "unify" them without understanding why:
 //   1. lib/kv.ts storeBlobToKV   → signs as nova-sdk.near,        salt 'kv-owner-signer-v1'
-//   2. broadcastContractCall     → signs as kv-signer.nova-kv.near, salt 'nova-signer-v1'
+
 //   3. (deleted in v0.4 step 2)  → the dead src/utils/ signer,      salt 'enclave-signer'
 // (2) is LIVE — it is what the revoke path uses to call revoke_group_member on
 // the NOVA contract. Its derived public key is registered as an access key on
@@ -98,69 +98,4 @@ export async function viewFunction(
   } catch {
     return decoded === 'true';
   }
-}
-
-// ────────────────────────────────────────────────
-// Contract call broadcaster
-// ────────────────────────────────────────────────
-
-/** Signs as kv-signer.{KV_CONTRACT} with salt 'nova-signer-v1'. See the warning above. */
-export async function broadcastContractCall(
-  contractId: string,
-  network: string,
-  methodName: string,
-  args: Record<string, unknown>,
-  depositYocto: string = '0',
-): Promise<void> {
-  const rpcUrl = network === 'testnet'
-    ? 'https://rpc.testnet.near.org'
-    : (process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org');
-  const signerAccountId = `kv-signer.${KV_CONTRACT}`;
-
-  const signerPriv = deriveKey('nova-signer-v1', 32);
-  const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
-  const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
-
-  log('info', 'broadcast_contract_call_attempt', {
-    signerAccountId,
-    signerPubBs58,
-    contractId,
-    methodName,
-    depositYocto,
-    rpcUrl,
-  });
-
-  const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
-    jsonrpc: '2.0', id: 'access-key',
-    method: 'query',
-    params: {
-      request_type: 'view_access_key',
-      finality: 'final',
-      account_id: signerAccountId,
-      public_key: signerPubBs58,
-    },
-  }) as { nonce: number; block_hash: string };
-
-  const nonce = BigInt(accessKeyResult.nonce) + 1n;
-  const blockHash = bs58.decode(accessKeyResult.block_hash);
-  const callArgs = Buffer.from(JSON.stringify(args));
-  const deposit = BigInt(depositYocto);
-  const action = encodeFunctionCallAction(methodName, callArgs, 50_000_000_000_000n, deposit);
-  const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, contractId, blockHash, [action]);
-  const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
-  const signature = await ed25519.signAsync(txHash, signerPriv);
-  const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
-
-  const broadcastResult = await rpcCallWithRetry(rpcUrl, {
-    jsonrpc: '2.0', id: 'broadcast',
-    method: 'broadcast_tx_commit',
-    params: [signedTx.toString('base64')],
-  }) as { transaction?: { hash: string }; status?: { Failure?: unknown } };
-
-  if (broadcastResult?.status?.Failure) {
-    throw new Error(`Contract call failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
-  }
-  log('info', 'contract_call_committed', {
-    contractId, methodName, txHash: broadcastResult?.transaction?.hash,
-  });
 }
