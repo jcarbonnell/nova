@@ -6,15 +6,18 @@
 // Distinct from lib/kv.ts, which talks to the KV contract (nova-kv.near) and
 // owns the transaction-serialization primitives this module reuses.
 //
-// ⚠️  THREE SIGNER IDENTITIES EXIST. Do not "unify" them without understanding why:
-//   1. lib/kv.ts storeBlobToKV   → signs as nova-sdk.near,        salt 'kv-owner-signer-v1'
-
-//   3. (deleted in v0.4 step 2)  → the dead src/utils/ signer,      salt 'enclave-signer'
-// (2) is LIVE — it is what the revoke path uses to call revoke_group_member on
-// the NOVA contract. Its derived public key is registered as an access key on
-// kv-signer.nova-kv.near. Changing the salt or the signer account breaks revocation.
-// Roadmap flags this for investigation before the Step 9 config work touches signing.
-// This module MOVES the function; it does not change it.
+// ⚠️  ONE SIGNER IDENTITY REMAINS. History matters here:
+//   1. lib/kv.ts storeBlobToKV  → signs as nova-sdk.near, salt 'kv-owner-signer-v1'.
+//      LIVE. The derived public key is registered as an access key on
+//      nova-sdk.near. Changing the salt breaks every KV write.
+//   2. (RETIRED, Shade v38)     → kv-signer.nova-kv.near, salt 'nova-signer-v1'.
+//      Used by broadcastContractCall for the revoke path. Its key was NEVER
+//      provisioned (empty access-key list), so the path threw BigInt(undefined)
+//      on the nonce. Fixed by having MCP sign the on-chain revoke AS THE USER
+//      (the contract requires caller == group.owner anyway); the service, the
+//      broadcaster and the route were deleted.
+//   3. (DELETED, v0.4 step 2)   → the dead src/utils/ signer, salt 'enclave-signer'.
+// Step 9's config work must not resurrect (2) or (3).
 
 import crypto from 'crypto';
 import axios from 'axios';
@@ -90,7 +93,12 @@ export async function viewFunction(
   });
 
   if (response.data.error) {
-    console.error('RPC error:', response.data.error);
+    // JSON.stringify FIRST to avoid circular-structure errors in the log. The error is still thrown.
+    log('warn', 'view_call_rpc_error', {
+      contract_id: contractId,
+      method: methodName,
+      rpc_error: JSON.stringify(response.data.error),
+    });
     return null;
   }
 

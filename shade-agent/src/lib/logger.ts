@@ -33,7 +33,7 @@ const PII_FIELDS = new Set([
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/([?&]apiKey=)[^&\s"']+/gi, '$1[REDACTED]'],        // FastNear (7.1)
   [/(Bearer\s+)[A-Za-z0-9._\-]+/gi, '$1[REDACTED]'],    // Authorization headers
-  [/(ed25519:)[A-Za-z0-9+/=]{40,}/g, '$1[REDACTED]'],   // NEAR private keys
+  [/(ed25519:)[A-Za-z0-9+/=]{60,}/g, '$1[REDACTED]'],   // NEAR private keys are 88 chars, public keys 44 chars. This is a conservative 60-char threshold.
 ];
 
 function scrub(s: string): string {

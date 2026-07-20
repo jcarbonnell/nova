@@ -32,6 +32,7 @@ import { ShadeClient } from "@neardefi/shade-agent-js";
 
 // Import routes AFTER dotenv is loaded
 import { mountRpc } from "./rpc/mount.js";
+import { log } from "./lib/logger.js";
 
 // ────────────────────────────────────────────────
 // Environment validation
@@ -135,7 +136,11 @@ async function bootstrapAgent(): Promise<void> {
   } catch (error) {
     agentPhase = "error";
     lastAgentError = error instanceof Error ? error.message : String(error);
-    console.error("❌ Agent client creation failed:", error);
+    // Scrubbed: SDK errors echo the RPC URL, which carries ?apiKey= (7.1).
+    log("error", "agent_client_creation_failed", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return; // nothing further is possible without a client
   }
 
@@ -143,14 +148,17 @@ async function bootstrapAgent(): Promise<void> {
   try {
     const balance = await agentInstance.balance();
     console.log(`💰 Agent Balance: ${balance.toFixed(4)} NEAR`);
-    if (balance < 0.2) {
-      console.log("💸 Funding agent with 0.3 NEAR...");
-      await agentInstance.fund(0.3);
+    // Threshold must exceed the cost of registration: ~0.30 NEAR.
+    if (balance < 0.5) {
+      console.log("💸 Funding agent with 1 NEAR...");
+      await agentInstance.fund(1);
       console.log("✅ Agent funded");
     }
   } catch (error) {
     // Do not abort: registration may still succeed on an existing balance.
-    console.error("⚠️  Balance check / funding failed (continuing):", error);
+    log("warn", "agent_funding_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
   }
 
   // 3. Register — the old `while(true)`, now in the background.
@@ -173,7 +181,9 @@ async function bootstrapAgent(): Promise<void> {
       }
     } catch (error) {
       lastAgentError = error instanceof Error ? error.message : String(error);
-      console.error("❌ Registration error:", error);
+      log("error", "agent_registration_error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
     console.log("⏳ Waiting for whitelist... (run 'shade whitelist' in another terminal)");
     await new Promise((resolve) => setTimeout(resolve, 10000));
@@ -188,7 +198,9 @@ async function bootstrapAgent(): Promise<void> {
         console.log("🔄 Agent re-registered");
       }
     } catch (error) {
-      console.error("❌ Re-registration error:", error);
+      log("error", "agent_reregistration_error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }, SIX_DAYS_MS);
 }
@@ -257,14 +269,20 @@ app.get("/api/agent-info", async (c) => {
       environment: isProduction ? "production" : "development",
     });
   } catch (error) {
-    console.error("Failed to get agent info:", error);
-    return c.json({ error: "Failed to get agent info: " + error }, 500);
+    log("error", "agent_info_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return c.json({ error: "Failed to get agent info", code: "AGENT_INFO_FAILED" }, 500);
   }
 });
 
 // Global error handler
 app.onError((err, c) => {
-  console.error("❌ Unhandled error:", err);
+  log("error", "unhandled_error", {
+    path: c.req.path,
+    message: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   return c.json({ error: "Internal server error" }, 500);
 });
 
@@ -296,5 +314,8 @@ console.log(`   - POST /rpc/key-management/rotate_key`);
 void bootstrapAgent().catch((error) => {
   agentPhase = "error";
   lastAgentError = error instanceof Error ? error.message : String(error);
-  console.error("❌ Agent bootstrap failed:", error);
+  log("error", "agent_bootstrap_failed", {
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  });
 });

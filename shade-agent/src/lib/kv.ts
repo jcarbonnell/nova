@@ -89,7 +89,10 @@ export async function getBlobFromKV(key: string): Promise<string | number[] | nu
     }
     return null;
   } catch (err) {
-    console.error('KV get failed after retries:', (err as Error).message);
+    log('warn', 'kv_get_failed', {
+      key_id_hash: key.slice(0, 12),
+      message: (err as Error).message,
+    });
     return null;
   }
 }
@@ -229,5 +232,8 @@ export async function storeBlobToKV(key: string, encryptedBlob: string): Promise
   if (broadcastResult?.status?.Failure) {
     throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
   }
-  log('info', 'kv_store_committed', { key, txHash: broadcastResult?.transaction?.hash });
+  log('info', 'kv_store_committed', {
+    key_id_hash: key.slice(0, 12),
+    txHash: broadcastResult?.transaction?.hash,
+  });
 }
