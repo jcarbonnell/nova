@@ -40,9 +40,14 @@ export const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 
 const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
 
 // KNOWN ISSUE (preserved verbatim; → Step 9 config work, "no hardcoded RPC URLs"):
-// these URLs are hardcoded rather than sourced from config.
+// 7.1 (RPC provider swap): now env-driven with FastNear defaults. The full
+// config.ts centralization remains Step 9; this is the minimal env-read that
+// lets .env redirect the endpoint and stops the deprecated-host -429s on the
+// view/revoke path. Fallback (not throw) is deliberate: .env is always present.
 export function getRpcUrl(network: string): string {
-  return network === 'testnet' ? 'https://rpc.testnet.near.org' : 'https://rpc.mainnet.near.org';
+  return network === 'testnet'
+    ? process.env.NEAR_TESTNET_RPC_URL || 'https://rpc.testnet.fastnear.com'
+    : process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
 }
 
 /**

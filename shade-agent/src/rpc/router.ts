@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 
-import { pub } from './base.js';
+import { pub, storeLimited } from './base.js';
 import {
   StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema,
   GenerateKeySchema, GetKeySchema, RotateKeySchema,
@@ -30,7 +30,7 @@ const INTERNAL = ['internal'];
 // user-keys
 // ────────────────────────────────────────────────
 
-const store = pub
+const store = storeLimited
   .route({
     method: 'POST',
     path: '/user-keys/store',
@@ -40,11 +40,6 @@ const store = pub
   .input(StoreSchema)
   .output(StoreOutput)
   .handler(({ input }) => userKeysService.storeUserKey(input));
-
-// NOTE: rate limiting is NOT applied here. The Hono /store route rate-limits by
-// x-forwarded-for. Callers of /rpc are the same two gated services, so the risk
-// is the same — but this is a behavioural gap between the two surfaces and must
-// be closed before the Hono route is retired (step 6.4). Tracked.
 
 const retrieve = pub
   .route({

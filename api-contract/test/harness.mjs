@@ -21,7 +21,7 @@ if (!TOKEN) {
   process.exit(2);
 }
 
-const WRITE_GROUP = 'orpc-test';
+const WRITE_GROUP = 'delete-hono-test';
 
 // Read wire path + output schema off the compiled contract for an op.
 function info(op) {

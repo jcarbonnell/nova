@@ -6,8 +6,6 @@ import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
 import { ShadeClient } from "@neardefi/shade-agent-js";
 // Import routes AFTER dotenv is loaded
-import userKeys from "./routes/user-keys.js";
-import keyManagement from "./routes/key-management.js";
 import { mountRpc } from "./rpc/mount.js";
 // Validate required environment variables
 const agentContractId = process.env.AGENT_CONTRACT_ID;
@@ -119,9 +117,6 @@ app.get("/api/agent-info", async (c) => {
         return c.json({ error: "Failed to get agent info: " + error }, 500);
     }
 });
-// Mount NOVA routes
-app.route("/api/user-keys", userKeys);
-app.route("/api/key-management", keyManagement);
 // Global error handler
 app.onError((err, c) => {
     console.error("❌ Unhandled error:", err);
@@ -133,11 +128,4 @@ console.log(`\n🚀 NOVA Shade Agent 2.0 started successfully!`);
 console.log(`📡 Server running on http://localhost:${port}`);
 console.log(`\n📋 Available routes:`);
 console.log(`   - GET  /                              (health check)`);
-console.log(`   - GET  /api/agent-info                (agent status & attestation)`);
-console.log(`   - GET  /api/user-keys/                (user keys health)`);
-console.log(`   - POST /api/user-keys/store           (store user key)`);
-console.log(`   - POST /api/user-keys/retrieve        (retrieve user key)`);
-console.log(`   - GET  /api/key-management/health     (group keys health)`);
-console.log(`   - POST /api/key-management/generate_key`);
-console.log(`   - POST /api/key-management/get_key`);
 serve({ fetch: app.fetch, port });

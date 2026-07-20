@@ -42,8 +42,8 @@ const WALLET_DISABLED = {
 export async function storeUserKey(input: StoreInput) {
   const { email, account_id, private_key, public_key, network, auth_token, wallet_id } = input;
 
-  console.log('💾 STORE request received:', {
-    email: email ? `${email.substring(0, 5)}...` : undefined,
+  log('info', 'store_request', {
+    email,
     account_id,
     has_token: !!auth_token,
     wallet_id,
@@ -54,7 +54,7 @@ export async function storeUserKey(input: StoreInput) {
   if (auth_token) {
     verifiedUser = await verifyAuth0Token(auth_token);
     if (verifiedUser.email !== email) throw new ApiError(403, 'EMAIL_MISMATCH', 'Email mismatch');
-    console.log('✅ Token verified for STORE, sub:', verifiedUser.sub?.substring(0, 20) + '...');
+    log('info', 'store_token_verified', { sub: verifiedUser.sub });
   } else if (wallet_id) {
     // DISABLED (v0.4 Fix H): accepted an unauthenticated wallet_id and wrote a
     // keypair under wallet|{id} + account:{id} with no proof of control.
@@ -76,13 +76,12 @@ export async function storeUserKey(input: StoreInput) {
   const encryptedBlob = encryptBlob(Buffer.from(JSON.stringify(userData), 'utf8'));
 
   const sub = verifiedUser.sub;
-  console.log('🔑 Derived sub for STORE:', sub.substring(0, 30) + '...');
-
   const keyId = sha256Hex(`user:${sub}`);
-  console.log('🔑 Computed keyId for STORE:', keyId);
+  // keyId is truncated to avoid anyone fetching a user blob and confirm an account exists.
+  log('info', 'store_key_id_computed', { key_id_hash: keyId.slice(0, 12) });
 
   await storeBlobToKV(keyId, encryptedBlob);
-  console.log('✅ Key stored successfully for account:', account_id);
+  log('info', 'user_key_stored', { account_id, network });
 
   // Dual-write: the account: key is what MCP's account-only signing path reads.
   const accountKeyId = sha256Hex(`account:${account_id}`);
@@ -170,8 +169,8 @@ export async function retrieveUserKey(input: RetrieveInput) {
 export async function checkAccount(input: CheckInput) {
   const { email, auth_token, wallet_id, account_id } = input;
 
-  console.log('🔍 CHECK request received:', {
-    email: email ? `${email.substring(0, 5)}...` : undefined,
+  log('info', 'check_request', {
+    email,
     has_token: !!auth_token,
     wallet_id,
     account_id,
@@ -182,15 +181,18 @@ export async function checkAccount(input: CheckInput) {
   if (email && auth_token) {
     try {
       const verified = await verifyAuth0Token(auth_token);
-      console.log('✅ Token verified, sub:', verified.sub?.substring(0, 20) + '...');
+      log('info', 'check_token_verified', { sub: verified.sub });
       if (verified.email !== email) {
-        console.log('❌ Email mismatch');
+        log('warn', 'check_email_mismatch', { email });
         throw new ApiError(403, 'UNAUTHORIZED', 'Unauthorized');
       }
       verifiedSub = verified.sub;
     } catch (tokenError) {
       if (tokenError instanceof ApiError) throw tokenError;
-      console.error('❌ Token verification failed:', tokenError);
+      // Scrubbed by the logger: Auth0/JWKS errors can echo request URLs.
+      log('warn', 'check_token_verification_failed', {
+        message: tokenError instanceof Error ? tokenError.message : String(tokenError),
+      });
       throw new ApiError(401, 'TOKEN_VERIFICATION_FAILED', 'Token verification failed');
     }
   } else if (!wallet_id) {
@@ -200,20 +202,17 @@ export async function checkAccount(input: CheckInput) {
   const sub = verifiedSub || (wallet_id ? `wallet|${wallet_id}` : null);
   if (!sub) throw new ApiError(400, 'CANNOT_DERIVE_KEY_ID', 'Cannot derive key id');
 
-  console.log('🔑 Derived sub:', sub.substring(0, 30) + '...');
-
   const keyId = sha256Hex(`user:${sub}`);
-  console.log('🔑 Computed keyId:', keyId);
+  log('info', 'check_key_id_computed', { key_id_hash: keyId.slice(0, 12) });
 
   const blob = await getBlobFromKV(keyId);
   if (!blob) {
-    console.log('❌ No blob found in KV for keyId:', keyId);
+    log('info', 'check_account_not_found', { key_id_hash: keyId.slice(0, 12) });
     return { exists: false, account_id: null };
   }
 
-  console.log('✅ Blob found in KV, decrypting...');
   const userData = JSON.parse(Buffer.from(decryptBlob(blob)).toString('utf8'));
-  console.log('✅ Account found:', userData.account_id);
+  log('info', 'check_account_found', { account_id: userData.account_id });
 
   // SELF-HEALING BACKFILL (v0.4 Fix C).
   // /store dual-writes user:{sub} AND account:{account_id}. Accounts created
@@ -276,7 +275,7 @@ async function resolveApiKeyTarget(input: ApiKeyLookupInput): Promise<string> {
 export async function generateApiKey(input: ApiKeyLookupInput) {
   const targetAccountId = await resolveApiKeyTarget(input);
 
-  console.log('🔑 Generating API key for account:', targetAccountId);
+  log('info', 'api_key_generated', { account_id: targetAccountId });
 
   // Deterministic from the master seed. NOTE: no version component — rotation is
   // therefore impossible today. That is what made Fix E a full takeover rather
@@ -299,7 +298,7 @@ export async function generateApiKey(input: ApiKeyLookupInput) {
 export async function hasApiKey(input: ApiKeyLookupInput) {
   const targetAccountId = await resolveApiKeyTarget(input);
 
-  console.log('🔍 Checking API key for account:', targetAccountId);
+  log('info', 'api_key_checked', { account_id: targetAccountId });
 
   const hashKeyId = sha256Hex(`api-hash:${targetAccountId}`);
   const hashBlob = await getBlobFromKV(hashKeyId);

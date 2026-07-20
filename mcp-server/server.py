@@ -295,7 +295,7 @@ async def get_user_signer(user: dict) -> Account:
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
-            f"{SHADE_API_URL}/api/user-keys/retrieve",
+            f"{SHADE_API_URL}/rpc/user-keys/retrieve",
             json=payload, 
             headers={
                 "Content-Type": "application/json",
@@ -416,7 +416,7 @@ async def _get_shade_key_internal(group_id: str, user: dict) -> str:
     }
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{SHADE_API_URL}/api/key-management/get_key",
+            f"{SHADE_API_URL}/rpc/key-management/get_key",
             json=body,
             headers={"X-Internal-Auth": INTERNAL_API_SECRET},
             timeout=15
@@ -526,7 +526,7 @@ async def register_group(ctx: Context, user: dict, group_id: str) -> str:
     
     async with httpx.AsyncClient(timeout=15.0) as client:
         await client.post(
-            f"{SHADE_API_URL}/api/key-management/generate_key",
+            f"{SHADE_API_URL}/rpc/key-management/generate_key",
             json={
                 "group_id": group_id,
                 "owner": user["near_account_id"],
@@ -565,7 +565,7 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
     # Step 2 — rotate the group key so the revoked member can't decrypt future uploads.
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
-            f"{SHADE_API_URL}/api/key-management/rotate_key",
+            f"{SHADE_API_URL}/rpc/key-management/rotate_key",
             json={
                 "group_id": group_id,
                 "contract_id": config["contract_id"],
@@ -724,12 +724,20 @@ async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> lis
 # Custom Routes 
 # ─────────────────
 
+@mcp.custom_route("/", methods=["GET"])
+async def root(request: Request):
+    """Liveness only — NO external I/O.
+
+    This endpoint answers if and only if the process is alive and serving.
+    """
+    return JSONResponse({"status": "ok", "service": "nova-mcp"})
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request):
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
-                "https://rpc.mainnet.near.org",
+                CONFIG["mainnet"]["rpc_url"],
                 json={"jsonrpc": "2.0", "id": "health", "method": "status", "params": []},
             )
             rpc_ok = resp.status_code == 200

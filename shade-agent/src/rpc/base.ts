@@ -17,6 +17,7 @@ import { checkInternalAuth } from '../lib/auth.js';
 import { initializeMasterSeed } from '../lib/seed.js';
 import { ApiError } from '../lib/errors.js';
 import { log } from '../lib/logger.js';
+import { rateLimitStore } from './ratelimit.js';
 
 /** Context handed in by the Hono adapter. Headers only — services stay HTTP-free. */
 export type RpcContext = {
@@ -87,3 +88,6 @@ export const pub = base
   .use(mapErrors)          // outermost catch, so gate errors are shaped correctly too
   .use(requireInternalAuth)
   .use(withMasterSeed);
+
+// store-only variant: pub + the rate limiter. Used ONLY by the store procedure in router.ts. 
+export const storeLimited = pub.use(rateLimitStore);

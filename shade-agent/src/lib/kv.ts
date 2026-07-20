@@ -62,7 +62,10 @@ export async function rpcCallWithRetry(
 }
 
 export async function getBlobFromKV(key: string): Promise<string | number[] | null> {
-  const rpcUrl = 'https://rpc.mainnet.near.org'; // see KNOWN ISSUE above
+  // 7.1: swapped deprecated rpc.mainnet.near.org → FastNear, env-driven.
+  // KNOWN ISSUE PRESERVED (→ Step 9): still MAINNET-only even for testnet reads.
+  // Reads NEAR_RPC_URL (the mainnet var), same as before — only the host changed.
+  const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
   const payload = {
     jsonrpc: '2.0',
     id: 'kv-get',
@@ -165,7 +168,7 @@ export function encodeTransaction(
 // ────────────────────────────────────────────────
 
 export async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
-  const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.near.org';
+  const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
   const signerAccountId = KV_CONTRACT_OWNER;
 
   // 1. Derive deterministic signer keypair from master seed.

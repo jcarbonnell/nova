@@ -16,6 +16,17 @@
 //
 // (1) and (2) are the "two parallel auth paths" the roadmap (§8.7) flags for
 // convergence in v0.5's better-near-auth rework. They are NOT unified here.
+//
+// STEP 8 (observability) — LOGGING ONLY; no verification logic changed.
+//   verifyToken previously logged a RAW NEAR account id (user_id) on four
+//   distinct failure paths, plus a raw exception object. Per roadmap §8:
+//   "never log emails, raw account IDs, tokens, private keys, wallet IDs."
+//   All now go through log(), which hashes `user_id` by construction and scrubs
+//   secret patterns out of every string (incl. the `?apiKey=` that NEAR_RPC_URL
+//   will carry once 7.1's FastNear key lands — an exception echoing the request
+//   URL would otherwise publish it).
+//   Also removed: per-request debug breadcrumbs (payload length, timestamp
+//   comparison, "Nonce valid") that shipped to production as console noise.
 
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -107,23 +118,22 @@ export async function verifyToken(
   try {
     const [payloadB64, sigHex] = token.split('.');
     if (!payloadB64 || !sigHex) {
-      console.error('Token verify: Invalid format (missing . separator)');
+      log('warn', 'token_verify_failed', { reason: 'malformed_token' });
       return { valid: false };
     }
 
     const payloadBytes = Buffer.from(payloadB64, 'base64');
     if (payloadBytes.length === 0) {
-      console.error('Token verify: Empty payload');
+      log('warn', 'token_verify_failed', { reason: 'empty_payload' });
       return { valid: false };
     }
 
     const payloadStr = payloadBytes.toString('utf-8');
-    console.log('Token verify: Payload str len', payloadStr.length);
 
     const payload = JSON.parse(payloadStr);
     const { group_id, user_id, nonce, timestamp, signing_pk_b58 } = payload;
     if (!group_id || !user_id || !nonce || !timestamp) {
-      console.log('Token verify: Missing payload fields');
+      log('warn', 'token_verify_failed', { reason: 'missing_payload_fields' });
       return { valid: false };
     }
 
@@ -134,20 +144,23 @@ export async function verifyToken(
     const nowNs = BigInt(nowMs) * 1000000n;
     const fiveMinNs = 300000000000n;
     if (tsBig > nowNs + fiveMinNs || tsBig < nowNs - fiveMinNs) {
-      console.error('Token verify: Timestamp invalid', { tsBig: tsBig.toString(), nowNs: nowNs.toString() });
+      // Skew magnitude is diagnostic and carries no PII.
+      log('warn', 'token_verify_failed', {
+        reason: 'timestamp_out_of_window',
+        skew_ms: Number((tsBig - nowNs) / 1000000n),
+        user_id,
+      });
       return { valid: false };
     }
-    console.log('Token verify: Timestamp ms', nowMs, 'vs payload', timestamp);
 
     // Nonce must be unused (contract-enforced)
     const nonceValid = await viewFunction(
       getRpcUrl(network), contractId, 'get_nonce_validity', { group_id, user_id, nonce },
     );
     if (!nonceValid) {
-      console.error('Token verify: Nonce invalid/used');
+      log('warn', 'token_verify_failed', { reason: 'nonce_invalid_or_used', user_id, group_id });
       return { valid: false };
     }
-    console.log('Token verify: Nonce valid');
 
     const rpcUrl = getRpcUrl(network);
     const rpcRes = await axios.post(rpcUrl, {
@@ -161,12 +174,18 @@ export async function verifyToken(
       },
     });
     if (rpcRes.status !== 200) {
-      console.error('Token verify: RPC error', rpcRes.status, rpcRes.data?.error?.message || 'Unknown');
+      log('warn', 'token_verify_failed', {
+        reason: 'access_key_rpc_error',
+        status: rpcRes.status,
+        // Scrubbed by the logger: RPC error text can echo the request URL, which
+        // carries ?apiKey= once the FastNear key is configured.
+        rpc_error: rpcRes.data?.error?.message || 'unknown',
+      });
       return { valid: false };
     }
     const keys: { public_key: string }[] = rpcRes.data.result?.keys || [];
     if (keys.length === 0) {
-      console.error('Token verify: No access keys for', user_id);
+      log('warn', 'token_verify_failed', { reason: 'no_access_keys', user_id });
       return { valid: false };
     }
 
@@ -174,7 +193,7 @@ export async function verifyToken(
       .map(k => k.public_key)
       .filter(pk => pk.startsWith('ed25519:'));
     if (ed25519Keys.length === 0) {
-      console.error('Token verify: No ed25519 key found for', user_id);
+      log('warn', 'token_verify_failed', { reason: 'no_ed25519_key', user_id });
       return { valid: false };
     }
 
@@ -182,7 +201,7 @@ export async function verifyToken(
     if (signing_pk_b58) {
       const hintFull = `ed25519:${signing_pk_b58}`;
       if (!ed25519Keys.includes(hintFull)) {
-        console.error('Token verify: signing_pk_b58 not an on-chain key of', user_id);
+        log('warn', 'token_verify_failed', { reason: 'hint_key_not_onchain', user_id });
         return { valid: false };
       }
     }
@@ -199,13 +218,18 @@ export async function verifyToken(
       }
     }
     if (!userPkBytes) {
-      console.error('Token verify: Sig does not match any on-chain key of', user_id);
+      log('warn', 'token_verify_failed', { reason: 'signature_no_onchain_key_match', user_id });
       return { valid: false };
     }
 
     return { valid: true, user_id, group_id, nonce, timestamp: Number(timestamp) };
   } catch (e) {
-    console.error('Token verify error:', e);
+    // The exception may carry the RPC URL (=> the FastNear apiKey) or token
+    // fragments. The logger scrubs known secret patterns out of both fields.
+    log('error', 'token_verify_error', {
+      message: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+    });
     return { valid: false };
   }
 }

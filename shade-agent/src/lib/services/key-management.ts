@@ -137,6 +137,9 @@ export async function rotateGroupKey(input: RotateKeyInput) {
   const version = Date.now();
   const newKeyBytes = await rotateTo(group_id, network, contractId, version);
 
+  // Audit event - group_id stays unhashed at group key rotation (not risky, useful for debugging).
+  log('info', 'group_key_rotated', { group_id, version, network, contract_id: contractId });
+
   return {
     success: true,
     new_key_hash: crypto.createHash('sha256').update(newKeyBytes).digest('hex'),
