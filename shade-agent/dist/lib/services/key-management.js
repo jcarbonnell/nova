@@ -10,6 +10,7 @@ import { encryptBlob, decryptBlob, deriveKey, sha256Hex } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
 import { getRpcUrl, viewFunction, resolveContract } from '../near.js';
 import { verifyToken } from '../auth.js';
+import { log } from '../logger.js';
 import { ApiError } from '../errors.js';
 // Group keys are derived, never stored:
 //   unrotated: group:{group_id}:{network}:{contract}
@@ -96,6 +97,8 @@ export async function rotateGroupKey(input) {
         throw new ApiError(404, 'GROUP_NOT_FOUND', `Group not found (${contractId})`);
     const version = Date.now();
     const newKeyBytes = await rotateTo(group_id, network, contractId, version);
+    // Audit event - group_id stays unhashed at group key rotation (not risky, useful for debugging).
+    log('info', 'group_key_rotated', { group_id, version, network, contract_id: contractId });
     return {
         success: true,
         new_key_hash: crypto.createHash('sha256').update(newKeyBytes).digest('hex'),

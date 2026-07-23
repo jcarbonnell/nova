@@ -30,9 +30,10 @@ import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
 import { ShadeClient } from "@neardefi/shade-agent-js";
 
-// Import routes AFTER dotenv is loaded
 import { mountRpc } from "./rpc/mount.js";
 import { log } from "./lib/logger.js";
+
+import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT } from "./lib/config.js";
 
 // ────────────────────────────────────────────────
 // Environment validation
@@ -259,13 +260,13 @@ app.get("/api/agent-info", async (c) => {
     return c.json({
       accountId,
       balance,
-      agentContractId: process.env.AGENT_CONTRACT_ID,
+      agentContractId,
       network,
       isWhitelisted,
       agentPhase,
       kvContract: kvContractId,
-      novaMainnet: process.env.NOVA_MAINNET_CONTRACT || "nova-sdk.near",
-      novaTestnet: process.env.NOVA_TESTNET_CONTRACT || "nova-sdk-6.testnet",
+      novaMainnet: NOVA_MAINNET_CONTRACT,
+      novaTestnet: NOVA_TESTNET_CONTRACT,
       environment: isProduction ? "production" : "development",
     });
   } catch (error) {

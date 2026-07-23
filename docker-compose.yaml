@@ -34,7 +34,7 @@ services:
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
     platform: linux/amd64 # Explicitly set for TDX
     # shade-agent-app-image – update tag to your new build (v7 or main)
-    image: jcarbonnell/nova-shade-agent:v23
+    image: jcarbonnell/nova-shade-agent:v47
     container_name: shade-agent-app
     ports:
       - "3000:3000"
@@ -50,6 +50,7 @@ services:
       TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
       RPC_URL: ${NEAR_RPC_URL}
       TESTNET_RPC_URL: https://rpc.testnet.near.org
+      FASTNEAR_API_KEY: ${FASTNEAR_API_KEY}
       AUTH0_DOMAIN: ${AUTH0_DOMAIN}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
@@ -59,7 +60,7 @@ services:
       IPFS_API_KEY: ${IPFS_API_KEY}
       IPFS_API_SECRET: ${IPFS_API_SECRET}
     platform: linux/amd64
-    image: jcarbonnell/nova-mcp:v8
+    image: jcarbonnell/nova-mcp:v28
     container_name: nova-mcp
     ports:
       - "8000:8000"

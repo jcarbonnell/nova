@@ -66,7 +66,7 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
 
 export async function verifyAuth0Token(token: string): Promise<{ email: string; sub: string }> {
   const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
-  const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE || 'https://nova-mcp.fastmcp.app';
+  const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE || 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-3000.dstack-prod5.phala.network';
 
   if (!AUTH0_DOMAIN) throw new Error('AUTH0_DOMAIN required');
 
@@ -88,10 +88,10 @@ export async function verifyAuth0Token(token: string): Promise<{ email: string; 
         const payload = verified as JwtPayload;
         const email =
           (payload['email'] as string | undefined) ||
-          (payload[`https://${AUTH0_AUDIENCE}/email`] as string | undefined);
+          (payload[`${AUTH0_AUDIENCE}/email`] as string | undefined);
         const sub =
           payload.sub ||
-          (payload[`https://${AUTH0_AUDIENCE}/sub`] as string | undefined);
+          (payload[`${AUTH0_AUDIENCE}/sub`] as string | undefined);
         if (!email || !sub) return reject(new Error('Missing claims'));
         resolve({ email, sub });
       }

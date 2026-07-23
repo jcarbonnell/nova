@@ -19,39 +19,22 @@
 //   3. (DELETED, v0.4 step 2)   → the dead src/utils/ signer, salt 'enclave-signer'.
 // Step 9's config work must not resurrect (2) or (3).
 
-import crypto from 'crypto';
 import axios from 'axios';
-import bs58 from 'bs58';
-import * as ed25519 from '@noble/ed25519';
 
-import { deriveKey } from './crypto.js';
-import {
-  rpcCallWithRetry,
-  encodeFunctionCallAction,
-  encodeTransaction,
-  KV_CONTRACT,
-} from './kv.js';
+import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT } from './config.js';
 import { log } from './logger.js';
+
+export { getRpcUrl } from './config.js';
 
 // ────────────────────────────────────────────────
 // Configuration
 // ────────────────────────────────────────────────
 
-export const DEFAULT_MAINNET_CONTRACT = process.env.NOVA_CONTRACT_ID || 'nova-sdk.near';
-export const DEFAULT_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT_ID || 'nova-sdk-6.testnet';
+// Aliased from lib/config.ts.
+export const DEFAULT_MAINNET_CONTRACT = NOVA_MAINNET_CONTRACT;
+export const DEFAULT_TESTNET_CONTRACT = NOVA_TESTNET_CONTRACT;
 
 const ALLOWED_CONTRACTS = new Set([DEFAULT_MAINNET_CONTRACT, DEFAULT_TESTNET_CONTRACT]);
-
-// KNOWN ISSUE (preserved verbatim; → Step 9 config work, "no hardcoded RPC URLs"):
-// 7.1 (RPC provider swap): now env-driven with FastNear defaults. The full
-// config.ts centralization remains Step 9; this is the minimal env-read that
-// lets .env redirect the endpoint and stops the deprecated-host -429s on the
-// view/revoke path. Fallback (not throw) is deliberate: .env is always present.
-export function getRpcUrl(network: string): string {
-  return network === 'testnet'
-    ? process.env.NEAR_TESTNET_RPC_URL || 'https://rpc.testnet.fastnear.com'
-    : process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
-}
 
 /**
  * Resolve which NOVA contract a request targets.
@@ -79,6 +62,7 @@ export async function viewFunction(
   methodName: string,
   args: unknown,
 ): Promise<unknown> {
+  const t0 = Date.now();
   const response = await axios.post(rpcUrl, {
     jsonrpc: '2.0',
     id: 'nova-view',
@@ -97,13 +81,19 @@ export async function viewFunction(
     log('warn', 'view_call_rpc_error', {
       contract_id: contractId,
       method: methodName,
+      duration_ms: Date.now() - t0,
       rpc_error: JSON.stringify(response.data.error),
     });
     return null;
   }
 
   const result = response.data.result?.result;
-  if (!result) return null;
+  if (!result) {
+    log('info', 'view_call', { contract_id: contractId, method: methodName, empty: true, duration_ms: Date.now() - t0 });
+    return null;
+  }
+
+  log('info', 'view_call', { contract_id: contractId, method: methodName, empty: false, duration_ms: Date.now() - t0 });
 
   const decoded = Buffer.from(result).toString('utf-8');
   try {

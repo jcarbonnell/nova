@@ -12,11 +12,12 @@
 // superset, so that is the one kept here. This is the only difference from a
 // pure verbatim lift, and it only affects the error path.
 //
-// KNOWN ISSUE, deliberately PRESERVED (do not fix here):
-//   getBlobFromKV hardcodes the MAINNET RPC URL, even for testnet reads. That
-//   was true in both original copies. Fixing it is a behaviour change and
-//   belongs to the config.ts work (roadmap §4: "no hardcoded RPC URLs"). This
-//   extraction is a zero-behaviour-change refactor.
+// BY DESIGN: KV access is SINGLE-NETWORK.
+// nova-kv.near is the only KV contract — there is no testnet counterpart. The
+// blobs it holds (master seed, user keys, group-key metadata, API-key hashes)
+// are per-DEPLOYMENT, not per-network; the dual-network split applies to the
+// NOVA contract (see lib/near.ts resolveContract), not to KV. Routing KV reads
+// through NEAR_TESTNET_RPC_URL would query a contract that does not exist.
 
 import crypto from 'crypto';
 import axios from 'axios';
@@ -25,13 +26,13 @@ import * as ed25519 from '@noble/ed25519';
 
 import { log } from './logger.js';
 import { deriveKey } from './crypto.js';
+import { KV_RPC_URL, KV_CONTRACT, KV_CONTRACT_OWNER } from './config.js';
 
 // ────────────────────────────────────────────────
-// Configuration
+// Configuration — single-sourced from lib/config.ts
 // ────────────────────────────────────────────────
 
-export const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
-export const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
+export { KV_CONTRACT, KV_CONTRACT_OWNER };
 
 // ────────────────────────────────────────────────
 // RPC
@@ -62,10 +63,9 @@ export async function rpcCallWithRetry(
 }
 
 export async function getBlobFromKV(key: string): Promise<string | number[] | null> {
-  // 7.1: swapped deprecated rpc.mainnet.near.org → FastNear, env-driven.
-  // KNOWN ISSUE PRESERVED (→ Step 9): still MAINNET-only even for testnet reads.
-  // Reads NEAR_RPC_URL (the mainnet var), same as before — only the host changed.
-  const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
+  // KV is single-network by design (see lib/config.ts): nova-kv.near has no
+  // testnet counterpart, so KV_RPC_URL is always the mainnet endpoint.
+  const rpcUrl = KV_RPC_URL;
   const payload = {
     jsonrpc: '2.0',
     id: 'kv-get',
@@ -79,18 +79,29 @@ export async function getBlobFromKV(key: string): Promise<string | number[] | nu
     },
   };
 
+  // metrics-via-logs: duration_ms replaces the deferred kv_read_duration_ms histogram. Percentiles on demand.
+  const t0 = Date.now();
+
   try {
     const result = await rpcCallWithRetry(rpcUrl, payload) as { result?: number[] } | null;
     if (result?.result && result.result.length > 0) {
       const jsonStr = Buffer.from(result.result).toString('utf8');
       const parsed: number[] | null = JSON.parse(jsonStr);
-      if (!parsed || parsed.length === 0) return null;
+      if (!parsed || parsed.length === 0) {
+        log('info', 'kv_get', { key_id_hash: key.slice(0, 12), found: false, duration_ms: Date.now() - t0 });
+        return null;
+      }
+      log('info', 'kv_get', { key_id_hash: key.slice(0, 12), found: true, duration_ms: Date.now() - t0 });
       return parsed;
     }
+    log('info', 'kv_get', { key_id_hash: key.slice(0, 12), found: false, duration_ms: Date.now() - t0 });
     return null;
   } catch (err) {
+    // Scrubbed by the logger: axios error text echoes the request URL, which
+    // carries ?apiKey= once the FastNear key is configured (7.1).
     log('warn', 'kv_get_failed', {
       key_id_hash: key.slice(0, 12),
+      duration_ms: Date.now() - t0,
       message: (err as Error).message,
     });
     return null;
@@ -171,8 +182,11 @@ export function encodeTransaction(
 // ────────────────────────────────────────────────
 
 export async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
-  const rpcUrl = process.env.NEAR_RPC_URL || 'https://rpc.mainnet.fastnear.com';
+  // Covers the WHOLE write: key derivation, access-key/nonce fetch, signing and broadcast_tx_commit.
+  const t0 = Date.now();
+  const rpcUrl = KV_RPC_URL;
   const signerAccountId = KV_CONTRACT_OWNER;
+
 
   // 1. Derive deterministic signer keypair from master seed.
   //    Salt 'kv-owner-signer-v1' is LIVE — the derived public key is registered
@@ -235,5 +249,6 @@ export async function storeBlobToKV(key: string, encryptedBlob: string): Promise
   log('info', 'kv_store_committed', {
     key_id_hash: key.slice(0, 12),
     txHash: broadcastResult?.transaction?.hash,
+    duration_ms: Date.now() - t0,
   });
 }

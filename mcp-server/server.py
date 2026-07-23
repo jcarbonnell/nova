@@ -1,29 +1,21 @@
 # NOVA-mcp refactored for Horizon (fastmcp v3+), w/ dual-network support and clean code (removed redundancy)
 import os
-import sqlite3
 import json
 import hashlib
 import re
 import time
 import logging
-from typing import Optional, Dict, Any, Callable
+from typing import Dict, Any, Callable
 from uuid import uuid4
-from contextlib import contextmanager
 from functools import wraps
 from inspect import signature
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
-from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
-import asyncio
 import base64
-
-# Crypto / NEAR
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
 from py_near.account import Account
 import httpx
 import jwt
@@ -51,22 +43,34 @@ CONFIG = {
 }
 
 SHADE_API_URL = os.getenv("SHADE_API_URL", "")
-AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")
-AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp")
-AUTH0_ISSUER = os.getenv("AUTH0_ISSUER", "")
-AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
-AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
 PINATA_GATEWAY = os.getenv("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.getenv("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.getenv("IPFS_API_SECRET", "")
-RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer.testnet.near.org")
 SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
-DUMMY_PRIVATE_KEY = "ed25519:" + "A" * 86
+FASTNEAR_API_KEY = os.getenv("FASTNEAR_API_KEY", "")
 SESSION_TOKEN_ISSUER = os.getenv("SESSION_TOKEN_ISSUER", "https://nova-sdk.com")
 SESSION_TOKEN_AUDIENCE = os.getenv("SESSION_TOKEN_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network")
 
 logging.basicConfig(level=logging.INFO)
+class RedactSecrets(logging.Filter):
+    _PATTERNS = [
+        (re.compile(r'([?&]apiKey=)[^&\s"\']+', re.I), r'\1[REDACTED]'),
+        (re.compile(r'(Bearer\s+)[A-Za-z0-9._\-]+', re.I), r'\1[REDACTED]'),
+        (re.compile(r'(ed25519:)[A-Za-z0-9+/=]{60,}'), r'\1[REDACTED]'),
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        for pattern, repl in self._PATTERNS:
+            msg = pattern.sub(repl, msg)
+        record.msg = msg
+        record.args = ()
+        return True
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(RedactSecrets())
+
 logger = logging.getLogger(__name__)
 
 logger.info("🌐 NOVA MCP Server v0.4.1 starting (dual-network mode)")
@@ -78,59 +82,38 @@ def get_config(account_id: str | None = None) -> dict:
         return CONFIG["testnet"]
     return CONFIG["mainnet"]
 
+# ─────────────────────────────────────────────────────────
+# py_near / FastNear Authorization collision
+# ─────────────────────────────────────────────────────────
+# py_near hardcodes `Authorization: Bearer py-near` on EVERY request
+# (providers.py, alongside Referer: tgapp.herewallet.app). FastNear honours the
+# Authorization header over the ?apiKey= query param, so it reads that literal
+# as an invalid key → 403 "Invalid API key". Only send_tx fails, because reads
+# are served from the public tier regardless of key validity — which is why this
+# looked like a method gate, then a rate limit, for two days. curl never
+# reproduced it: curl sends no Authorization header.
+#
+# Patched globally rather than per-Account: py_near runs with allow_broadcast=True
+# and does not necessarily use the client on _provider._client for transaction
+# submission. A module-level patch covers every code path.
+if FASTNEAR_API_KEY:
+    _orig_httpx_post = httpx.AsyncClient.post
+
+    async def _fastnear_auth_post(self, url, **kwargs):
+        if "fastnear" in str(url):
+            headers = dict(kwargs.get("headers") or {})
+            headers["Authorization"] = f"Bearer {FASTNEAR_API_KEY}"
+            kwargs["headers"] = headers
+        return await _orig_httpx_post(self, url, **kwargs)
+
+    httpx.AsyncClient.post = _fastnear_auth_post
+    logger.info("✅ FastNear Authorization patch active")
+else:
+    logger.warning("⚠️  FASTNEAR_API_KEY not set — py_near will send 'Bearer py-near'")
+
 # ───────────────────────────
-# Database & User Management
+# Account helpers
 # ───────────────────────────
-
-@contextmanager
-def get_db():
-    conn = sqlite3.connect('nova-users.db', check_same_thread=False)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-# Init DB
-with get_db() as conn:
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            near_account_id TEXT,
-            unsubscribed BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_email ON users(email)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_near ON users(near_account_id)')
-    conn.commit()
-
-def store_user(email: str | None = None, near_account_id: str | None = None) -> int:
-    """Store or update user (called after Auth0 callback)."""
-    if not email and not near_account_id:
-        raise ValueError("Need either email or near_account_id")
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if email:
-            cursor.execute("""
-                INSERT INTO users (email, near_account_id) 
-                VALUES (?, ?)
-                ON CONFLICT(email) DO UPDATE SET 
-                    near_account_id = COALESCE(excluded.near_account_id, users.near_account_id)
-            """, (email, near_account_id))
-        else:
-            cursor.execute("INSERT OR IGNORE INTO users (near_account_id) VALUES (?)", (near_account_id,))
-        conn.commit()
-        return cursor.lastrowid
-
-def unsubscribe_user(email: str) -> bool:
-    """Mark user as unsubscribed from marketing emails."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET unsubscribed = TRUE WHERE email = ?", (email,))
-        conn.commit()
-        return cursor.rowcount > 0
     
 def normalize_account_id(account_id: str) -> str:
     account_id = account_id.strip().lower()
@@ -689,7 +672,6 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
 async def get_owned_groups(ctx: Context, user: dict) -> list:
     result = await call_contract(user, "get_owned_groups", {}, "get_owned_groups")
     if isinstance(result, str):
-        import json
         return json.loads(result) or []
     return result or []
 
@@ -698,7 +680,6 @@ async def get_owned_groups(ctx: Context, user: dict) -> list:
 async def get_member_groups(ctx: Context, user: dict) -> list:
     result = await call_contract(user, "get_member_groups", {}, "get_member_groups")
     if isinstance(result, str):
-        import json
         return json.loads(result) or []
     return result or []
 
@@ -707,7 +688,6 @@ async def get_member_groups(ctx: Context, user: dict) -> list:
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
     result = await call_contract(user, "get_group_members", {"group_id": group_id}, "get_group_members")
     if isinstance(result, str):
-        import json
         return json.loads(result) or []
     return result or []
 
@@ -716,7 +696,6 @@ async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
 async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> list:
     result = await call_contract(user, "get_transactions_for_group", {"group_id": group_id}, "get_transactions_for_group")
     if isinstance(result, str):
-        import json
         return json.loads(result) or []
     return result or []
 
@@ -744,74 +723,6 @@ async def health(request: Request):
     except Exception as e:
         rpc_ok = str(e)
     return JSONResponse({"status": "MCP ready", "version": "0.4.1", "auth": "enabled", "rpc_reachable": rpc_ok})
-
-@mcp.custom_route("/unsubscribe", methods=["GET"])
-async def unsubscribe_route(request: Request):
-    email = request.query_params.get("email")
-    token = request.query_params.get("token")
-    if not email:
-        return JSONResponse({"error": "Missing email"}, status_code=400)
-    
-    expected = hashlib.sha256(f"{email}:{SESSION_TOKEN_SECRET}".encode()).hexdigest()[:16]
-    if token != expected:
-        return JSONResponse({"error": "Invalid token"}, status_code=403)
-    
-    if unsubscribe_user(email):
-        return JSONResponse({
-            "success": True,
-            "message": "You've been unsubscribed. You won't receive any more emails from NOVA."
-        })
-    return JSONResponse({"error": "Email not found"}, status_code=404)
-
-@mcp.custom_route("/auth/callback", methods=["GET"])
-async def auth_callback(request: Request):
-    code = request.query_params.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing auth code")
-
-    # Exchange code for tokens
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        token_resp = await client.post(
-            f"https://{AUTH0_DOMAIN}/oauth/token",
-            data={
-                "grant_type": "authorization_code",
-                "client_id": AUTH0_CLIENT_ID,
-                "client_secret": AUTH0_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": "https://nova-sdk.com/callback"
-            }
-        )
-        token_resp.raise_for_status()
-        token_data = token_resp.json()
-
-    id_token = token_data.get("id_token")
-    if not id_token:
-        raise HTTPException(status_code=401, detail="No id_token received from Auth0")
-
-    # Verify the ID token
-    try:
-        claims = jwt.decode(
-            id_token,
-            options={"verify_signature": False},  # signature already verified by Auth0 exchange
-        )
-    except Exception as e:
-        logger.error(f"Token verification failed: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
-
-    email = claims.get("email")
-    near_account_id = claims.get("near_account_id")  # custom claim if you configured it
-
-    if not email:
-        raise HTTPException(status_code=400, detail="No email in claims")
-
-    # Store/update user
-    store_user(email=email, near_account_id=near_account_id)
-    logger.info(f"User authenticated and stored: {email} → {near_account_id or 'no NEAR account'}")
-
-    # Redirect back to frontend with id_token (or access_token if preferred)
-    # You can also set a cookie/session here if needed
-    frontend_url = f"https://nova-sdk.com?token={id_token}"
-    return RedirectResponse(url=frontend_url, status_code=302)
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
