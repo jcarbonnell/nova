@@ -93,7 +93,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     // Test register_group
     let register_outcome = owner_account
         .call(contract.id(), "register_group")
-        .args_json(json!({"group_id": "test_group_nova"}))
+        .args_json(json!({"group_id": "test_group_nova", "joinable": false}))
         .deposit(NearToken::from_yoctonear(100_000_000_000_000_000_000_000))  // 0.1 NEAR > 0.05 fee
         .gas(Gas::from_tgas(300))
         .transact()
@@ -113,7 +113,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     // Verify group exists
     let group_exists: bool = contract
         .view("group_contains_key")
-        .args_json(json!({"group_id": "test_group_nova"}))
+        .args_json(json!({"group_id": "test_group_nova", "joinable": false}))
         .await?
         .json()?;
     assert!(group_exists, "Group should exist");
@@ -227,7 +227,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     // Test get_transactions_for_group
     let transactions: Vec<Value> = member_account
         .call(contract.id(), "get_transactions_for_group")
-        .args_json(json!({"group_id": "test_group_nova"}))
+        .args_json(json!({"group_id": "test_group_nova", "joinable": false}))
         .deposit(NearToken::from_yoctonear(100_000_000_000_000_000u128))  // 0.0001 NEAR fee
         .gas(Gas::from_tgas(50))
         .transact()

@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use near_sdk::serde_json;
 use near_sdk::serde_json::json;
 use near_sdk::NearToken;
+use near_sdk::json_types::U64;
 use hex;
 use near_sdk::base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use sha2::{Sha256, Digest};
@@ -29,6 +30,8 @@ pub struct Contract {
     owned_groups: LookupMap<AccountId, StoreVec<String>>,
     member_groups: LookupMap<AccountId, StoreVec<String>>,
     group_transactions: LookupMap<String, StoreVec<String>>,
+    joinable_groups: LookupMap<String, bool>,
+    join_windows: LookupMap<String, JoinWindow>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -46,6 +49,22 @@ pub struct Transaction {
     ipfs_hash: String,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
+pub struct JoinWindow {
+    expires_at: u64,
+    max_uses: Option<u32>,
+    uses: u32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub struct JoinWindowView {
+    pub expires_at: String,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub open: bool,
+}
+
 #[derive(BorshStorageKey, BorshSerialize)]
 enum StorageKey {
     Groups,
@@ -57,6 +76,8 @@ enum StorageKey {
     OwnedGroups,
     MemberGroups,
     GroupTransactions,
+    JoinableGroups,
+    JoinWindows,
 }
 
 #[derive(Serialize)]
@@ -100,6 +121,51 @@ impl Contract {
             owned_groups: LookupMap::new(StorageKey::OwnedGroups),
             member_groups: LookupMap::new(StorageKey::MemberGroups),
             group_transactions: LookupMap::new(StorageKey::GroupTransactions),
+            joinable_groups: LookupMap::new(StorageKey::JoinableGroups),
+            join_windows: LookupMap::new(StorageKey::JoinWindows),
+        }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        // Old state shape: the exact 13 fields from before this upgrade, same order, same types.
+        #[derive(near_sdk::borsh::BorshDeserialize)]
+        #[borsh(crate = "near_sdk::borsh")]
+        struct OldContract {
+            owner: AccountId,
+            shade_contract_id: AccountId,
+            fee_recipient: AccountId,
+            fees: LookupMap<String, u128>,
+            groups: LookupMap<String, Group>,
+            group_members: LookupMap<String, StoreVec<AccountId>>,
+            transactions: IterableMap<String, Transaction>,
+            shade_code_hash: Option<String>,
+            workers: LookupMap<AccountId, String>,
+            used_nonces: LookupMap<String, bool>,
+            owned_groups: LookupMap<AccountId, StoreVec<String>>,
+            member_groups: LookupMap<AccountId, StoreVec<String>>,
+            group_transactions: LookupMap<String, StoreVec<String>>,
+        }
+
+        let old: OldContract = env::state_read().expect("failed to read old state");
+
+        Self {
+            owner: old.owner,
+            shade_contract_id: old.shade_contract_id,
+            fee_recipient: old.fee_recipient,
+            fees: old.fees,
+            groups: old.groups,
+            group_members: old.group_members,
+            transactions: old.transactions,
+            shade_code_hash: old.shade_code_hash,
+            workers: old.workers,
+            used_nonces: old.used_nonces,
+            owned_groups: old.owned_groups,
+            member_groups: old.member_groups,
+            group_transactions: old.group_transactions,
+            joinable_groups: LookupMap::new(StorageKey::JoinableGroups),
+            join_windows: LookupMap::new(StorageKey::JoinWindows),
         }
     }
 
@@ -154,7 +220,7 @@ impl Contract {
     }
 
     #[payable]
-    pub fn register_group(&mut self, group_id: String) {
+    pub fn register_group(&mut self, group_id: String, joinable: Option<bool>) {
         let attached = env::attached_deposit().as_yoctonear();
         self.collect_fee("register_group", attached);
 
@@ -162,6 +228,13 @@ impl Contract {
         let caller = env::predecessor_account_id();
         let group = Group { owner: caller.clone(), shade_checksum: None };
         self.groups.insert(group_id.clone(), group);
+
+        // Record joinability ONCE at creation. Only ever inserted, never mutated,
+        // so joinability is immutable for the life of the group. Absence (legacy
+        // groups, or joinable None/false) means the group is NOT self-joinable.
+        if joinable == Some(true) {
+            self.joinable_groups.insert(group_id.clone(), true);
+        }
         let mut members = StoreVec::new(group_id.as_bytes());
         members.push(caller.clone());
         self.group_members.insert(group_id.clone(), members);
@@ -302,6 +375,107 @@ impl Contract {
     pub fn is_authorized(&self, group_id: String, user_id: AccountId) -> bool {
         let members = self.group_members.get(&group_id).expect("Group not found");
         members.iter().any(|x| *x == user_id)
+    }
+
+    /// Open a self-join window on a group. Group-owner-gated AND only permitted
+    /// on groups created with joinable=true. A non-joinable group (every normal
+    /// group, including all legacy groups) can NEVER have a window opened.
+    #[payable]
+    pub fn open_hackathon_join(
+        &mut self,
+        group_id: String,
+        expires_at: U64,
+        max_uses: Option<u32>,
+    ) {
+        let group = self.groups.get(&group_id).expect("Group not found");
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, group.owner, "Only group owner can open join");
+
+        assert!(
+            *self.joinable_groups.get(&group_id).unwrap_or(&false),
+            "Group is not joinable (must be created with joinable=true)"
+        );
+
+        let expires = expires_at.0;
+        assert!(expires > env::block_timestamp(), "expires_at must be in the future");
+
+        self.join_windows.insert(
+            group_id.clone(),
+            JoinWindow { expires_at: expires, max_uses, uses: 0 },
+        );
+        log!("Opened hackathon join window for {} until {}", group_id, expires);
+    }
+
+    /// Self-join a group that has an open window. Anyone may call; caller pays
+    /// the join fee and is added as a member. This is the ONLY self-service
+    /// membership path, and works ONLY on groups with an open window.
+    #[payable]
+    pub fn join_group(&mut self, group_id: String) {
+        let attached = env::attached_deposit().as_yoctonear();
+        self.collect_fee("join_group", attached);
+
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+
+        let window = self.join_windows.get(&group_id).expect("Group not open for join").clone();
+
+        assert!(env::block_timestamp() < window.expires_at, "Join window closed");
+
+        if let Some(cap) = window.max_uses {
+            assert!(window.uses < cap, "Join window full");
+        }
+
+        let caller = env::predecessor_account_id();
+        {
+            let members = self.group_members.get(&group_id).expect("Group members not found");
+            assert!(!members.iter().any(|x| *x == caller), "Already a member");
+        }
+
+        let members = self.group_members.get_mut(&group_id).expect("Group not found");
+        members.push(caller.clone());
+
+        // Rebuild member_groups for caller — mirrors add_group_member's bookkeeping EXACTLY.
+        let prefix = format!("member:{}", caller);
+        let mut member_list = StoreVec::new(prefix.as_bytes());
+        if let Some(existing) = self.member_groups.get(&caller) {
+            for g in existing.iter() {
+                member_list.push(g.clone());
+            }
+        }
+        member_list.push(group_id.clone());
+        self.member_groups.insert(caller.clone(), member_list);
+
+        let window_mut = self.join_windows.get_mut(&group_id).expect("Group not open for join");
+        window_mut.uses += 1;
+
+        log!("{} self-joined group {} ({}/{:?} uses)", caller, group_id, window_mut.uses, window_mut.max_uses);
+    }
+
+    /// Close a join window early or after the deadline. Group-owner-gated, no fee.
+    pub fn close_hackathon_join(&mut self, group_id: String) {
+        let group = self.groups.get(&group_id).expect("Group not found");
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, group.owner, "Only group owner can close join");
+        self.join_windows.remove(&group_id);
+        log!("Closed hackathon join window for {}", group_id);
+    }
+
+    /// Free view: current join-window state, or None if never opened.
+    pub fn get_join_window(&self, group_id: String) -> Option<JoinWindowView> {
+        self.join_windows.get(&group_id).map(|w| {
+            let open = env::block_timestamp() < w.expires_at
+                && w.max_uses.map_or(true, |cap| w.uses < cap);
+            JoinWindowView {
+                expires_at: w.expires_at.to_string(),
+                max_uses: w.max_uses,
+                uses: w.uses,
+                open,
+            }
+        })
+    }
+
+    /// Free view: is this group self-joinable at all (created with joinable=true)?
+    pub fn is_group_joinable(&self, group_id: String) -> bool {
+        *self.joinable_groups.get(&group_id).unwrap_or(&false)
     }
 
     // Returns list of group members
@@ -560,7 +734,7 @@ mod tests {
         let context = get_context(owner.clone(), attached);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         assert!(contract.groups.contains_key(&"test_group".to_string()));
     }
 
@@ -574,7 +748,7 @@ mod tests {
         let context = get_context(owner.clone(), insufficient);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
     }
 
     #[test]
@@ -589,7 +763,7 @@ mod tests {
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
         context = get_context(non_owner.clone(), attached);  // Set deposit for caller
         testing_env!(context.build());
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
 
         // Verify group was created with non_owner as owner
         assert!(contract.groups.contains_key(&"test_group".to_string()));
@@ -610,7 +784,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_register);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());  // Fee paid in context
+        contract.register_group("test_group".to_string(), None);  // Fee paid in context
         context = get_context(owner.clone(), attached_add);
         testing_env!(context.build());
         contract.add_group_member("test_group".to_string(), member.clone());
@@ -628,7 +802,7 @@ mod tests {
         let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);  // Sufficient for register
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         context = get_context(non_owner, 10_000_000_000_000_000_000u128);  // Sufficient for add, but logic fails
         testing_env!(context.build());
         contract.add_group_member("test_group".to_string(), member);
@@ -646,7 +820,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_register);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         context = get_context(owner.clone(), attached_add);
         testing_env!(context.build());
         contract.add_group_member("test_group".to_string(), member.clone());
@@ -666,7 +840,7 @@ mod tests {
         let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);  // Sufficient for register
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         context = get_context(owner.clone(), 10_000_000_000_000_000_000u128);  // Sufficient for revoke, but logic fails
         testing_env!(context.build());
         contract.revoke_group_member("test_group".to_string(), member);
@@ -684,7 +858,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_register);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         context = get_context(owner.clone(), attached_add);
         testing_env!(context.build());
         contract.add_group_member("test_group".to_string(), member.clone());
@@ -716,7 +890,7 @@ mod tests {
         let context = get_context(owner.clone(), attached_owner);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
         let member_context = get_context(member.clone(), attached_member);  // Member attaches for record
         testing_env!(member_context.build());
@@ -739,7 +913,7 @@ mod tests {
         let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);  // Sufficient for register
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         context = get_context(non_member.clone(), 10_000_000_000_000_000_000u128);  // Sufficient for record, but logic fails
         testing_env!(context.build());
         contract.record_transaction(
@@ -760,7 +934,7 @@ mod tests {
         let context = get_context(owner.clone(), attached);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
         contract.record_transaction(
             "test_group".to_string(),
@@ -790,7 +964,7 @@ mod tests {
         let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);  // For register
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         let view_context = get_context(non_member.clone(), 100_000_000_000_000_000u128);  // deposit
         testing_env!(view_context.build());
         contract.get_transactions_for_group("test_group".to_string());
@@ -806,7 +980,7 @@ mod tests {
         let context = get_context(owner.clone(), attached);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
         let members = contract.get_group_members("test_group".to_string());
         assert_eq!(members.len(), 2);
@@ -824,7 +998,7 @@ mod tests {
         let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);  // Sufficient for register
         testing_env!(context.build());
         let mut contract = Contract::new(owner, shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         let view_context = get_context(non_member.clone(), 100_000_000_000_000_000u128);  // deposit
         testing_env!(view_context.build());
         contract.get_group_members("test_group".to_string());
@@ -898,7 +1072,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_owner);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
 
         // Create a test Ed25519 keypair for signing
@@ -962,7 +1136,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_owner);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
 
         // Member context with insufficient deposit
@@ -997,7 +1171,7 @@ mod tests {
         let mut context = get_context(owner.clone(), attached_owner);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
 
         // Member context with deposit
@@ -1031,7 +1205,7 @@ mod tests {
         let context = get_context(owner.clone(), attached);
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
 
         // Test that a fresh (unused) nonce is valid
@@ -1049,7 +1223,7 @@ mod tests {
         let context = get_context(owner.clone(), 110_000_000_000_000_000_000_000u128);  // For chain
         testing_env!(context.build());
         let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
-        contract.register_group("test_group".to_string());
+        contract.register_group("test_group".to_string(), None);
         contract.add_group_member("test_group".to_string(), member.clone());
     
         // Generate a nonce
@@ -1181,5 +1355,261 @@ mod tests {
         let contract = Contract::new(owner, shade_id, fee_recipient);
         assert_eq!(contract.get_dynamic_fee("register_group".to_string()), 0);  // Stub returns 0
         // TODO: Expand when integrating Chainlink
+    }
+
+    
+    // ---- SECURITY INVARIANT ----
+    
+    #[test]
+    #[should_panic(expected = "Group is not joinable")]
+    fn t2_1_plain_group_cannot_be_opened() {
+        // THE CORE TEST: a group registered WITHOUT joinable=true can never be opened.
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("plain_group".to_string(), None); // NOT joinable
+        // Attempt to open — must panic "not joinable"
+        let future = env::block_timestamp() + 1_000_000_000;
+        contract.open_hackathon_join("plain_group".to_string(), U64(future), None);
+    }
+    
+    #[test]
+    #[should_panic(expected = "Group is not joinable")]
+    fn t2_2_explicit_false_cannot_be_opened() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("grp".to_string(), Some(false)); // explicit false
+        let future = env::block_timestamp() + 1_000_000_000;
+        contract.open_hackathon_join("grp".to_string(), U64(future), None);
+    }
+    
+    #[test]
+    #[should_panic(expected = "Only group owner can open join")]
+    fn t2_3_non_owner_cannot_open() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("joinable_grp".to_string(), Some(true));
+        // stranger tries to open owner's joinable group
+        context = get_context(stranger, 0);
+        testing_env!(context.build());
+        let future = env::block_timestamp() + 1_000_000_000;
+        contract.open_hackathon_join("joinable_grp".to_string(), U64(future), None);
+    }
+    
+    #[test]
+    #[should_panic(expected = "Group not open for join")]
+    fn t2_4_join_with_no_window_panics() {
+        // Even a joinable group cannot be joined until a window is opened.
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("joinable_grp".to_string(), Some(true));
+        // no open_hackathon_join call
+        context = get_context(stranger.clone(), 10_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        contract.join_group("joinable_grp".to_string());
+    }
+    
+    // ---- HAPPY PATH ----
+    
+    #[test]
+    fn t2_5_full_join_flow_succeeds() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+    
+        // owner opens the window
+        let future = env::block_timestamp() + 1_000_000_000_000; // 1000s out
+        contract.open_hackathon_join("hack".to_string(), U64(future), None);
+    
+        // is_group_joinable view
+        assert!(contract.is_group_joinable("hack".to_string()));
+    
+        // stranger self-joins (join_group fee is 0 in unit tests — not in new() defaults)
+        context = get_context(stranger.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+    
+        // stranger is now authorized
+        assert!(contract.is_authorized("hack".to_string(), stranger.clone()));
+    
+        // window uses incremented
+        let window = contract.get_join_window("hack".to_string()).unwrap();
+        assert_eq!(window.uses, 1);
+        assert!(window.open);
+    }
+    
+    #[test]
+    fn t2_6_joiner_appears_in_member_groups() {
+        // Proves the member_groups index bookkeeping mirrors add_group_member.
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("hack".to_string(), U64(future), None);
+    
+        context = get_context(stranger.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+    
+        // stranger's member_groups (via get_member_groups, which reads the index)
+        // fee for get_member_groups is 0.0001 — attach it
+        context = get_context(stranger.clone(), 100_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let groups = contract.get_member_groups();
+        assert!(groups.contains(&"hack".to_string()),
+            "joined group must appear in member_groups (index bookkeeping)");
+    }
+    
+    // ---- WINDOW SEMANTICS ----
+    
+    #[test]
+    #[should_panic(expected = "Join window closed")]
+    fn t2_8_join_after_expiry_panics() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        // open with expiry 1ns in the future, then advance block_timestamp past it
+        let now = env::block_timestamp();
+        contract.open_hackathon_join("hack".to_string(), U64(now + 1), None);
+    
+        // advance time past expiry
+        let mut b = get_context(stranger.clone(), 0);
+        b.block_timestamp(now + 1_000_000); // well past now+1
+        testing_env!(b.build());
+        contract.join_group("hack".to_string());
+    }
+    
+    #[test]
+    #[should_panic(expected = "Join window full")]
+    fn t2_9_max_uses_cap_enforced() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let s1: AccountId = "s1.testnet".parse().unwrap();
+        let s2: AccountId = "s2.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("hack".to_string(), U64(future), Some(1)); // cap = 1
+    
+        // first join OK
+        context = get_context(s1.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+    
+        // second join exceeds cap -> panic
+        context = get_context(s2.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+    }
+    
+    #[test]
+    #[should_panic(expected = "Already a member")]
+    fn t2_10_double_join_panics() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("hack".to_string(), U64(future), None);
+    
+        context = get_context(stranger.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+        // same account joins again -> panic
+        contract.join_group("hack".to_string());
+    }
+    
+    #[test]
+    #[should_panic(expected = "Group not open for join")]
+    fn t2_11_close_then_join_panics() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let stranger: AccountId = "stranger.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("hack".to_string(), U64(future), None);
+        contract.close_hackathon_join("hack".to_string());
+    
+        context = get_context(stranger.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+    }
+    
+    // ---- FEE ----
+    
+    #[test]
+    fn t2_13_join_fee_zero_until_set_then_enforced() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 1_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        // join_group not in new() defaults -> fee 0
+        assert_eq!(contract.estimate_fee("join_group".to_string()), 0);
+        // owner sets it (mirrors the post-deploy step)
+        contract.set_fee("join_group".to_string(), "1000000000000000000".to_string());
+        assert_eq!(contract.estimate_fee("join_group".to_string()), 1_000_000_000_000_000_000u128);
+    }
+    
+    // ---- LEGACY SAFETY (unit-level shadow of integration T2.14) ----
+    
+    #[test]
+    fn t2_legacy_group_is_not_joinable() {
+        // A group created the OLD way (None) is not joinable and cannot be opened.
+        // The integration test proves this survives a real wasm UPGRADE; here we
+        // prove the logic: absence from joinable_groups => is_group_joinable false.
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("legacy".to_string(), None);
+        assert!(!contract.is_group_joinable("legacy".to_string()));
+        assert!(contract.get_join_window("legacy".to_string()).is_none());
     }
 }
