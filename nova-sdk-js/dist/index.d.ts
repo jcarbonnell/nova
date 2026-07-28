@@ -89,6 +89,15 @@ export declare class NovaSdk {
     authStatus(groupId?: string): Promise<AuthStatusResult>;
     registerGroup(groupId: string): Promise<string>;
     addGroupMember(groupId: string, memberId: string): Promise<string>;
+    /**
+     * Self-join an OPEN group (hackathon submission groups). The caller joins
+     * themselves — no owner action needed. Only works on groups the owner has
+     * opened for join; otherwise the contract rejects it.
+     *
+     * Idempotent-safe: if already a member, resolves without error rather than
+     * throwing on the contract's "Already a member" panic.
+     */
+    joinGroup(groupId: string): Promise<string>;
     revokeGroupMember(groupId: string, memberId: string): Promise<string>;
     /**
      * Upload a file with end-to-end encryption

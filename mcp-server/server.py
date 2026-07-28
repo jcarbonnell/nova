@@ -73,7 +73,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.1 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.2 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -531,6 +531,20 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
     )
     return f"Added {member_id} to group '{group_id}'"
 
+@expose_as_rest("/tools/join_group")
+@require_auth
+async def join_group(ctx: Context, user: dict, group_id: str) -> str:
+    # Self-service join: the CALLER joins the group (predecessor == the member).
+    # Contract enforces the group is joinable AND has an open window; this tool
+    # does not (and must not) pass a member_id — you can only join yourself.
+    await call_contract(
+        user=user,
+        method_name="join_group",
+        args={"group_id": group_id},
+        fee_action="join_group"
+    )
+    return f"Joined group '{group_id}'"
+
 @expose_as_rest("/tools/revoke_group_member")
 @require_auth
 async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
@@ -722,7 +736,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.1", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.2", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

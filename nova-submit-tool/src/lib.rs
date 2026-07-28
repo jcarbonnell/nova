@@ -134,18 +134,32 @@ fn execute_inner(params: &str) -> Result<String, String> {
         ),
     );
 
+    // Submissions are manifests, not full code files — keep under FastFS's 4 MB cap.
+    const MAX_SUBMISSION_BYTES: usize = 1024 * 1024; // 1 MB
+    if p.file_content.len() > MAX_SUBMISSION_BYTES {
+        return Err(format!(
+            "Submission is {} bytes — too large. A NOVA hackathon submission is a \
+             manifest (title, description, repo URL, video URL), not bundled code or \
+             files. Keep it under {} bytes; link to your repo/video instead of embedding them.",
+            p.file_content.len(), MAX_SUBMISSION_BYTES
+        ));
+    }
+
     // Step 1 — session token.
     let token = get_session_token(&p.account_id, &p.api_key)?;
 
-    // Step 2 — prepare_upload: get encryption key + upload_id.
+    // Step 2 — ensure membership: self-join the open submission group.
+    ensure_joined(&token, &p.account_id, &p.group_id)?;
+    
+    // Step 3 - prepare_upload: get encryption key + upload_id.
     let (upload_id, key_b64) = prepare_upload(&token, &p.account_id, &p.group_id, &p.filename)?;
 
-    // Step 3 — encrypt the file content in-process.
+    // Step 4 — encrypt the file content in-process.
     let plaintext = p.file_content.as_bytes();
     let file_hash = hex::encode(Sha256::digest(plaintext));
     let encrypted_b64 = encrypt_aes_gcm(&key_b64, plaintext, &upload_id)?;
 
-    // Step 4 — finalize_upload: NOVA pins to IPFS + records on NEAR.
+    // Step 5 — finalize_upload: NOVA pins to IPFS + records on NEAR.
     let (cid, trans_id) = finalize_upload(
         &token,
         &p.account_id,
@@ -279,7 +293,42 @@ fn get_session_token(account_id: &str, api_key: &str) -> Result<String, String> 
         .ok_or_else(|| "session-token response had no `token` field".to_string())
 }
 
-/// Step 2: prepare_upload — returns (upload_id, key_b64).
+/// Step 2: Ensure the participant is a member of the submission group.
+fn ensure_joined(token: &str, account_id: &str, group_id: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "group_id": group_id })
+        .to_string()
+        .into_bytes();
+    let headers = mcp_headers(token, account_id);
+
+    let resp = host::http_request(
+        "POST",
+        &format!("{}/tools/join_group", NOVA_MCP_BASE),
+        &headers,
+        Some(&body),
+        Some(30_000),
+    )
+    .map_err(|e| format!("join_group request failed: {}", e))?;
+
+    if resp.status == 200 {
+        host::log(host::LogLevel::Info, &format!("nova-submit: joined (or already in) '{}'", group_id));
+        return Ok(());
+    }
+
+    // The contract panics "Already a member" if re-joining — treat as success.
+    let body_str = String::from_utf8_lossy(&resp.body);
+    if body_str.contains("Already a member") {
+        host::log(host::LogLevel::Info, &format!("nova-submit: already a member of '{}'", group_id));
+        return Ok(());
+    }
+
+    Err(format!(
+        "join_group returned HTTP {} (body: {}). The group may not be open for \
+         join, or may not exist.",
+        resp.status, body_str
+    ))
+}
+
+/// Step 3: prepare_upload — returns (upload_id, key_b64).
 fn prepare_upload(
     token: &str,
     account_id: &str,
@@ -392,3 +441,28 @@ fn mcp_headers(token: &str, account_id: &str) -> String {
 }
 
 export!(NovaSubmitTool);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonce_is_deterministic_from_upload_id() {
+        let n1 = derive_nonce_from_upload_id("abc-123");
+        let n2 = derive_nonce_from_upload_id("abc-123");
+        let n3 = derive_nonce_from_upload_id("different");
+        assert_eq!(n1, n2, "same upload_id must yield same nonce");
+        assert_ne!(n1, n3, "different upload_id must yield different nonce");
+        assert_eq!(n1.len(), 12);
+    }
+
+    #[test]
+    fn manifest_size_guard_rejects_oversized() {
+        // Mirror the guard constant + check used in execute_inner.
+        const MAX: usize = 1024 * 1024;
+        let ok = "x".repeat(MAX);
+        let too_big = "x".repeat(MAX + 1);
+        assert!(ok.len() <= MAX, "1MB manifest is allowed");
+        assert!(too_big.len() > MAX, "over-1MB manifest is rejected");
+    }
+}

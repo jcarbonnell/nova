@@ -133,6 +133,10 @@ const isAuthorized = await sdk.isAuthorized('team-files', 'bob.nova-sdk.near');
 
 // Revoke access (triggers automatic key rotation)
 await sdk.revokeGroupMember('team-files', 'bob.nova-sdk.near');
+
+// Self-join an OPEN group (hackathon submission groups the organizer has opened).
+// Idempotent: safe to call again if already a member.
+await sdk.joinGroup('hackathon-group-id');
 ```
 
 ### Read-Only Queries
@@ -179,7 +183,7 @@ The SDK uses API keys for secure authentication. Get your key at [nova-sdk.com](
 
 1. Create or log into your NOVA account
 2. Click "Manage Account"
-3. Click "Generate API Key"
+3. Click "Show My API Key" (reveals your current key; or "Rotate" to issue a fresh one)
 4. Copy the key (shown only once!)
 ```bash
 # Store in .env (never commit to git!)
@@ -199,7 +203,7 @@ await sdk.refreshToken();
 const info = sdk.getNetworkInfo();
 ```
 
-**Note:** One API key per account. Generating a new key invalidates the old one.
+**Note:** One API key per account. Viewing/generating your key returns the current key; use **Rotate** at nova-sdk.com to issue a fresh key and permanently invalidate the old one.
 
 ### How Authentication Works
 
@@ -265,7 +269,8 @@ new NovaSdk(accountId: string, config?: NovaSdkConfig)
 | `upload(groupId, data, filename)` | Upload encrypted file |
 | `retrieve(groupId, cid)` | Retrieve and decrypt file |
 | `registerGroup(groupId)` | Create new group |
-| `addGroupMember(groupId, memberId)` | Add member to group |
+| `addGroupMember(groupId, memberId)` | Add member to group (owner only) |
+| `joinGroup(groupId)` | Self-join an open group (e.g. hackathon submission groups) |
 | `revokeGroupMember(groupId, memberId)` | Remove member (rotates key) |
 | `authStatus(groupId?)` | Check authentication status |
 | `isAuthorized(groupId, userId?)` | Check group authorization |

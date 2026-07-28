@@ -421,6 +421,45 @@ async fn test_add_group_member_integration() {
 }
 
 #[tokio::test]
+async fn test_join_group_integration() {
+    let sdk = match get_integration_sdk() {
+        Some(s) => s,
+        None => {
+            println!("Skipping test_join_group_integration: TEST_NOVA_ACCOUNT_ID and NOVA_API_KEY required");
+            return;
+        }
+    };
+
+    // Requires an OPEN joinable group. Set TEST_JOINABLE_GROUP to a group the
+    // owner has opened via open_hackathon_join; otherwise skip.
+    let group_id = match std::env::var("TEST_JOINABLE_GROUP") {
+        Ok(g) => g,
+        Err(_) => {
+            println!("Skipping: TEST_JOINABLE_GROUP not set (needs an open join window)");
+            return;
+        }
+    };
+
+    let result = sdk.join_group(&group_id).await;
+    match result {
+        Ok(msg) => {
+            println!("✅ join_group: {}", msg);
+            // After join, the account must be authorized on-chain.
+            let authorized = sdk.is_authorized(&group_id, None).await.unwrap_or(false);
+            assert!(authorized, "account should be authorized after join_group");
+        }
+        Err(e) => {
+            // "Already a member" is a valid idempotent outcome.
+            if e.to_string().contains("Already a member") {
+                println!("⚠️  Already a member — idempotent path");
+            } else {
+                panic!("join_group failed unexpectedly: {}", e);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_revoke_group_member_integration() {
     let sdk = match get_integration_sdk() {
         Some(s) => s,

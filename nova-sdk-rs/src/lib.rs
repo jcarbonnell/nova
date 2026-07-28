@@ -607,6 +607,19 @@ impl NovaSdk {
         Ok(response.message.unwrap_or_else(|| format!("Added {} to group '{}'", member_id, group_id)))
     }
 
+    /// Self-join an OPEN group (hackathon submission groups). The caller joins
+    /// themselves — no owner action needed. Only works on groups the owner has
+    /// opened for join. Idempotent-safe: returns Ok if already a member.
+    pub async fn join_group(&self, group_id: &str) -> Result<String, NovaError> {
+        if let Ok(true) = self.is_authorized(group_id, None).await {
+            return Ok(format!("Already a member of '{}'", group_id));
+        }
+        let args = json!({ "group_id": group_id });
+        // MCP returns result as a bare string ("Joined group '...'"), not an object.
+        let msg: String = self.call_mcp_tool("join_group", args).await?;
+        Ok(msg)
+    }
+
     /// Revoke a member from a group (owner only, triggers key rotation).
     pub async fn revoke_group_member(&self, group_id: &str, member_id: &str) -> Result<String, NovaError> {
         let args = json!({
@@ -1171,6 +1184,16 @@ mod tests {
     async fn test_add_group_member_invalid_token() {
         let sdk = make_sdk(TEST_ACCOUNT_ID).unwrap();
         let result = sdk.add_group_member("test_group", "new.member.testnet").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_join_group_invalid_token() {
+        let sdk = make_sdk(TEST_ACCOUNT_ID).unwrap();
+        // is_authorized runs first (direct RPC, no auth). For a nonexistent group
+        // it errors or returns false; either way join_group then attempts the MCP
+        // call with an unusable token and fails. Net: Err.
+        let result = sdk.join_group("nonexistent_group_xyz_123").await;
         assert!(result.is_err());
     }
 

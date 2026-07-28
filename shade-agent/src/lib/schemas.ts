@@ -207,6 +207,15 @@ export const GenerateApiKeyOutput = z.object({
   success: z.boolean(),
   api_key: z.string(),
   account_id: z.string(),
+  version: z.number(),
+  message: z.string(),
+});
+
+export const RotateApiKeyOutput = z.object({
+  success: z.boolean(),
+  api_key: z.string(),
+  account_id: z.string(),
+  version: z.number(),
   message: z.string(),
 });
 

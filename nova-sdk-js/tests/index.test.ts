@@ -131,6 +131,50 @@ describe('NovaSdk v3', () => {
       expect(result).toContain('Added bob-nova');
     });
 
+    test('joinGroup joins when not already a member', async () => {
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+
+      // isAuthorized (direct RPC) returns false → join proceeds
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('false'),
+      });
+
+      // join_group MCP tool returns the bare string result
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { result: "Joined group 'open-group'" },
+      });
+
+      const result = await sdk.joinGroup('open-group');
+      expect(result).toBe("Joined group 'open-group'");
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/join_group',
+        { group_id: 'open-group' },
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'Authorization': `Bearer ${mockSessionToken}`,
+          }),
+        })
+      );
+    });
+
+    test('joinGroup is idempotent — skips join when already a member', async () => {
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+
+      // isAuthorized returns true → join is skipped, no MCP call
+      const mockProvider = (sdk as any).provider;
+      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
+        result: Buffer.from('true'),
+      });
+
+      const result = await sdk.joinGroup('open-group');
+      expect(result).toContain('Already a member');
+      // join_group tool must NOT have been called (only the beforeEach token mock exists)
+      const joinCalls = mockAxiosPost.mock.calls.filter(c => String(c[0]).endsWith('/tools/join_group'));
+      expect(joinCalls.length).toBe(0);
+    });
+
     test('revokeGroupMember calls MCP revoke_group_member tool', async () => {
       mockAxiosPost.mockResolvedValueOnce({
         status: 200,

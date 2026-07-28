@@ -451,6 +451,31 @@ export class NovaSdk {
     return result.message || `Added ${memberId} to group '${groupId}'`;
   }
 
+  /**
+   * Self-join an OPEN group (hackathon submission groups). The caller joins
+   * themselves — no owner action needed. Only works on groups the owner has
+   * opened for join; otherwise the contract rejects it.
+   *
+   * Idempotent-safe: if already a member, resolves without error rather than
+   * throwing on the contract's "Already a member" panic.
+   */
+  async joinGroup(groupId: string): Promise<string> {
+    // Skip the join if already authorized — avoids the contract's
+    // "Already a member" panic on re-submit.
+    try {
+      if (await this.isAuthorized(groupId)) {
+        return `Already a member of '${groupId}'`;
+      }
+    } catch {
+      // isAuthorized can throw if the group doesn't exist yet; let join surface it.
+    }
+    const result = await this.callMcpTool<{ message?: string } | string>('join_group', {
+      group_id: groupId,
+    });
+    if (typeof result === 'string') return result;
+    return result.message || `Joined group '${groupId}'`;
+  }
+
   // Revoke a member from a group. Caller must be owner.
   async revokeGroupMember(groupId: string, memberId: string): Promise<string> {
     const result = await this.callMcpTool<{ message?: string }>('revoke_group_member', {

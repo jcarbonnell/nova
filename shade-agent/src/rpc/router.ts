@@ -18,7 +18,7 @@ import {
   StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema,
   GenerateKeySchema, GetKeySchema, RotateKeySchema,
   StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput,
-  VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput,
+  RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput,
 } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
@@ -69,6 +69,17 @@ const hasApiKey = pub
   .input(ApiKeyLookupSchema)
   .output(HasApiKeyOutput)
   .handler(({ input }) => userKeysService.hasApiKey(input));
+
+const rotateApiKey = pub
+  .route({
+    method: 'POST',
+    path: '/user-keys/rotate-api-key',
+    tags: INTERNAL,
+    summary: 'Rotate the API key — invalidates the previous key',
+  })
+  .input(ApiKeyLookupSchema)
+  .output(RotateApiKeyOutput)
+  .handler(({ input }) => userKeysService.rotateApiKey(input));
 
 /**
  * The one place the oRPC surface DIFFERS from the Hono surface, deliberately.
@@ -129,7 +140,7 @@ const rotateKey = pub
 // ────────────────────────────────────────────────
 
 export const router = {
-  userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey },
+  userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
   keyManagement: { generateKey, getKey, rotateKey },
 };
 

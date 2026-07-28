@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.1.0
+**Version:** 1.1.1
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -23,7 +23,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.1.0"
+nova-sdk-rs = "1.1.1"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4"
 ```
@@ -144,7 +144,7 @@ The SDK uses API keys for secure authentication. Get your key at [nova-sdk.com](
 
 1. Create or log into your NOVA account
 2. Click "Manage Account"  
-3. Click "Generate API Key"
+3. Click "Show My API Key" (reveals your current key; or "Rotate" to issue a fresh one)
 4. Copy the key (shown only once!)
 ```bash
 # Store in .env (never commit to git!)
@@ -163,7 +163,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 sdk.refresh_token().await?;
 ```
 
-**Note:** One API key per account. Generating a new key invalidates the old one.
+**Note:** One API key per account. Viewing/generating returns your current key; use **Rotate** at nova-sdk.com to issue a fresh key and permanently invalidate the old one.
 
 ### How Authentication Works
 
@@ -213,6 +213,10 @@ sdk.add_group_member("my-group", "bob.near").await?;
 
 // Revoke member
 sdk.revoke_group_member("my-group", "bob.near").await?;
+
+// Self-join an OPEN group (hackathon submission groups the organizer has opened).
+// Idempotent: safe to call again if already a member.
+sdk.join_group("hackathon-group-id").await?;
 ```
 
 ### File Operations
@@ -266,7 +270,7 @@ match sdk.upload("my_group", b"data", "file.txt").await {
 2. **Verify network** - Check `sdk.network_id()` before operations
 3. **Validate file hashes** - Compare after retrieval
 4. **Use TLS** - Always connect over secure connections
-5. **Regenerate API keys** - If compromised, generate a new key at nova-sdk.com
+5. **Rotate API keys** - If compromised, rotate your key at nova-sdk.com (invalidates the old one)
 6. **Client-side encryption** - Keys are fetched from TEE and used locally; encrypted data travels separately from keys
 
 ## Examples
