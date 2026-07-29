@@ -1,0 +1,2 @@
+cargo:rerun-if-changed=build.rs
+cargo:rustc-env=DEBUG_OUTPUT_DIR=/Users/juliencarbonnell/near/nova/nova-submit-tool/target/debug/build/wit-bindgen-rust-macro-15948c339cf1fc64/out
