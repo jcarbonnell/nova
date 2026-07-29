@@ -72,7 +72,8 @@ struct SubmitResult {
 
 const NOVA_AUTH_URL: &str = "https://nova-sdk.com/api/auth/session-token";
 // The NOVA MCP server (Phala dstack). Path tools live under /tools/*.
-const NOVA_MCP_BASE: &str = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network";
+const NOVA_MCP_BASE: &str =
+    "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network";
 
 // ---------------------------------------------------------------------------
 // Tool implementation
@@ -141,7 +142,8 @@ fn execute_inner(params: &str) -> Result<String, String> {
             "Submission is {} bytes — too large. A NOVA hackathon submission is a \
              manifest (title, description, repo URL, video URL), not bundled code or \
              files. Keep it under {} bytes; link to your repo/video instead of embedding them.",
-            p.file_content.len(), MAX_SUBMISSION_BYTES
+            p.file_content.len(),
+            MAX_SUBMISSION_BYTES
         ));
     }
 
@@ -150,7 +152,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
 
     // Step 2 — ensure membership: self-join the open submission group.
     ensure_joined(&token, &p.account_id, &p.group_id)?;
-    
+
     // Step 3 - prepare_upload: get encryption key + upload_id.
     let (upload_id, key_b64) = prepare_upload(&token, &p.account_id, &p.group_id, &p.filename)?;
 
@@ -198,11 +200,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
 // nonce would have under NOVA's per-group cached-key model.
 // ---------------------------------------------------------------------------
 
-fn encrypt_aes_gcm(
-    key_b64: &str,
-    plaintext: &[u8],
-    upload_id: &str,
-) -> Result<String, String> {
+fn encrypt_aes_gcm(key_b64: &str, plaintext: &[u8], upload_id: &str) -> Result<String, String> {
     let key_bytes = B64
         .decode(key_b64)
         .map_err(|e| format!("prepare_upload returned a non-base64 key: {}", e))?;
@@ -221,7 +219,13 @@ fn encrypt_aes_gcm(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext_and_tag = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad: b"" })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: b"",
+            },
+        )
         .map_err(|e| format!("AES-GCM encryption failed: {}", e))?;
 
     // Layout: nonce(12) || ciphertext || tag(16)
@@ -268,14 +272,8 @@ fn get_session_token(account_id: &str, api_key: &str) -> Result<String, String> 
     })
     .to_string();
 
-    let resp = host::http_request(
-        "POST",
-        NOVA_AUTH_URL,
-        &headers,
-        Some(&body),
-        Some(30_000),
-    )
-    .map_err(|e| format!("session-token request failed: {}", e))?;
+    let resp = host::http_request("POST", NOVA_AUTH_URL, &headers, Some(&body), Some(30_000))
+        .map_err(|e| format!("session-token request failed: {}", e))?;
 
     if resp.status != 200 {
         return Err(format!(
@@ -310,14 +308,20 @@ fn ensure_joined(token: &str, account_id: &str, group_id: &str) -> Result<(), St
     .map_err(|e| format!("join_group request failed: {}", e))?;
 
     if resp.status == 200 {
-        host::log(host::LogLevel::Info, &format!("nova-submit: joined (or already in) '{}'", group_id));
+        host::log(
+            host::LogLevel::Info,
+            &format!("nova-submit: joined (or already in) '{}'", group_id),
+        );
         return Ok(());
     }
 
     // The contract panics "Already a member" if re-joining — treat as success.
     let body_str = String::from_utf8_lossy(&resp.body);
     if body_str.contains("Already a member") {
-        host::log(host::LogLevel::Info, &format!("nova-submit: already a member of '{}'", group_id));
+        host::log(
+            host::LogLevel::Info,
+            &format!("nova-submit: already a member of '{}'", group_id),
+        );
         return Ok(());
     }
 

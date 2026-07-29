@@ -56,3 +56,6 @@ shade-agent/docker-compose.yaml
 shade-agent/package-lock.json
 shade-agent/frontend/package-lock.json
 shade-agent/near-rpc.json
+
+# nova-submit wasm tool
+nova-submit-tool/target/
