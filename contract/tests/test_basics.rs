@@ -16,24 +16,9 @@ async fn test_contract_is_operational() -> Result<(), Box<dyn Error>> {
 }
 
 async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
-    // Use custom FastNEAR RPC endpoint to avoid rate limits
-    let rpc_url = std::env::var("NEAR_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.testnet.fastnear.com".to_string());
-    
-    let api_key = std::env::var("FASTNEAR_API_KEY")
-        .unwrap_or_else(|_| "0b1399596423db51740cfbe041490f6a7611a6b0089d30afb7d459939723171c".to_string());
-    
-    // Configure RPC with API key
-    let rpc_url_with_key = format!("{}?apiKey={}", rpc_url, api_key);
-    
-    println!("🔄 Connecting to FastNEAR testnet RPC...");
-    
-    // Connect to testnet with custom RPC
-    let worker = near_workspaces::testnet()
-        .rpc_addr(&rpc_url_with_key)
-        .await?;
-    
-    println!("✅ Connected to custom RPC");
+    println!("🔄 Connecting to testnet...");
+    let worker = near_workspaces::testnet().await?;
+    println!("✅ Connected to testnet");
     
     // Create test accounts
     let owner_account = worker.dev_create_account().await?;
@@ -305,6 +290,70 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     assert!(!is_authorized_after, "Member should not be authorized after revoke");
 
     println!("✅ Member revocation verified");
+
+    // ---- §5.6 joinable-gated public views ----
+    println!("🔎 Testing joinable-gated public views...");
+
+    // Register a JOINABLE group (owner auto-added as member)
+    owner_account
+        .call(contract.id(), "register_group")
+        .args_json(json!({"group_id": "public_group", "joinable": true}))
+        .deposit(NearToken::from_yoctonear(100_000_000_000_000_000_000_000))
+        .gas(Gas::from_tgas(300))
+        .transact()
+        .await?
+        .into_result()?;
+
+    // Record a transaction as owner (owner is a member of its own group)
+    owner_account
+        .call(contract.id(), "record_transaction")
+        .args_json(json!({
+            "group_id": "public_group",
+            "user_id": owner_account.id().to_string(),
+            "file_hash": "pub_file_hash",
+            "ipfs_hash": "pub_ipfs_hash"
+        }))
+        .deposit(NearToken::from_yoctonear(10_000_000_000_000_000_000))
+        .gas(Gas::from_tgas(300))
+        .transact()
+        .await?
+        .into_result()?;
+
+    // Pure view — no deposit, no signer required
+    let pub_members: Vec<Value> = contract
+        .view("get_group_members_public")
+        .args_json(json!({"group_id": "public_group"}))
+        .await?
+        .json()?;
+    assert_eq!(pub_members.len(), 1, "owner is the sole member");
+    assert_eq!(pub_members[0], owner_account.id().to_string());
+    println!("✅ get_group_members_public works on joinable group (free view)");
+
+    let pub_txs: Vec<Value> = contract
+        .view("get_transactions_for_group_public")
+        .args_json(json!({"group_id": "public_group"}))
+        .await?
+        .json()?;
+    assert_eq!(pub_txs.len(), 1);
+    assert_eq!(pub_txs[0]["file_hash"], "pub_file_hash");
+    assert_eq!(pub_txs[0]["ipfs_hash"], "pub_ipfs_hash");
+    println!("✅ get_transactions_for_group_public works on joinable group (free view)");
+
+    // SECURITY INVARIANT: public views REFUSE the non-joinable group.
+    // test_group_nova was registered with joinable:false at the top of this test.
+    let refused_members = contract
+        .view("get_group_members_public")
+        .args_json(json!({"group_id": "test_group_nova"}))
+        .await;
+    assert!(refused_members.is_err(), "public members view must refuse a non-joinable group");
+
+    let refused_txs = contract
+        .view("get_transactions_for_group_public")
+        .args_json(json!({"group_id": "test_group_nova"}))
+        .await;
+    assert!(refused_txs.is_err(), "public tx view must refuse a non-joinable group");
+    println!("✅ Public views refuse non-joinable groups (security invariant holds on real testnet)");
+
     println!("\n🎉 All tests passed with nonce-based tokens and real Shade agent integration!");
 
     Ok(())

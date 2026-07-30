@@ -478,6 +478,37 @@ impl Contract {
         *self.joinable_groups.get(&group_id).unwrap_or(&false)
     }
 
+    /// Free PUBLIC view of `get_group_members`. Returns members ONLY for groups created with joinable=true.
+    pub fn get_group_members_public(&self, group_id: String) -> Vec<AccountId> {
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+        assert!(
+            *self.joinable_groups.get(&group_id).unwrap_or(&false),
+            "Group is not joinable (public view refused)"
+        );
+        let members = self.group_members.get(&group_id).expect("Group members not found");
+        members.iter().cloned().collect::<Vec<AccountId>>()
+    }
+
+    /// Free PUBLIC view of `get_transactions_for_group`. 
+    pub fn get_transactions_for_group_public(&self, group_id: String) -> Vec<Transaction> {
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+        assert!(
+            *self.joinable_groups.get(&group_id).unwrap_or(&false),
+            "Group is not joinable (public view refused)"
+        );
+        if let Some(tx_ids) = self.group_transactions.get(&group_id) {
+            let mut out: Vec<Transaction> = Vec::new();
+            for tx_id in tx_ids.iter() {
+                if let Some(tx) = self.transactions.get(tx_id.as_str()) {
+                    out.push(tx.clone());
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
     // Returns list of group members
     #[payable]
     pub fn get_group_members(&mut self, group_id: String) -> Vec<AccountId> {
@@ -1611,5 +1642,118 @@ mod tests {
         contract.register_group("legacy".to_string(), None);
         assert!(!contract.is_group_joinable("legacy".to_string()));
         assert!(contract.get_join_window("legacy".to_string()).is_none());
+    }
+    // SECURITY INVARIANT: a plain (non-joinable) group REFUSES the public views.
+    #[test]
+    #[should_panic(expected = "Group is not joinable")]
+    fn t3_1_members_public_panics_on_plain_group() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("plain".to_string(), None); // NOT joinable
+        contract.get_group_members_public("plain".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "Group is not joinable")]
+    fn t3_2_transactions_public_panics_on_plain_group() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("plain".to_string(), None);
+        contract.get_transactions_for_group_public("plain".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "Group is not joinable")]
+    fn t3_3_members_public_panics_on_explicit_false() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("grp".to_string(), Some(false)); // explicit false
+        contract.get_group_members_public("grp".to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "Group not found")]
+    fn t3_4_members_public_panics_on_missing_group() {
+        // Proves the not-found check fires BEFORE the joinable check.
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 0);
+        testing_env!(context.build());
+        let contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.get_group_members_public("nonexistent".to_string());
+    }
+
+    // PARITY: on a joinable group the public twin byte-matches the signed method.
+    #[test]
+    fn t3_5_members_public_matches_signed_on_joinable() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let s1: AccountId = "s1.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 100_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("hack".to_string(), U64(future), None);
+
+        // stranger self-joins so membership is non-trivial (owner + s1)
+        context = get_context(s1.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("hack".to_string());
+
+        // signed path: owner, fee attached
+        context = get_context(owner.clone(), 100_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let signed = contract.get_group_members("hack".to_string());
+
+        // public path: unrelated caller, no fee
+        let nobody: AccountId = "nobody.testnet".parse().unwrap();
+        context = get_context(nobody, 0);
+        testing_env!(context.build());
+        let public = contract.get_group_members_public("hack".to_string());
+
+        assert_eq!(signed, public, "public twin must byte-match signed method");
+        assert_eq!(public.len(), 2);
+    }
+
+    #[test]
+    fn t3_6_transactions_public_matches_signed_on_joinable() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 200_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("hack".to_string(), Some(true)); // owner auto-member
+        contract.record_transaction(
+            "hack".to_string(),
+            owner.clone(),
+            "fh1".to_string(),
+            "ih1".to_string(),
+        );
+
+        let signed = contract.get_transactions_for_group("hack".to_string());
+        let public = contract.get_transactions_for_group_public("hack".to_string());
+
+        assert_eq!(signed.len(), 1);
+        assert_eq!(public.len(), signed.len());
+        assert_eq!(public[0].file_hash, signed[0].file_hash);
+        assert_eq!(public[0].ipfs_hash, signed[0].ipfs_hash);
+        assert_eq!(public[0].group_id, signed[0].group_id);
+        assert_eq!(public[0].user_id, signed[0].user_id);
     }
 }

@@ -73,7 +73,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.2 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.3 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -545,6 +545,85 @@ async def join_group(ctx: Context, user: dict, group_id: str) -> str:
     )
     return f"Joined group '{group_id}'"
 
+@expose_as_rest("/tools/create_hackathon_group")
+@require_auth
+async def create_hackathon_group(
+    ctx: Context,
+    user: dict,
+    group_id: str,
+    expires_at: str,
+    max_uses: int | None = None,
+) -> str:
+    # ONE organizer command = "deploy event": register the group as joinable,
+    # generate its Shade encryption key, then open the join window.
+    # Half-state safe: skips re-registering if the group already exists.
+    config = get_config(user["near_account_id"])
+
+    already_exists = await view_contract(
+        user,
+        "group_contains_key",
+        {"group_id": group_id},
+    )
+
+    if not already_exists:
+        # 1. Register the group as JOINABLE.
+        await call_contract(
+            user=user,
+            method_name="register_group",
+            args={"group_id": group_id, "joinable": True},
+            fee_action="register_group",
+        )
+
+        # 2. Generate the group's Shade encryption key — MUST happen or members
+        #    can't get a key to encrypt/decrypt. Mirrors register_group exactly.
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Auth": INTERNAL_API_SECRET,
+        }
+        if user.get("wallet_id"):
+            headers["Authorization"] = f"Bearer wallet:{user['wallet_id']}"
+        elif user.get("access_token"):
+            headers["Authorization"] = f"Bearer {user['access_token']}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.post(
+                f"{SHADE_API_URL}/rpc/key-management/generate_key",
+                json={
+                    "group_id": group_id,
+                    "owner": user["near_account_id"],
+                    "account_id": user["near_account_id"],
+                },
+                headers=headers,
+            )
+
+    # 3. Open the join window (idempotent — overwrites any existing window).
+    #    If the group exists but was registered NON-joinable, the contract
+    #    rejects this with "not joinable" — correct.
+    await call_contract(
+        user=user,
+        method_name="open_hackathon_join",
+        args={"group_id": group_id, "expires_at": expires_at, "max_uses": max_uses},
+        fee_action="open_hackathon_join",
+    )
+
+    return (
+        f"Hackathon group '{group_id}' created and open for join "
+        f"until {expires_at}" + (f" ({max_uses} max)" if max_uses else "")
+    )
+
+
+@expose_as_rest("/tools/close_hackathon_join")
+@require_auth
+async def close_hackathon_join(ctx: Context, user: dict, group_id: str) -> str:
+    # Manual early-close of a join window (owner only, enforced on-chain).
+    # The window also auto-closes at expires_at; this is for closing sooner.
+    await call_contract(
+        user=user,
+        method_name="close_hackathon_join",
+        args={"group_id": group_id},
+        fee_action="close_hackathon_join",
+    )
+    return f"Closed join window for group '{group_id}'"
+
 @expose_as_rest("/tools/revoke_group_member")
 @require_auth
 async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
@@ -736,7 +815,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.2", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.3", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
