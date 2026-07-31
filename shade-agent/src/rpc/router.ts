@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 
-import { pub, storeLimited } from './base.js';
+import { pub, storeLimited, walletPub } from './base.js';
 import {
   StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema,
   GenerateKeySchema, GetKeySchema, RotateKeySchema,
@@ -23,6 +23,10 @@ import {
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
+import {
+  WalletNonceSchema, WalletVerifySchema, WalletNonceOutput, WalletVerifyOutput,
+} from '../lib/schemas.js';
+import { issueWalletNonce, verifyWalletSignin } from '../lib/auth.js';
 
 const INTERNAL = ['internal'];
 
@@ -139,9 +143,51 @@ const rotateKey = pub
 
 // ────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────
+// wallet SIWN (NEP-413 self-custody) — §5.11-A
+// walletPub = gated + seedless (see rpc/base.ts).
+// ────────────────────────────────────────────────
+
+const walletNonce = walletPub
+  .route({
+    method: 'POST',
+    path: '/wallet/nonce',
+    tags: INTERNAL,
+    summary: 'Issue a server-side NEP-413 nonce for wallet sign-in',
+  })
+  .input(WalletNonceSchema)
+  .output(WalletNonceOutput)
+  .handler(() => ({ nonce: issueWalletNonce() }));
+
+const walletVerify = walletPub
+  .route({
+    method: 'POST',
+    path: '/wallet/verify',
+    tags: INTERNAL,
+    summary: 'Verify a NEP-413 wallet signature; returns the authenticated account',
+  })
+  .input(WalletVerifySchema)
+  .output(WalletVerifyOutput)
+  .handler(async ({ input }) => {
+    const result = await verifyWalletSignin(
+      input.signed_message,
+      input.message,
+      input.nonce,
+    );
+    if (!result.ok) {
+      const message =
+        result.code === 'UNAUTHORIZED_NONCE_REPLAY'
+          ? 'Invalid or expired nonce'
+          : 'Wallet signature verification failed';
+      throw new ApiError(401, result.code, message);
+    }
+    return { account_id: result.account_id, public_key: result.public_key };
+  });
+
 export const router = {
   userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
   keyManagement: { generateKey, getKey, rotateKey },
+  wallet: { nonce: walletNonce, verify: walletVerify },
 };
 
 export type Router = typeof router;

@@ -30,6 +30,7 @@
     "jsonwebtoken": "9.0.3",
     "jwks-rsa": "3.2.2",
     "near-api-js": "5.1.1",
+    "near-kit": "0.19.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

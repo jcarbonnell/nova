@@ -175,6 +175,14 @@ export const GenerateApiKeyOutput = z.object({
     success: z.boolean(),
     api_key: z.string(),
     account_id: z.string(),
+    version: z.number(),
+    message: z.string(),
+});
+export const RotateApiKeyOutput = z.object({
+    success: z.boolean(),
+    api_key: z.string(),
+    account_id: z.string(),
+    version: z.number(),
     message: z.string(),
 });
 export const HasApiKeyOutput = z.object({
@@ -216,4 +224,46 @@ export const RotateKeyOutput = z.object({
     new_key_hash: z.string(),
     version: z.number(),
     checksum: z.string(),
+});
+// ── wallet SIWN inputs ───────────────────────────────────────────────────────
+/**
+ * POST /wallet/nonce — no request body. The route mints a server-issued nonce.
+ * An empty object accepts `{}`; Zod's default strip drops any stray key a proxy
+ * adds (same mechanism the other routes rely on), so this can't 400 on extras.
+ */
+export const WalletNonceSchema = z.object({});
+/**
+ * POST /wallet/verify — the wallet's NEP-413 output, the echoed message, and the
+ * Shade-issued nonce. `signed_message` is near-kit's SignedMessage.
+ *
+ * Unlike the branchy user-keys routes, this route has exactly ONE entry shape,
+ * so the schema requires its fields (a missing one is a malformed wallet
+ * response, not an alternate auth path). near-kit's optional `state` (CSRF, for
+ * browser wallets) is declared optional so a wallet returning it doesn't 400;
+ * default strip drops anything else.
+ */
+export const WalletVerifySchema = z.object({
+    signed_message: z.object({
+        accountId: z.string().min(1),
+        publicKey: z.string().min(1),
+        signature: z.string().min(1),
+        state: z.string().optional(),
+    }),
+    message: z.string().min(1),
+    nonce: z.string().regex(/^[0-9a-f]{64}$/i, 'nonce must be 32-byte hex'),
+});
+// ── wallet SIWN outputs ──────────────────────────────────────────────────────
+/** /wallet/nonce success — the 32-byte server-issued nonce, hex. */
+export const WalletNonceOutput = z.object({
+    nonce: z.string(),
+});
+/**
+ * /wallet/verify success — the authenticated NEAR account and the full-access
+ * key that signed. Failure never reaches here: it throws ApiError
+ * (UNAUTHORIZED_NONCE_REPLAY / UNAUTHORIZED), shaped to { error, code } by
+ * rpc/base.ts's mapErrors.
+ */
+export const WalletVerifyOutput = z.object({
+    account_id: z.string(),
+    public_key: z.string(),
 });

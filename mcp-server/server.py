@@ -779,7 +779,15 @@ async def get_member_groups(ctx: Context, user: dict) -> list:
 @expose_as_rest("/tools/get_group_members")
 @require_auth
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
-    result = await call_contract(user, "get_group_members", {"group_id": group_id}, "get_group_members")
+    # §5.6: joinable (open-event) groups get a FREE, UNSIGNED public view — no
+    # Shade key retrieval, no fee, no user signature. Private groups keep the
+    # signed, paid path unchanged. The @require_auth session boundary (§5.0) still
+    # establishes the caller; for joinable groups we simply don't sign the read.
+    joinable = await view_contract(user, "is_group_joinable", {"group_id": group_id})
+    if joinable:
+        result = await view_contract(user, "get_group_members_public", {"group_id": group_id})
+    else:
+        result = await call_contract(user, "get_group_members", {"group_id": group_id}, "get_group_members")
     if isinstance(result, str):
         return json.loads(result) or []
     return result or []
@@ -787,7 +795,12 @@ async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
 @expose_as_rest("/tools/get_group_transactions")
 @require_auth
 async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> list:
-    result = await call_contract(user, "get_transactions_for_group", {"group_id": group_id}, "get_transactions_for_group")
+    # §5.6: joinable groups → free unsigned public view; private groups → signed path.
+    joinable = await view_contract(user, "is_group_joinable", {"group_id": group_id})
+    if joinable:
+        result = await view_contract(user, "get_transactions_for_group_public", {"group_id": group_id})
+    else:
+        result = await call_contract(user, "get_transactions_for_group", {"group_id": group_id}, "get_transactions_for_group")
     if isinstance(result, str):
         return json.loads(result) or []
     return result or []

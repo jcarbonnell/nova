@@ -13,6 +13,13 @@
 //   3. checkInternalAuth  — the X-Internal-Auth shared-secret gate (v0.3.2 Fix 3).
 //                           TRANSPORT auth, not request auth. Fails closed.
 //                           Was duplicated in both route files (Step 4 carry).
+//   4. verifyWalletSignin — NEP-413 "Sign in with NEAR" (SIWN), v0.5 §5.11-A.
+//                           A wallet signs a Shade-issued nonce; verified via
+//                           near-kit's verifyNep413Signature (which also checks
+//                           the signing key is an on-chain FULL-ACCESS key — the
+//                           same on-chain-key invariant as (2), now library-
+//                           provided). Self-custody: NOVA never holds the key.
+//                           Nonce lifecycle is Shade-owned (wallet-nonce.ts).
 //
 // (1) and (2) are the "two parallel auth paths" the roadmap (§8.7) flags for
 // convergence in v0.5's better-near-auth rework. They are NOT unified here.
@@ -33,6 +40,9 @@ import jwksClient from 'jwks-rsa';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
+import { Near, verifyNep413Signature } from 'near-kit';
+import { WalletNonceStore } from './wallet-nonce.js';
+import { NEAR_RPC_URL } from './config.js';
 import { getRpcUrl, viewFunction } from './near.js';
 import { log } from './logger.js';
 // ────────────────────────────────────────────────
@@ -228,4 +238,143 @@ export function checkInternalAuth(provided) {
     if (a.length !== b.length)
         return false;
     return crypto.timingSafeEqual(a, b);
+}
+// ════════════════════════════════════════════════════════════════════════════
+// 4. Wallet SIWN (NEP-413 self-custody) — v0.5 §5.11-A
+// ════════════════════════════════════════════════════════════════════════════
+/**
+ * NOVA's NEP-413 recipient. Binds a signature to NOVA: a signature captured by
+ * another dapp (different recipient) cannot authenticate here. This is the
+ * human-legible identity the wallet DISPLAYS in its signing prompt, and is
+ * stable across the §5.12 CVM-URL churn (unlike the Phala audience). Aligns with
+ * the better-near-auth `recipient` convention adopted in §5.11-B.
+ */
+export const WALLET_SIWN_RECIPIENT = 'nova-sdk.com';
+/**
+ * Process-lifetime nonce store for wallet sign-in. In-memory, single-CVM.
+ * Lost-on-restart is harmless: an unused 15-min nonce surviving a restart buys
+ * an attacker nothing, and the client simply re-requests. Exported so the
+ * /rpc/wallet/nonce and /rpc/wallet/verify routes share ONE store instance.
+ */
+export const walletNonceStore = new WalletNonceStore();
+/**
+ * Lazily-built near-kit client used ONLY for the on-chain full-access-key check
+ * inside verifyNep413Signature. It performs a read (view_access_key via
+ * getAccessKey); it never signs.
+ *
+ * RPC WIRING — matches Shade's existing convention exactly:
+ *   config.ts's NEAR_RPC_URL already carries the FastNear key as a `?apiKey=`
+ *   query param (that is what logger.ts's scrubber redacts). near-kit stores the
+ *   rpcUrl verbatim and sends NO Authorization header, so passing that URL is
+ *   all that's needed — the read rides the same fast path as viewFunction. We do
+ *   NOT use the `Bearer` header form: that was MCP's py_near-specific workaround
+ *   (py_near hardcodes `Authorization: Bearer py-near`, which FastNear honours
+ *   over the query param). Shade's axios/near-kit path has no such collision.
+ *
+ * Mainnet-only by design: wallet self-custody targets the mainnet contract; a
+ * testnet wallet path is out of scope for §5.11-A. (Hence NEAR_RPC_URL, the
+ * mainnet endpoint, not getRpcUrl(network).)
+ */
+let WALLET_VERIFIER_NEAR = null;
+function getWalletVerifierNear() {
+    if (WALLET_VERIFIER_NEAR)
+        return WALLET_VERIFIER_NEAR;
+    WALLET_VERIFIER_NEAR = new Near({
+        network: 'mainnet',
+        rpcUrl: NEAR_RPC_URL, // from config.ts; carries ?apiKey= if configured
+    });
+    return WALLET_VERIFIER_NEAR;
+}
+/**
+ * Issue a fresh server-side nonce for wallet sign-in. Thin wrapper over the
+ * shared store so the router doesn't reach into the store directly (symmetric
+ * with verifyWalletSignin). Returns 32-byte hex.
+ */
+export function issueWalletNonce() {
+    return walletNonceStore.issueNonce();
+}
+/**
+ * Verify a NEP-413 wallet sign-in.
+ *
+ * TWO-LAYER, check-first / consume-LAST (the security-load-bearing ordering):
+ *
+ *   1. Shade nonce validity (non-mutating) — near-kit does NONE of this under
+ *      `nonceValidation:"none"`, so it is ours. Fails → UNAUTHORIZED_NONCE_REPLAY.
+ *   2. near-kit verifyNep413Signature({near, nonceValidation:"none"}) — one
+ *      boolean covering signature + recipient + on-chain FULL-ACCESS key.
+ *      Fails → UNAUTHORIZED. The nonce is NOT consumed on this path, so a bad
+ *      signature cannot burn a victim's issued nonce (griefing guard).
+ *   3. consume the nonce — ONLY after full success.
+ *
+ * The signature is over a message the CLIENT chose to display; we do not
+ * constrain its text (near-kit binds security via recipient + nonce, not the
+ * human-readable message). `signedMessage.accountId` is the authenticated
+ * identity on success.
+ *
+ * @param signedMessage  near-kit SignedMessage { accountId, publicKey, signature }
+ * @param message        the human-readable message that was signed (echoed back
+ *                       by the client; must match what the wallet signed)
+ * @param nonceHex       the Shade-issued nonce (hex), as returned by /nonce
+ */
+export async function verifyWalletSignin(signedMessage, message, nonceHex) {
+    try {
+        // Layer 1 — nonce validity (Shade-owned). Non-mutating.
+        const nonceCheck = walletNonceStore.checkNonce(nonceHex);
+        if (!nonceCheck.ok) {
+            log('warn', 'wallet_signin_failed', {
+                reason: `nonce_${nonceCheck.reason}`,
+                // account_id is hashed by the logger; safe to include for correlation.
+                user_id: signedMessage.accountId,
+            });
+            return { ok: false, code: 'UNAUTHORIZED_NONCE_REPLAY', reason: nonceCheck.reason };
+        }
+        // Layer 2 — crypto + recipient + on-chain full-access key (near-kit).
+        let sigValid = false;
+        try {
+            sigValid = await verifyNep413Signature(signedMessage, {
+                message,
+                recipient: WALLET_SIWN_RECIPIENT,
+                nonce: Buffer.from(nonceHex, 'hex'),
+            }, {
+                near: getWalletVerifierNear(),
+                nonceValidation: 'none', // Shade owns nonce/replay; opaque bytes.
+            });
+        }
+        catch (e) {
+            // near-kit throws only on infra faults (e.g. RPC unreachable), not on a
+            // bad signature (that returns false). Treat as auth failure, log scrubbed.
+            log('error', 'wallet_signin_verify_error', {
+                message: e instanceof Error ? e.message : String(e),
+                stack: e instanceof Error ? e.stack : undefined,
+            });
+            return { ok: false, code: 'UNAUTHORIZED', reason: 'verify_error' };
+        }
+        if (!sigValid) {
+            // Nonce intentionally NOT consumed — bad sig must not burn it.
+            log('warn', 'wallet_signin_failed', {
+                reason: 'signature_invalid',
+                user_id: signedMessage.accountId,
+            });
+            return { ok: false, code: 'UNAUTHORIZED', reason: 'signature_invalid' };
+        }
+        // Layer 3 — consume ONLY after full success.
+        const consumed = walletNonceStore.consumeNonce(nonceHex);
+        if (!consumed) {
+            // Lost a race (expired or double-submitted between check and consume).
+            log('warn', 'wallet_signin_failed', {
+                reason: 'nonce_consume_failed',
+                user_id: signedMessage.accountId,
+            });
+            return { ok: false, code: 'UNAUTHORIZED_NONCE_REPLAY', reason: 'consume_failed' };
+        }
+        log('info', 'wallet_signin_ok', { user_id: signedMessage.accountId });
+        return { ok: true, account_id: signedMessage.accountId, public_key: signedMessage.publicKey };
+    }
+    catch (e) {
+        log('error', 'wallet_signin_error', {
+            message: e instanceof Error ? e.message : String(e),
+            stack: e instanceof Error ? e.stack : undefined,
+        });
+        return { ok: false, code: 'UNAUTHORIZED', reason: 'internal' };
+    }
 }

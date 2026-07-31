@@ -91,3 +91,14 @@ export const pub = base
 
 // store-only variant: pub + the rate limiter. Used ONLY by the store procedure in router.ts. 
 export const storeLimited = pub.use(rateLimitStore);
+
+// wallet SIWN: gated, but WITHOUT withMasterSeed. NEP-413 verification touches no
+// KV and derives no keys (pure signature + on-chain access-key read + in-memory
+// nonce), so forcing seed init would make wallet login depend on the seed for no
+// reason — and block it on a cold start where KV is briefly unreachable. Gate
+// (transport auth) + error mapping still apply, so §5.0's single boundary is
+// unchanged; only the irrelevant seed step is dropped. Parallel to `pub` so the
+// omission is obviously deliberate.
+export const walletPub = base
+  .use(mapErrors)          // outermost, shapes gate errors too (same as pub)
+  .use(requireInternalAuth);

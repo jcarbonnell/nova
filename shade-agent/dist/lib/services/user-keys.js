@@ -204,6 +204,54 @@ export async function checkAccount(input) {
 // ────────────────────────────────────────────────
 // API KEYS
 // ────────────────────────────────────────────────
+/**
+ * Read the api-hash:{account} blob in either format.
+ *   - legacy bare 64-hex  → { v: 0, hash }   (v0 = pre-§5.9 unversioned salt)
+ *   - new JSON { v, hash } → as stored (v >= 1)
+ * Returns null if no blob exists.
+ */
+async function readApiKeyRecord(accountId) {
+    const hashKeyId = sha256Hex(`api-hash:${accountId}`);
+    const blob = await getBlobFromKV(hashKeyId);
+    if (!blob)
+        return null;
+    const decrypted = Buffer.from(decryptBlob(blob)).toString('utf8');
+    // Legacy bare hash → v0 (the pre-§5.9 unversioned key).
+    if (/^[0-9a-f]{64}$/i.test(decrypted)) {
+        return { v: 0, hash: decrypted };
+    }
+    try {
+        const parsed = JSON.parse(decrypted);
+        if (typeof parsed?.v === 'number' && typeof parsed?.hash === 'string') {
+            return { v: parsed.v, hash: parsed.hash };
+        }
+    }
+    catch {
+        // fall through to corrupt
+    }
+    throw new ApiError(500, 'API_KEY_BLOB_CORRUPT', 'Stored API key record is unreadable');
+}
+/**
+ * Derive the API key VALUE for account + version.
+ *   v === 0 → legacy UNVERSIONED salt `api-key:{account}` (reproduces pre-§5.9 keys)
+ *   v >= 1  → versioned salt `api-key:{account}:v{v}`
+ *
+ * ROTATION NOTE: deriveKey is deterministic, so any version's bytes are
+ * re-derivable. Rotation moves the single stored hash forward, so the old key
+ * stops VERIFYING (it fails timingSafeEqual against the new stored hash). The
+ * property is "old key no longer honored," not "old key unrecoverable." Sound
+ * ONLY because there is exactly ONE stored hash per account and rotate
+ * OVERWRITES it. Never store a history of valid hashes — that revives old keys.
+ */
+function deriveApiKeyValue(accountId, version) {
+    const salt = version === 0 ? `api-key:${accountId}` : `api-key:${accountId}:v${version}`;
+    const bytes = deriveKey(salt, 32);
+    return `nova_sk_${Buffer.from(bytes).toString('base64url').slice(0, 43)}`;
+}
+async function writeApiKeyRecord(accountId, v, hash) {
+    const hashKeyId = sha256Hex(`api-hash:${accountId}`);
+    await storeBlobToKV(hashKeyId, encryptBlob(Buffer.from(JSON.stringify({ v, hash }), 'utf8')));
+}
 /** Resolve the target account for an API-key operation. Email+token is the ONLY authenticated path. */
 async function resolveApiKeyTarget(input) {
     const { email, auth_token, account_id, wallet_id } = input;
@@ -234,20 +282,49 @@ async function resolveApiKeyTarget(input) {
 }
 export async function generateApiKey(input) {
     const targetAccountId = await resolveApiKeyTarget(input);
-    log('info', 'api_key_generated', { account_id: targetAccountId });
-    // Deterministic from the master seed. NOTE: no version component — rotation is
-    // therefore impossible today. That is what made Fix E a full takeover rather
-    // than a nuisance. Versioned derivation lands in v0.5 (§5.9).
-    const apiKeyBytes = deriveKey(`api-key:${targetAccountId}`, 32);
-    const apiKey = `nova_sk_${Buffer.from(apiKeyBytes).toString('base64url').slice(0, 43)}`;
-    const apiKeyHash = sha256Hex(apiKey);
-    const hashKeyId = sha256Hex(`api-hash:${targetAccountId}`);
-    await storeBlobToKV(hashKeyId, encryptBlob(Buffer.from(apiKeyHash, 'utf8')));
+    const existing = await readApiKeyRecord(targetAccountId);
+    // Idempotent: if a key already exists, return the CURRENT version's value.
+    // A legacy holder (v0) re-derives their REAL existing key via the unversioned
+    // salt — no breakage. Viewing/regenerating must NOT rotate a running agent's key.
+    // New accounts start at v1 (versioned from the start).
+    const version = existing ? existing.v : 1;
+    const apiKey = deriveApiKeyValue(targetAccountId, version);
+    // Persist only for brand-new accounts. Legacy v0 holders keep their bare-hash
+    // blob untouched until they explicitly rotate — idempotent generate must not
+    // mutate storage.
+    if (!existing) {
+        await writeApiKeyRecord(targetAccountId, version, sha256Hex(apiKey));
+    }
+    log('info', 'api_key_generated', { account_id: targetAccountId, version });
     return {
         success: true,
         api_key: apiKey,
         account_id: targetAccountId,
+        version,
         message: 'Save this key securely — it will not be shown again.',
+    };
+}
+export async function rotateApiKey(input) {
+    const targetAccountId = await resolveApiKeyTarget(input);
+    const existing = await readApiKeyRecord(targetAccountId);
+    // v0 (legacy) → v1 on first rotate, moving the account onto the versioned
+    // scheme and invalidating the legacy key. A non-existent key just creates v1.
+    const newVersion = existing ? existing.v + 1 : 1;
+    const apiKey = deriveApiKeyValue(targetAccountId, newVersion);
+    // Single atomic overwrite: the instant this lands, the previous version's hash
+    // is gone and the old key stops verifying.
+    await writeApiKeyRecord(targetAccountId, newVersion, sha256Hex(apiKey));
+    log('warn', 'api_key_rotated', {
+        account_id: targetAccountId,
+        from_version: existing?.v ?? -1,
+        to_version: newVersion,
+    });
+    return {
+        success: true,
+        api_key: apiKey,
+        account_id: targetAccountId,
+        version: newVersion,
+        message: 'Key rotated. The previous key is now invalid. Save this key securely.',
     };
 }
 export async function hasApiKey(input) {
@@ -263,11 +340,9 @@ export async function verifyApiKey(input) {
         return { kind: 'invalid_format' };
     }
     const providedHash = sha256Hex(api_key);
-    const hashKeyId = sha256Hex(`api-hash:${account_id}`);
-    const storedHash = await getBlobFromKV(hashKeyId);
-    if (!storedHash)
+    const record = await readApiKeyRecord(account_id);
+    if (!record)
         return { kind: 'no_key_configured' };
-    const storedHashStr = Buffer.from(decryptBlob(storedHash)).toString('utf8');
-    const valid = crypto.timingSafeEqual(Buffer.from(storedHashStr, 'hex'), Buffer.from(providedHash, 'hex'));
+    const valid = crypto.timingSafeEqual(Buffer.from(record.hash, 'hex'), Buffer.from(providedHash, 'hex'));
     return { kind: 'checked', valid, account_id, network: 'mainnet' };
 }
