@@ -1,4 +1,4 @@
-// NOVA contract v0.3.4 - per-file keys + tombstone transactions + hackathon join
+// NOVA contract v0.3.5 - per-file keys w/ delete file semantics + retention-policy config.
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -35,6 +35,10 @@ pub struct Contract {
     // Transaction is stored inside IterableMap, so changing it would brick every
     // existing transaction's borsh bytes (§10). Absent ⇒ legacy IPFS, not deleted.
     tx_meta: LookupMap<String, TxMeta>,
+    // per-group retention window in DAYS. Absent ⇒ no auto-expiry (the
+    // default). Parallel map (same reasoning as tx_meta: Group lives in a
+    // LookupMap and must not change shape).
+    retention_windows: LookupMap<String, u32>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -131,6 +135,7 @@ enum StorageKey {
     JoinableGroups,
     JoinWindows,
     TxMeta,
+    RetentionWindows,
 }
 
 #[derive(Serialize)]
@@ -177,20 +182,19 @@ impl Contract {
             joinable_groups: LookupMap::new(StorageKey::JoinableGroups),
             join_windows: LookupMap::new(StorageKey::JoinWindows),
             tx_meta: LookupMap::new(StorageKey::TxMeta),
+            retention_windows: LookupMap::new(StorageKey::RetentionWindows),
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        // CURRENT deployed state = v0.3.3, the 15 fields below (owner … join_windows),
-        // in this exact order and types. This upgrade adds ONE field (tx_meta), so the
-        // top-level borsh layout changes → migrate is REQUIRED (§10). tx_meta starts
-        // empty; Transaction is UNCHANGED, so every existing transaction still
-        // deserializes — no O(N) rewrite, no brick. joinable_groups/join_windows are
-        // PRESERVED from old state (the previous migrate re-initialised them because
-        // they were new THEN; here they already hold data — e.g. engine-test-evt — and
-        // must carry over, not be wiped).
+        // CURRENT deployed state = v0.3.4, the 16 fields below (owner … tx_meta),
+        // in this exact order and types. This upgrade adds ONE field
+        // (retention_windows) → top-level borsh layout changes → migrate REQUIRED
+        // (§10). retention_windows starts empty (no group auto-expires until an
+        // owner sets a window). EVERYTHING from v0.3.4 — crucially tx_meta (the
+        // Step 4 deletion records) and joinable_groups/join_windows — is PRESERVED.
         #[derive(near_sdk::borsh::BorshDeserialize)]
         #[borsh(crate = "near_sdk::borsh")]
         struct OldContract {
@@ -209,6 +213,7 @@ impl Contract {
             group_transactions: LookupMap<String, StoreVec<String>>,
             joinable_groups: LookupMap<String, bool>,
             join_windows: LookupMap<String, JoinWindow>,
+            tx_meta: LookupMap<String, TxMeta>,
         }
 
         let old: OldContract = env::state_read().expect("failed to read old state");
@@ -229,7 +234,8 @@ impl Contract {
             group_transactions: old.group_transactions,
             joinable_groups: old.joinable_groups,
             join_windows: old.join_windows,
-            tx_meta: LookupMap::new(StorageKey::TxMeta),
+            tx_meta: old.tx_meta,
+            retention_windows: LookupMap::new(StorageKey::RetentionWindows),
         }
     }
 
@@ -574,43 +580,105 @@ impl Contract {
         }
     }
 
-    /// §5.5 — TOMBSTONE a transaction: mark it deleted, NEVER remove the record.
-    /// The audit trail is the point of NOVA (§8.5), so the Transaction and its
-    /// group index stay intact; only the deletion marker is added. Ciphertext
-    /// removal (FastFS null-write) and crypto-shred (KV file-key destruction,
-    /// §5.1/§6.2) happen off-chain; this is the on-chain audit anchor for them.
-    ///
-    /// Owner-gated: group owner OR contract owner (the retention/DeleteMemberFiles
-    /// jobs sign as one of these). No fee for the contract owner, mirroring revoke.
-    #[payable]
-    pub fn tombstone_transaction(&mut self, trans_id: String, reason: DeletionReason) {
-        let tx = self.transactions.get(&trans_id).expect("Transaction not found").clone();
-        let group = self.groups.get(&tx.group_id).expect("Group not found");
-        let caller = env::predecessor_account_id();
-        assert!(caller == group.owner || caller == self.owner, "Only group owner or contract owner can tombstone");
-
-        // Idempotent: re-tombstoning keeps the FIRST deletion record (audit integrity).
+    // Core idempotent tombstone — NO auth (callers authorize). Returns true iff
+    // this call NEWLY tombstoned. Preserves backend/timestamp for FastFS; for a
+    // legacy (no-meta) tx it synthesises an Ipfs meta to hold the record.
+    fn tombstone_one(&mut self, trans_id: String, reason: DeletionReason, caller: AccountId) -> bool {
         let existing = self.tx_meta.get(&trans_id).cloned();
         if let Some(meta) = &existing {
             if meta.deleted.is_some() {
-                log!("Transaction {} already tombstoned", trans_id);
-                return;
+                return false; // already tombstoned — keep the FIRST record
             }
         }
-
-        let record = DeletionRecord {
-            deleted_at: env::block_timestamp(),
-            deleted_by: caller,
-            reason,
-        };
-        // Preserve backend/timestamp if a meta row exists (FastFS); else this is a
-        // legacy IPFS tx being tombstoned — synthesise an Ipfs meta to hold the record.
+        let record = DeletionRecord { deleted_at: env::block_timestamp(), deleted_by: caller, reason };
         let meta = match existing {
             Some(m) => TxMeta { backend: m.backend, timestamp: m.timestamp, deleted: Some(record) },
             None => TxMeta { backend: StorageBackend::Ipfs, timestamp: 0, deleted: Some(record) },
         };
-        self.tx_meta.insert(trans_id.clone(), meta);
-        log!("Tombstoned transaction {}", trans_id);
+        self.tx_meta.insert(trans_id, meta);
+        true
+    }
+
+    /// §5.5 — TOMBSTONE a transaction: mark deleted, NEVER remove (§8.5 audit).
+    /// Owner-gated: group owner OR contract owner. Idempotent (keeps first record).
+    #[payable]
+    pub fn tombstone_transaction(&mut self, trans_id: String, reason: DeletionReason) {
+        let tx = self.transactions.get(&trans_id).expect("Transaction not found").clone();
+        let owner = self.groups.get(&tx.group_id).expect("Group not found").owner.clone();
+        let caller = env::predecessor_account_id();
+        assert!(caller == owner || caller == self.owner, "Only group owner or contract owner can tombstone");
+        if self.tombstone_one(trans_id.clone(), reason, caller) {
+            log!("Tombstoned transaction {}", trans_id);
+        } else {
+            log!("Transaction {} already tombstoned", trans_id);
+        }
+    }
+
+    /// §6.1 / §5.7 — BATCH tombstone. The off-chain retention / DeleteMemberFiles
+    /// driver supplies trans_ids (expired files, or a revoked member's files) and a
+    /// reason; the caller controls batch size for gas. Owner-gated PER tx (group
+    /// owner or contract owner) — fail-fast if any id isn't authorised, so a driver
+    /// only ever batches ids it owns. Returns the count NEWLY tombstoned.
+    #[payable]
+    pub fn tombstone_transactions(&mut self, trans_ids: Vec<String>, reason: DeletionReason) -> u32 {
+        let caller = env::predecessor_account_id();
+        let mut count: u32 = 0;
+        for trans_id in trans_ids.into_iter() {
+            let tx = self.transactions.get(&trans_id).expect("Transaction not found").clone();
+            let owner = self.groups.get(&tx.group_id).expect("Group not found").owner.clone();
+            assert!(caller == owner || caller == self.owner, "Unauthorized for {}", trans_id);
+            if self.tombstone_one(trans_id, reason.clone(), caller.clone()) {
+                count += 1;
+            }
+        }
+        log!("Batch tombstoned {} transaction(s)", count);
+        count
+    }
+
+    /// §6.1 — set (None clears) a group's retention window in DAYS. Owner-gated.
+    /// Absent ⇒ no auto-expiry. Deletes nothing itself: the off-chain driver reads
+    /// get_expired_transactions and calls tombstone_transactions. 0 days ⇒
+    /// everything past the current block expires.
+    #[payable]
+    pub fn set_group_retention(&mut self, group_id: String, retention_days: Option<u32>) {
+        let owner = self.groups.get(&group_id).expect("Group not found").owner.clone();
+        let caller = env::predecessor_account_id();
+        assert_eq!(caller, owner, "Only group owner can set retention");
+        match retention_days {
+            Some(days) => { self.retention_windows.insert(group_id.clone(), days); log!("Retention for {} set to {} days", group_id, days); }
+            None => { self.retention_windows.remove(&group_id); log!("Retention for {} cleared", group_id); }
+        }
+    }
+
+    /// Free view: a group's retention window in days, or None if not configured.
+    pub fn get_group_retention(&self, group_id: String) -> Option<u32> {
+        self.retention_windows.get(&group_id).copied()
+    }
+
+    /// §6.1 — free view: non-deleted FastFS transactions in a group whose upload
+    /// timestamp is older than the retention window. Empty if no window is set.
+    /// Legacy IPFS txs (no meta/timestamp) never auto-expire. The off-chain driver
+    /// feeds this straight into tombstone_transactions.
+    /// NOTE: iterates the group's tx index; add offset/limit pagination before
+    /// groups grow into the many-thousands.
+    pub fn get_expired_transactions(&self, group_id: String) -> Vec<String> {
+        let days = match self.retention_windows.get(&group_id) { Some(d) => *d, None => return Vec::new() };
+        let window_ns = (days as u64).saturating_mul(86_400).saturating_mul(1_000_000_000);
+        let now = env::block_timestamp();
+        let mut expired: Vec<String> = Vec::new();
+        if let Some(tx_ids) = self.group_transactions.get(&group_id) {
+            for tid in tx_ids.iter() {
+                if let Some(meta) = self.tx_meta.get(tid) {
+                    if meta.deleted.is_none()
+                        && meta.backend == StorageBackend::FastFS
+                        && meta.timestamp.saturating_add(window_ns) < now
+                    {
+                        expired.push(tid.clone());
+                    }
+                }
+            }
+        }
+        expired
     }
 
     /// Free view: per-transaction metadata (backend, upload time, deletion record),
