@@ -131,6 +131,31 @@ export function decryptBlob(enc: string | number[]): Uint8Array {
   return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
 }
 
+// Parameterized AES-256-GCM for KEY WRAPPING 
+// encryptBlob/decryptBlob above wrap under TEE_KEY_SECRET (KV blobs at rest);
+// gcmWrap/gcmUnwrap wrap under an ARBITRARY 32-byte key — used to wrap a random
+// per-file key under a group key v{N}. Layout: [12 IV][16 tag][ciphertext] hex.
+export function gcmWrap(data: Uint8Array, key: Uint8Array): string {
+  if (key.length !== 32) throw new Error('gcmWrap: key must be 32 bytes');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(key), iv);
+  const ct = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, ct]).toString('hex');
+}
+ 
+export function gcmUnwrap(enc: string, key: Uint8Array): Uint8Array {
+  if (key.length !== 32) throw new Error('gcmUnwrap: key must be 32 bytes');
+  const raw = Buffer.from(enc, 'hex');
+  if (raw.length < 28) throw new Error('gcmUnwrap: blob too short');
+  const iv = raw.subarray(0, 12);
+  const tag = raw.subarray(12, 28);
+  const ct = raw.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(key), iv);
+  decipher.setAuthTag(tag);
+  return new Uint8Array(Buffer.concat([decipher.update(ct), decipher.final()]));
+}
+
 // ────────────────────────────────────────────────
 // Small hashing helpers (were inlined at every call site)
 // ────────────────────────────────────────────────

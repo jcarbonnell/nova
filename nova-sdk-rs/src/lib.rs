@@ -43,6 +43,10 @@ pub enum NovaError {
     Decryption(String),
     #[error("Token error: {0}")]
     Token(String),
+    #[error("Compression error: {0}")]
+    Compression(String),
+    #[error("Unsupported file format version: {0}")]
+    UnsupportedFormat(u32),
 }
 
 impl From<reqwest::Error> for NovaError {
@@ -245,6 +249,123 @@ fn decrypt_data(encrypted_b64: &str, key_b64: &str) -> Result<Vec<u8>, NovaError
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|e| NovaError::Decryption(format!("Decryption failed: {:?}", e)))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// File-format versioning (roadmap §5.3) — parity with nova-sdk-js
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Every file carries a version in its (KV-stored, MCP-conveyed) metadata; the
+// client dispatches to the right decoder. Pre-v0.5 files have NO metadata ⇒ v0,
+// decoded by the frozen encrypt_data/decrypt_data above (the v0 codec) forever.
+//
+// v1 = v0's AES-256-GCM with an OPTIONAL deflate step. No new cipher. deflate is
+// RFC1950 zlib via flate2 — byte-compatible with the JS CompressionStream/zlib
+// path, so a v1 file written by either SDK decodes in the other.
+// brotli is schema-allowed but NOT implemented (browser CompressionStream lacks
+// it) — deferred, mirroring the JS side.
+
+use serde::Serialize;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FileFormatV1 {
+    pub version: u32, // always 1
+    pub backend: String, // "fastfs" | "ipfs"
+    pub encryption: String, // "AES-256-GCM"
+    pub wrapping: String, // "AES-GCM-keywrap"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>, // "deflate"
+    pub original_size: usize,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EncodeOptions {
+    pub compression: Option<String>, // only "deflate" supported
+    pub content_type: Option<String>,
+    pub backend: Option<String>,
+}
+
+fn deflate_compress(data: &[u8], algo: &str) -> Result<Vec<u8>, NovaError> {
+    if algo != "deflate" {
+        return Err(NovaError::Compression(format!(
+            "compression '{}' is not implemented (deflate only; brotli deferred)", algo
+        )));
+    }
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(data).map_err(|e| NovaError::Compression(e.to_string()))?;
+    enc.finish().map_err(|e| NovaError::Compression(e.to_string()))
+}
+
+fn deflate_decompress(data: &[u8], algo: &str) -> Result<Vec<u8>, NovaError> {
+    if algo != "deflate" {
+        return Err(NovaError::Compression(format!(
+            "compression '{}' is not implemented (deflate only; brotli deferred)", algo
+        )));
+    }
+    use flate2::write::ZlibDecoder;
+    use std::io::Write;
+    let mut dec = ZlibDecoder::new(Vec::new());
+    dec.write_all(data).map_err(|e| NovaError::Compression(e.to_string()))?;
+    dec.finish().map_err(|e| NovaError::Compression(e.to_string()))
+}
+
+/// Encode a file to the v1 format: optionally deflate, then v0 AES-256-GCM.
+/// Returns the base64 ciphertext plus the FileFormatV1 metadata to persist.
+/// `backend` is informational here (Shade/MCP set the authoritative value).
+pub fn encode_file(
+    data: &[u8],
+    key_b64: &str,
+    opts: &EncodeOptions,
+) -> Result<(String, FileFormatV1), NovaError> {
+    let original_size = data.len();
+
+    let payload = match &opts.compression {
+        Some(algo) => deflate_compress(data, algo)?,
+        None => data.to_vec(),
+    };
+
+    let bytes_b64 = encrypt_data(&payload, key_b64)?; // reuse the frozen v0 AES-GCM layout
+
+    let format = FileFormatV1 {
+        version: 1,
+        backend: opts.backend.clone().unwrap_or_else(|| "fastfs".to_string()),
+        encryption: "AES-256-GCM".to_string(),
+        wrapping: "AES-GCM-keywrap".to_string(),
+        compression: opts.compression.clone(),
+        original_size,
+        content_type: opts
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
+    };
+
+    Ok((bytes_b64, format))
+}
+
+/// Decode a file, dispatching on its format version. `None` ⇒ v0 (legacy).
+/// An unknown version errors rather than silently mis-decoding.
+pub fn decode_file(
+    bytes_b64: &str,
+    key_b64: &str,
+    format: Option<&FileFormatV1>,
+) -> Result<Vec<u8>, NovaError> {
+    let version = format.map(|f| f.version).unwrap_or(0);
+
+    match version {
+        0 => decrypt_data(bytes_b64, key_b64),
+        1 => {
+            let payload = decrypt_data(bytes_b64, key_b64)?; // same AES-GCM layout as v0
+            match format.and_then(|f| f.compression.as_deref()) {
+                Some(algo) => deflate_decompress(&payload, algo),
+                None => Ok(payload),
+            }
+        }
+        v => Err(NovaError::UnsupportedFormat(v)),
+    }
 }
 
 /// NOVA SDK - Secure file sharing on NEAR Protocol
@@ -1492,5 +1613,92 @@ mod tests {
         } else {
             println!("test_group has no owner (may not exist)");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use base64::Engine;
+ 
+    fn key_b64() -> String {
+        base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+    }
+    fn body() -> Vec<u8> {
+        "NOVA file body ".repeat(500).into_bytes()
+    }
+ 
+    #[test]
+    fn v0_round_trips() {
+        let k = key_b64();
+        let data = body();
+        let enc = encrypt_data(&data, &k).unwrap();
+        assert_eq!(decrypt_data(&enc, &k).unwrap(), data);
+    }
+ 
+    #[test]
+    fn v1_uncompressed_round_trips() {
+        let k = key_b64();
+        let data = body();
+        let (bytes, format) = encode_file(&data, &k, &EncodeOptions::default()).unwrap();
+        assert_eq!(format.version, 1);
+        assert!(format.compression.is_none());
+        assert_eq!(format.original_size, data.len());
+        assert_eq!(decode_file(&bytes, &k, Some(&format)).unwrap(), data);
+    }
+ 
+    #[test]
+    fn v1_deflate_round_trips_and_shrinks() {
+        let k = key_b64();
+        let data = body();
+        let opts = EncodeOptions { compression: Some("deflate".into()), ..Default::default() };
+        let (bytes, format) = encode_file(&data, &k, &opts).unwrap();
+        assert_eq!(format.compression.as_deref(), Some("deflate"));
+        assert_eq!(decode_file(&bytes, &k, Some(&format)).unwrap(), data);
+ 
+        let (raw, _) = encode_file(&data, &k, &EncodeOptions::default()).unwrap();
+        assert!(bytes.len() < raw.len(), "deflate should shrink compressible data");
+    }
+ 
+    #[test]
+    fn dispatch_absent_and_explicit_v0() {
+        let k = key_b64();
+        let data = body();
+        let enc = encrypt_data(&data, &k).unwrap();
+        assert_eq!(decode_file(&enc, &k, None).unwrap(), data);
+    }
+ 
+    #[test]
+    fn unknown_version_errors() {
+        let k = key_b64();
+        let enc = encrypt_data(&body(), &k).unwrap();
+        let bad = FileFormatV1 {
+            version: 2, backend: "fastfs".into(), encryption: "AES-256-GCM".into(),
+            wrapping: "AES-GCM-keywrap".into(), compression: None,
+            original_size: 0, content_type: "application/octet-stream".into(),
+        };
+        assert!(matches!(decode_file(&enc, &k, Some(&bad)), Err(NovaError::UnsupportedFormat(2))));
+    }
+ 
+    #[test]
+    fn brotli_is_rejected() {
+        let k = key_b64();
+        let opts = EncodeOptions { compression: Some("brotli".into()), ..Default::default() };
+        assert!(matches!(encode_file(&body(), &k, &opts), Err(NovaError::Compression(_))));
+    }
+ 
+    // CROSS-ENV: inflate a zlib blob produced by the JS browser CompressionStream
+    // ('deflate') path. Proves flate2 zlib == WHATWG/Node zlib byte-for-byte, so a
+    // v1 file compressed by either SDK decodes in the other.
+    #[test]
+    fn flate2_decodes_browser_compressionstream_fixture() {
+        let plaintext = "NOVA cross-env deflate fixture ".repeat(40).into_bytes();
+        let fixture_hex = "789cf3f30f7354482eca2f2ed64dcd2b5348494dcb492c495548cbac28292d4a55f01b951e951e951e951e6ad200243cbf90";
+        let blob: Vec<u8> = (0..fixture_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&fixture_hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(deflate_decompress(&blob, "deflate").unwrap(), plaintext);
     }
 }

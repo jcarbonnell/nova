@@ -177,25 +177,40 @@ export function encodeTransaction(
   ]);
 }
 
-// ────────────────────────────────────────────────
-// KV write (signed NEAR transaction)
-// ────────────────────────────────────────────────
+export interface BroadcastResult {
+  transaction?: { hash: string };
+  status?: { Failure?: unknown } & Record<string, unknown>;
+  [k: string]: unknown;
+}
 
-export async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
-  // Covers the WHOLE write: key derivation, access-key/nonce fetch, signing and broadcast_tx_commit.
-  const t0 = Date.now();
+/**
+ * Sign a FunctionCall as the KV-owner signer (nova-sdk.near, salt
+ * 'kv-owner-signer-v1' — the ONLY live Shade signing identity; reused, never
+ * proliferated, per §10) and broadcast_tx_commit. Returns the finalized outcome.
+ *
+ * DEFAULT: throws on an on-chain execution Failure — KV writes MUST succeed.
+ * FastFS __fastdata envelopes have no contract and fail with CodeDoesNotExist
+ * BY DESIGN, so lib/fastfs.ts passes { tolerateFailure: true } to receive the
+ * finalized outcome and assert the expected no-op itself. In that mode SUCCESS
+ * MEANS FINALIZATION, not execution success.
+ *
+ * ⚠️ Live signing path — every KV write goes through here. Harness-gate any edit.
+ */
+export async function signAndBroadcastFunctionCall(
+  receiverId: string,
+  methodName: string,
+  argsBytes: Uint8Array,
+  gas: bigint,
+  deposit: bigint,
+  opts: { tolerateFailure?: boolean } = {},
+): Promise<BroadcastResult> {
   const rpcUrl = KV_RPC_URL;
   const signerAccountId = KV_CONTRACT_OWNER;
 
-
-  // 1. Derive deterministic signer keypair from master seed.
-  //    Salt 'kv-owner-signer-v1' is LIVE — the derived public key is registered
-  //    as an access key on nova-sdk.near. Changing it breaks all KV writes.
   const signerPriv = deriveKey('kv-owner-signer-v1', 32);
   const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
   const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
 
-  // 2. Fetch current nonce + recent block hash for the signer access key
   const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
     jsonrpc: '2.0', id: 'access-key',
     method: 'query',
@@ -218,37 +233,42 @@ export async function storeBlobToKV(key: string, encryptedBlob: string): Promise
   const nonce = BigInt(accessKeyResult.nonce) + 1n;
   const blockHash = bs58.decode(accessKeyResult.block_hash);
 
-  // 3. Encode FunctionCall action + full transaction.
-  //    encryptBlob returns the COMPLETE stored layout as a single hex string.
-  const rawBytes = Buffer.from(encryptedBlob, 'hex');
-  const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
-  const action = encodeFunctionCallAction('store', callArgs, 30_000_000_000_000n, 0n);
-  const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, KV_CONTRACT, blockHash, [action]);
+  const action = encodeFunctionCallAction(methodName, argsBytes, gas, deposit);
+  const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, receiverId, blockHash, [action]);
 
-  // 4. Hash and sign (NEAR signs SHA-256 of the borsh-encoded transaction)
   const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
   const signature = await ed25519.signAsync(txHash, signerPriv);
+  const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
 
-  // 5. Borsh-encode SignedTransaction = Transaction + Signature
-  const signedTx = Buffer.concat([
-    txBytes,
-    Buffer.from([0]),  // Signature enum: 0 = ed25519
-    signature,         // 64 bytes
-  ]);
-
-  // 6. Broadcast
   const broadcastResult = await rpcCallWithRetry(rpcUrl, {
     jsonrpc: '2.0', id: 'broadcast',
     method: 'broadcast_tx_commit',
     params: [signedTx.toString('base64')],
-  }) as { transaction?: { hash: string }; status?: { Failure?: unknown } };
+  }) as BroadcastResult;
 
-  if (broadcastResult?.status?.Failure) {
+  if (broadcastResult?.status?.Failure && !opts.tolerateFailure) {
     throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
   }
+  return broadcastResult;
+}
+
+// ────────────────────────────────────────────────
+// KV write (signed NEAR transaction)
+// ────────────────────────────────────────────────
+
+export async function storeBlobToKV(key: string, encryptedBlob: string): Promise<void> {
+  const t0 = Date.now();
+  // encryptBlob returns the COMPLETE stored layout as a single hex string.
+  const rawBytes = Buffer.from(encryptedBlob, 'hex');
+  const callArgs = Buffer.from(JSON.stringify({ key, encrypted_blob: Array.from(rawBytes) }));
+
+  const outcome = await signAndBroadcastFunctionCall(
+    KV_CONTRACT, 'store', callArgs, 30_000_000_000_000n, 0n,
+  );
+
   log('info', 'kv_store_committed', {
     key_id_hash: key.slice(0, 12),
-    txHash: broadcastResult?.transaction?.hash,
+    txHash: outcome?.transaction?.hash,
     duration_ms: Date.now() - t0,
   });
 }

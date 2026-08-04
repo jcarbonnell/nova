@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NovaSdk = exports.NovaError = void 0;
+exports.NovaSdk = exports.decryptV0 = exports.encryptV0 = exports.decodeFile = exports.encodeFile = exports.NovaError = void 0;
 // nova/nova-sdk-js/src/index.ts
 const providers_1 = require("@near-js/providers");
 const axios_1 = __importDefault(require("axios"));
@@ -13,67 +13,20 @@ const DEFAULT_MCP_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.d
 const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
 const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
 const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
-class NovaError extends Error {
-    cause;
-    constructor(message, cause) {
-        super(message);
-        this.cause = cause;
-        this.name = 'NovaError';
-    }
-}
-exports.NovaError = NovaError;
-// encryption helpers (AES-256-GCM)
-async function encryptData(data, keyB64) {
-    // Node.js environment
-    if (typeof globalThis.crypto?.subtle === 'undefined') {
-        const crypto = await import('crypto');
-        const keyBytes = buffer_1.Buffer.from(keyB64, 'base64');
-        const iv = crypto.randomBytes(12);
-        const cipher = crypto.createCipheriv('aes-256-gcm', keyBytes, iv);
-        const encrypted = buffer_1.Buffer.concat([cipher.update(data), cipher.final()]);
-        const authTag = cipher.getAuthTag();
-        // Format: IV (12) + ciphertext + authTag (16)
-        const result = buffer_1.Buffer.concat([iv, encrypted, authTag]);
-        return result.toString('base64');
-    }
-    // Browser/Deno: use SubtleCrypto
-    const keyBytes = new Uint8Array(buffer_1.Buffer.from(keyB64, 'base64'));
-    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
-    // Create a plain ArrayBuffer copy to avoid TypeScript issues with Buffer's ArrayBufferLike
-    const dataArrayBuffer = new ArrayBuffer(data.length);
-    const dataView = new Uint8Array(dataArrayBuffer);
-    for (let i = 0; i < data.length; i++) {
-        dataView[i] = data[i];
-    }
-    const encrypted = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, dataArrayBuffer);
-    // Combine IV + ciphertext (which includes auth tag in SubtleCrypto)
-    const result = new Uint8Array(iv.length + encrypted.byteLength);
-    result.set(iv, 0);
-    result.set(new Uint8Array(encrypted), iv.length);
-    return buffer_1.Buffer.from(result).toString('base64');
-}
-async function decryptData(encryptedB64, keyB64) {
-    const encryptedBytes = buffer_1.Buffer.from(encryptedB64, 'base64');
-    const keyBytes = buffer_1.Buffer.from(keyB64, 'base64');
-    // For Node.js environment
-    if (typeof globalThis.crypto?.subtle === 'undefined') {
-        const crypto = await import('crypto');
-        const iv = encryptedBytes.subarray(0, 12);
-        const authTag = encryptedBytes.subarray(encryptedBytes.length - 16);
-        const ciphertext = encryptedBytes.subarray(12, encryptedBytes.length - 16);
-        const decipher = crypto.createDecipheriv('aes-256-gcm', keyBytes, iv);
-        decipher.setAuthTag(authTag);
-        const decrypted = buffer_1.Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-        return decrypted;
-    }
-    // Browser/Deno: use SubtleCrypto
-    const iv = encryptedBytes.subarray(0, 12);
-    const ciphertext = encryptedBytes.subarray(12); // Includes auth tag
-    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
-    const decrypted = await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertext);
-    return buffer_1.Buffer.from(decrypted);
-}
+// NovaError moved to ./errors.js; re-exported below so the public API is unchanged.
+var errors_js_1 = require("./errors.js");
+Object.defineProperty(exports, "NovaError", { enumerable: true, get: function () { return errors_js_1.NovaError; } });
+const errors_js_2 = require("./errors.js");
+// File-format codec (v0 legacy + v1) and the version dispatcher.
+var format_js_1 = require("./format.js");
+Object.defineProperty(exports, "encodeFile", { enumerable: true, get: function () { return format_js_1.encodeFile; } });
+Object.defineProperty(exports, "decodeFile", { enumerable: true, get: function () { return format_js_1.decodeFile; } });
+// v0 wire codec is the frozen legacy path (kept as the current upload/retrieve
+// codec until the post-Step-4 wiring flip switches new uploads to v1).
+const v0_js_1 = require("./legacy/v0.js");
+var v0_js_2 = require("./legacy/v0.js");
+Object.defineProperty(exports, "encryptV0", { enumerable: true, get: function () { return v0_js_2.encryptV0; } });
+Object.defineProperty(exports, "decryptV0", { enumerable: true, get: function () { return v0_js_2.decryptV0; } });
 function computeSha256(data) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const crypto = require('crypto');
@@ -129,7 +82,7 @@ class NovaSdk {
      */
     constructor(accountId, config = {}) {
         if (!accountId || typeof accountId !== 'string') {
-            throw new NovaError('accountId required: get yours at nova-sdk.com');
+            throw new errors_js_2.NovaError('accountId required: get yours at nova-sdk.com');
         }
         this.accountId = accountId;
         this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
@@ -142,7 +95,7 @@ class NovaSdk {
         this.networkId = this.detectNetwork();
         // Validate mainnet contract
         if (this.networkId === 'mainnet' && !this.isValidMainnetContract()) {
-            throw new NovaError(`Invalid mainnet contract: ${this.contractId}. Must end with .near`);
+            throw new errors_js_2.NovaError(`Invalid mainnet contract: ${this.contractId}. Must end with .near`);
         }
         if (this.networkId === 'mainnet') {
             console.warn('⚠️  MAINNET MODE: Operations use real NEAR tokens.');
@@ -163,7 +116,7 @@ class NovaSdk {
         // Fetch new token
         console.log('🔑 Fetching session token for:', this.accountId);
         if (!this.apiKey) {
-            throw new NovaError('API key required. Get yours at nova-sdk.com');
+            throw new errors_js_2.NovaError('API key required. Get yours at nova-sdk.com');
         }
         try {
             const response = await axios_1.default.post(`${this.authUrl}/api/auth/session-token`, { account_id: this.accountId }, {
@@ -175,7 +128,7 @@ class NovaSdk {
             });
             const { token, expires_in, account_id } = response.data;
             if (!token) {
-                throw new NovaError('No token in response - account may not exist');
+                throw new errors_js_2.NovaError('No token in response - account may not exist');
             }
             // Verify account_id matches
             if (account_id && account_id !== this.accountId) {
@@ -195,11 +148,11 @@ class NovaSdk {
                 const status = e.response?.status;
                 const msg = e.response?.data?.error || e.message;
                 if (status === 404) {
-                    throw new NovaError(`Account '${this.accountId}' not found. Create one at nova-sdk.com first.`, e);
+                    throw new errors_js_2.NovaError(`Account '${this.accountId}' not found. Create one at nova-sdk.com first.`, e);
                 }
-                throw new NovaError(`Failed to get session token: ${msg}`, e);
+                throw new errors_js_2.NovaError(`Failed to get session token: ${msg}`, e);
             }
-            throw new NovaError(`Failed to get session token: ${e}`, e);
+            throw new errors_js_2.NovaError(`Failed to get session token: ${e}`, e);
         }
     }
     parseExpiry(expiresIn) {
@@ -275,9 +228,9 @@ class NovaSdk {
         catch (e) {
             if (axios_1.default.isAxiosError(e)) {
                 const errorMsg = e.response?.data?.error || e.response?.data?.message || e.message;
-                throw new NovaError(`MCP tool '${toolName}' failed: ${errorMsg}`, e);
+                throw new errors_js_2.NovaError(`MCP tool '${toolName}' failed: ${errorMsg}`, e);
             }
-            throw new NovaError(`MCP tool '${toolName}' failed: ${e}`, e);
+            throw new errors_js_2.NovaError(`MCP tool '${toolName}' failed: ${e}`, e);
         }
     }
     // Core NOVA Operations (via MCP)
@@ -356,7 +309,7 @@ class NovaSdk {
         });
         const { upload_id, key } = prepareResult;
         // Step 2: Encrypt data locally
-        const encryptedB64 = await encryptData(data, key);
+        const encryptedB64 = await (0, v0_js_1.encryptV0)(data, key);
         // Step 3: Compute hash of plaintext
         const fileHash = await computeSha256Async(data);
         // Step 4: Finalize upload via MCP tool
@@ -384,7 +337,7 @@ class NovaSdk {
      */
     async retrieve(groupId, ipfsHash) {
         if (!ipfsHash.startsWith('Qm') && !ipfsHash.startsWith('bafy')) {
-            throw new NovaError(`Invalid CID: ${ipfsHash}`);
+            throw new errors_js_2.NovaError(`Invalid CID: ${ipfsHash}`);
         }
         // Step 1: Get key and encrypted data from MCP
         const prepareResult = await this.callMcpTool('prepare_retrieve', {
@@ -393,7 +346,7 @@ class NovaSdk {
         });
         const { key, encrypted_b64, ipfs_hash, group_id } = prepareResult;
         // Step 2: Decrypt data locally
-        const decryptedData = await decryptData(encrypted_b64, key);
+        const decryptedData = await (0, v0_js_1.decryptV0)(encrypted_b64, key);
         return {
             data: decryptedData,
             ipfs_hash,
@@ -408,7 +361,7 @@ class NovaSdk {
             return accountView.amount.toString();
         }
         catch (e) {
-            throw new NovaError(`Balance query error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Balance query error: ${e}`, e);
         }
     }
     async isAuthorized(groupId, userId) {
@@ -426,7 +379,7 @@ class NovaSdk {
             return JSON.parse(decoded);
         }
         catch (e) {
-            throw new NovaError(`Authorization check error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Authorization check error: ${e}`, e);
         }
     }
     async getGroupChecksum(groupId) {
@@ -443,7 +396,7 @@ class NovaSdk {
             return decoded ? JSON.parse(decoded) : null;
         }
         catch (e) {
-            throw new NovaError(`Checksum fetch error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Checksum fetch error: ${e}`, e);
         }
     }
     async getGroupOwner(groupId) {
@@ -460,7 +413,7 @@ class NovaSdk {
             return decoded ? JSON.parse(decoded) : null;
         }
         catch (e) {
-            throw new NovaError(`Owner fetch error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Owner fetch error: ${e}`, e);
         }
     }
     async estimateFee(action) {
@@ -477,7 +430,7 @@ class NovaSdk {
             return BigInt(decoded);
         }
         catch (e) {
-            throw new NovaError(`Fee estimate error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Fee estimate error: ${e}`, e);
         }
     }
     async getTransactionsForGroup(groupId, userId) {
@@ -495,7 +448,7 @@ class NovaSdk {
             return JSON.parse(decoded);
         }
         catch (e) {
-            throw new NovaError(`Transactions query error: ${e}`, e);
+            throw new errors_js_2.NovaError(`Transactions query error: ${e}`, e);
         }
     }
     // Utility Methods

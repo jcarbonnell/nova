@@ -1,16 +1,14 @@
-// NOVA contract v0.3.1 - multi-user w/ Shade/TEEs + pay-per-action fees
+// NOVA contract v0.3.4 - per-file keys + tombstone transactions + hackathon join
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use near_sdk::serde_json;
-use near_sdk::serde_json::json;
 use near_sdk::NearToken;
 use near_sdk::json_types::U64;
 use hex;
 use near_sdk::base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use sha2::{Sha256, Digest};
 use std::str::FromStr;
 
 // Define the contract structure
@@ -32,6 +30,11 @@ pub struct Contract {
     group_transactions: LookupMap<String, StoreVec<String>>,
     joinable_groups: LookupMap<String, bool>,
     join_windows: LookupMap<String, JoinWindow>,
+    // per-transaction metadata (backend, upload timestamp, deletion
+    // tombstone). Parallel map keyed by trans_id, NOT fields on Transaction:
+    // Transaction is stored inside IterableMap, so changing it would brick every
+    // existing transaction's borsh bytes (§10). Absent ⇒ legacy IPFS, not deleted.
+    tx_meta: LookupMap<String, TxMeta>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -46,7 +49,56 @@ pub struct Transaction {
     group_id: String,
     user_id: String,
     file_hash: String,
+    // Historically the IPFS CID; since §5.5 it holds the storage LOCATION for any
+    // backend (IPFS CID or FastFS ref). Name kept for borsh + JSON compatibility
+    // with existing consumers; `backend` in TxMeta disambiguates interpretation.
     ipfs_hash: String,
+}
+
+// §5.5 storage backends. Ipfs = legacy only (no new IPFS uploads, §5.2).
+// APPEND-ONLY: never reorder/remove variants — the borsh discriminant is stored
+// inside TxMeta and reordering would misread existing values (§10).
+#[derive(BorshDeserialize, BorshSerialize, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub enum StorageBackend { FastFS, Ipfs }
+
+// §5.5 deletion reasons. APPEND-ONLY (see StorageBackend).
+#[derive(BorshDeserialize, BorshSerialize, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub enum DeletionReason { MemberRevocation, OwnerRequest, RetentionPolicy, ComplianceRequest }
+
+// Stored deletion record (borsh). u64 timestamp; the view exposes it as a string.
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
+pub struct DeletionRecord {
+    deleted_at: u64,
+    deleted_by: AccountId,
+    reason: DeletionReason,
+}
+
+// Stored per-transaction metadata (borsh), keyed by trans_id in tx_meta.
+// Absent ⇒ legacy IPFS, upload time unknown, not deleted.
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
+pub struct TxMeta {
+    backend: StorageBackend,
+    timestamp: u64,
+    deleted: Option<DeletionRecord>,
+}
+
+// JSON views (u64 → string, NEAR convention — avoids JS 2^53 precision loss).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub struct DeletionRecordView {
+    pub deleted_at: String,
+    pub deleted_by: String,
+    pub reason: DeletionReason,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub struct TxMetaView {
+    pub backend: StorageBackend,
+    pub timestamp: String,
+    pub deleted: Option<DeletionRecordView>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -78,6 +130,7 @@ enum StorageKey {
     GroupTransactions,
     JoinableGroups,
     JoinWindows,
+    TxMeta,
 }
 
 #[derive(Serialize)]
@@ -123,13 +176,21 @@ impl Contract {
             group_transactions: LookupMap::new(StorageKey::GroupTransactions),
             joinable_groups: LookupMap::new(StorageKey::JoinableGroups),
             join_windows: LookupMap::new(StorageKey::JoinWindows),
+            tx_meta: LookupMap::new(StorageKey::TxMeta),
         }
     }
 
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        // Old state shape: the exact 13 fields from before this upgrade, same order, same types.
+        // CURRENT deployed state = v0.3.3, the 15 fields below (owner … join_windows),
+        // in this exact order and types. This upgrade adds ONE field (tx_meta), so the
+        // top-level borsh layout changes → migrate is REQUIRED (§10). tx_meta starts
+        // empty; Transaction is UNCHANGED, so every existing transaction still
+        // deserializes — no O(N) rewrite, no brick. joinable_groups/join_windows are
+        // PRESERVED from old state (the previous migrate re-initialised them because
+        // they were new THEN; here they already hold data — e.g. engine-test-evt — and
+        // must carry over, not be wiped).
         #[derive(near_sdk::borsh::BorshDeserialize)]
         #[borsh(crate = "near_sdk::borsh")]
         struct OldContract {
@@ -146,6 +207,8 @@ impl Contract {
             owned_groups: LookupMap<AccountId, StoreVec<String>>,
             member_groups: LookupMap<AccountId, StoreVec<String>>,
             group_transactions: LookupMap<String, StoreVec<String>>,
+            joinable_groups: LookupMap<String, bool>,
+            join_windows: LookupMap<String, JoinWindow>,
         }
 
         let old: OldContract = env::state_read().expect("failed to read old state");
@@ -164,8 +227,9 @@ impl Contract {
             owned_groups: old.owned_groups,
             member_groups: old.member_groups,
             group_transactions: old.group_transactions,
-            joinable_groups: LookupMap::new(StorageKey::JoinableGroups),
-            join_windows: LookupMap::new(StorageKey::JoinWindows),
+            joinable_groups: old.joinable_groups,
+            join_windows: old.join_windows,
+            tx_meta: LookupMap::new(StorageKey::TxMeta),
         }
     }
 
@@ -496,6 +560,7 @@ impl Contract {
             *self.joinable_groups.get(&group_id).unwrap_or(&false),
             "Group is not joinable (public view refused)"
         );
+        // Use the per-group index to avoid scanning all transactions:
         if let Some(tx_ids) = self.group_transactions.get(&group_id) {
             let mut out: Vec<Transaction> = Vec::new();
             for tx_id in tx_ids.iter() {
@@ -507,6 +572,64 @@ impl Contract {
         } else {
             Vec::new()
         }
+    }
+
+    /// §5.5 — TOMBSTONE a transaction: mark it deleted, NEVER remove the record.
+    /// The audit trail is the point of NOVA (§8.5), so the Transaction and its
+    /// group index stay intact; only the deletion marker is added. Ciphertext
+    /// removal (FastFS null-write) and crypto-shred (KV file-key destruction,
+    /// §5.1/§6.2) happen off-chain; this is the on-chain audit anchor for them.
+    ///
+    /// Owner-gated: group owner OR contract owner (the retention/DeleteMemberFiles
+    /// jobs sign as one of these). No fee for the contract owner, mirroring revoke.
+    #[payable]
+    pub fn tombstone_transaction(&mut self, trans_id: String, reason: DeletionReason) {
+        let tx = self.transactions.get(&trans_id).expect("Transaction not found").clone();
+        let group = self.groups.get(&tx.group_id).expect("Group not found");
+        let caller = env::predecessor_account_id();
+        assert!(caller == group.owner || caller == self.owner, "Only group owner or contract owner can tombstone");
+
+        // Idempotent: re-tombstoning keeps the FIRST deletion record (audit integrity).
+        let existing = self.tx_meta.get(&trans_id).cloned();
+        if let Some(meta) = &existing {
+            if meta.deleted.is_some() {
+                log!("Transaction {} already tombstoned", trans_id);
+                return;
+            }
+        }
+
+        let record = DeletionRecord {
+            deleted_at: env::block_timestamp(),
+            deleted_by: caller,
+            reason,
+        };
+        // Preserve backend/timestamp if a meta row exists (FastFS); else this is a
+        // legacy IPFS tx being tombstoned — synthesise an Ipfs meta to hold the record.
+        let meta = match existing {
+            Some(m) => TxMeta { backend: m.backend, timestamp: m.timestamp, deleted: Some(record) },
+            None => TxMeta { backend: StorageBackend::Ipfs, timestamp: 0, deleted: Some(record) },
+        };
+        self.tx_meta.insert(trans_id.clone(), meta);
+        log!("Tombstoned transaction {}", trans_id);
+    }
+
+    /// Free view: per-transaction metadata (backend, upload time, deletion record),
+    /// or None for legacy transactions with no meta row.
+    pub fn get_transaction_meta(&self, trans_id: String) -> Option<TxMetaView> {
+        self.tx_meta.get(&trans_id).map(|m| TxMetaView {
+            backend: m.backend.clone(),
+            timestamp: m.timestamp.to_string(),
+            deleted: m.deleted.as_ref().map(|d| DeletionRecordView {
+                deleted_at: d.deleted_at.to_string(),
+                deleted_by: d.deleted_by.to_string(),
+                reason: d.reason.clone(),
+            }),
+        })
+    }
+
+    /// Free view: is this transaction tombstoned?
+    pub fn is_tombstoned(&self, trans_id: String) -> bool {
+        self.tx_meta.get(&trans_id).map_or(false, |m| m.deleted.is_some())
     }
 
     // Returns list of group members
@@ -525,7 +648,7 @@ impl Contract {
     }
 
     #[payable]
-    pub fn record_transaction(&mut self, group_id: String, user_id: AccountId, file_hash: String, ipfs_hash: String) -> String {
+    pub fn record_transaction(&mut self, group_id: String, user_id: AccountId, file_hash: String, ipfs_hash: String, backend: Option<StorageBackend>) -> String {
         let attached = env::attached_deposit().as_yoctonear();
         self.collect_fee("record_transaction", attached);
         
@@ -563,6 +686,17 @@ impl Contract {
             self.group_transactions.insert(gid.clone(), gtx);
         }
         
+        // record metadata for FastFS uploads (backend + upload timestamp,
+        // consumed by §6.2 retention). Legacy/absent backend ⇒ IPFS ⇒ no meta row
+        // (absence IS the IPFS-not-deleted default, so legacy callers cost nothing).
+        if backend == Some(StorageBackend::FastFS) {
+            self.tx_meta.insert(trans_id.clone(), TxMeta {
+                backend: StorageBackend::FastFS,
+                timestamp: env::block_timestamp(),
+                deleted: None,
+            });
+        }
+
         log!("Transaction recorded: {}", trans_id);
         trans_id
     }

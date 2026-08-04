@@ -27,10 +27,10 @@ export interface AuthStatusResult {
     near_account_id?: string;
     authorized_for_group?: boolean;
 }
-export declare class NovaError extends Error {
-    cause?: Error | undefined;
-    constructor(message: string, cause?: Error | undefined);
-}
+export { NovaError } from './errors.js';
+export { encodeFile, decodeFile } from './format.js';
+export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
+export { encryptV0, decryptV0 } from './legacy/v0.js';
 export declare class NovaSdk {
     private provider;
     private tokenCache;

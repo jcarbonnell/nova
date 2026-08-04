@@ -81,102 +81,18 @@ interface PrepareRetrieveResponse {
   group_id: string;
 }
 
-export class NovaError extends Error {
-  constructor(message: string, public cause?: Error) {
-    super(message);
-    this.name = 'NovaError';
-  }
-}
+// NovaError moved to ./errors.js; re-exported below so the public API is unchanged.
+export { NovaError } from './errors.js';
+import { NovaError } from './errors.js';
 
-// encryption helpers (AES-256-GCM)
-async function encryptData(data: Buffer, keyB64: string): Promise<string> {
-  // Node.js environment
-  if (typeof globalThis.crypto?.subtle === 'undefined') {
-    const crypto = await import('crypto');
-    const keyBytes = Buffer.from(keyB64, 'base64');
-    const iv = crypto.randomBytes(12);
-    
-    const cipher = crypto.createCipheriv('aes-256-gcm', keyBytes, iv);
-    const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-    
-    // Format: IV (12) + ciphertext + authTag (16)
-    const result = Buffer.concat([iv, encrypted, authTag]);
-    return result.toString('base64');
-  }
-  
-  // Browser/Deno: use SubtleCrypto
-  const keyBytes = new Uint8Array(Buffer.from(keyB64, 'base64'));
-  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-  
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'AES-GCM' },
-    false,
-    ['encrypt']
-  );
-  
-  // Create a plain ArrayBuffer copy to avoid TypeScript issues with Buffer's ArrayBufferLike
-  const dataArrayBuffer = new ArrayBuffer(data.length);
-  const dataView = new Uint8Array(dataArrayBuffer);
-  for (let i = 0; i < data.length; i++) {
-    dataView[i] = data[i];
-  }
-  
-  const encrypted = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    cryptoKey,
-    dataArrayBuffer
-  );
-  
-  // Combine IV + ciphertext (which includes auth tag in SubtleCrypto)
-  const result = new Uint8Array(iv.length + encrypted.byteLength);
-  result.set(iv, 0);
-  result.set(new Uint8Array(encrypted), iv.length);
-  
-  return Buffer.from(result).toString('base64');
-}
+// File-format codec (v0 legacy + v1) and the version dispatcher.
+export { encodeFile, decodeFile } from './format.js';
+export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
 
-async function decryptData(encryptedB64: string, keyB64: string): Promise<Buffer> {
-  const encryptedBytes = Buffer.from(encryptedB64, 'base64');
-  const keyBytes = Buffer.from(keyB64, 'base64');
-  
-  // For Node.js environment
-  if (typeof globalThis.crypto?.subtle === 'undefined') {
-    const crypto = await import('crypto');
-    
-    const iv = encryptedBytes.subarray(0, 12);
-    const authTag = encryptedBytes.subarray(encryptedBytes.length - 16);
-    const ciphertext = encryptedBytes.subarray(12, encryptedBytes.length - 16);
-    
-    const decipher = crypto.createDecipheriv('aes-256-gcm', keyBytes, iv);
-    decipher.setAuthTag(authTag);
-    
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return decrypted;
-  }
-  
-  // Browser/Deno: use SubtleCrypto
-  const iv = encryptedBytes.subarray(0, 12);
-  const ciphertext = encryptedBytes.subarray(12); // Includes auth tag
-  
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'AES-GCM' },
-    false,
-    ['decrypt']
-  );
-  
-  const decrypted = await globalThis.crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    cryptoKey,
-    ciphertext
-  );
-  
-  return Buffer.from(decrypted);
-}
+// v0 wire codec is the frozen legacy path (kept as the current upload/retrieve
+// codec until the post-Step-4 wiring flip switches new uploads to v1).
+import { encryptV0 as encryptData, decryptV0 as decryptData } from './legacy/v0.js';
+export { encryptV0, decryptV0 } from './legacy/v0.js';
 
 function computeSha256(data: Buffer): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
