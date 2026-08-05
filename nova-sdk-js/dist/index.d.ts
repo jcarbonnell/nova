@@ -89,6 +89,7 @@ export declare class NovaSdk {
     authStatus(groupId?: string): Promise<AuthStatusResult>;
     registerGroup(groupId: string): Promise<string>;
     addGroupMember(groupId: string, memberId: string): Promise<string>;
+    setGroupRetention(groupId: string, retentionDays: number | null): Promise<string>;
     /**
      * Self-join an OPEN group (hackathon submission groups). The caller joins
      * themselves — no owner action needed. Only works on groups the owner has
