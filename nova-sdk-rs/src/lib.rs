@@ -735,6 +735,20 @@ impl NovaSdk {
         Ok(response.message.unwrap_or_else(|| format!("Added {} to group '{}'", member_id, group_id)))
     }
 
+    /// Set (or clear, with None) a group's retention window in days (§6.1). Owner only.
+    /// None ⇒ no auto-expiry (the default). Configures the window only — deletes nothing.
+    pub async fn set_group_retention(&self, group_id: &str, retention_days: Option<u32>) -> Result<String, NovaError> {
+        let args = json!({
+            "group_id": group_id,
+            "retention_days": retention_days
+        });
+        let response: McpMessageResponse = self.call_mcp_tool("set_group_retention", args).await?;
+        Ok(response.message.unwrap_or_else(|| match retention_days {
+            Some(d) => format!("Set retention for group '{}' to {} days", group_id, d),
+            None => format!("Cleared retention for group '{}'", group_id),
+        }))
+    }
+
     /// Self-join an OPEN group (hackathon submission groups). The caller joins
     /// themselves — no owner action needed. Only works on groups the owner has
     /// opened for join. Idempotent-safe: returns Ok if already a member.

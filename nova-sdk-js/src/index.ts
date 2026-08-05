@@ -371,6 +371,21 @@ export class NovaSdk {
     return result.message || `Added ${memberId} to group '${groupId}'`;
   }
 
+  // Set (or clear, with null) a group's retention window in days (§6.1). Owner only.
+  // null ⇒ no auto-expiry (the default). Files past the window become eligible for
+  // retention-driven deletion; this configures the window only, it deletes nothing.
+  async setGroupRetention(groupId: string, retentionDays: number | null): Promise<string> {
+    const result = await this.callMcpTool<{ message?: string }>('set_group_retention', {
+      group_id: groupId,
+      retention_days: retentionDays,
+    });
+    return result.message || (
+      retentionDays === null
+        ? `Cleared retention for group '${groupId}'`
+        : `Set retention for group '${groupId}' to ${retentionDays} days`
+    );
+  }
+
   /**
    * Self-join an OPEN group (hackathon submission groups). The caller joins
    * themselves — no owner action needed. Only works on groups the owner has

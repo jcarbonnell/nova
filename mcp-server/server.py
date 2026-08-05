@@ -531,6 +531,24 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
     )
     return f"Added {member_id} to group '{group_id}'"
 
+@expose_as_rest("/tools/set_group_retention")
+@require_auth
+async def set_group_retention(ctx: Context, user: dict, group_id: str, retention_days: int | None = None) -> str:
+    # §6.1 retention window (contract v0.3.5), owner-gated on-chain. retention_days
+    # = None clears the window (retention = forever, the default). No protocol fee:
+    # set_group_retention isn't in the fees map, so estimate_fee returns 0. This
+    # configures the window only — it deletes nothing; the (Ping-driven) retention
+    # driver reads get_expired_transactions and does the deleting.
+    await call_contract(
+        user=user,
+        method_name="set_group_retention",
+        args={"group_id": group_id, "retention_days": retention_days},
+        fee_action="set_group_retention",
+    )
+    if retention_days is None:
+        return f"Cleared retention window for group '{group_id}'"
+    return f"Set retention for group '{group_id}' to {retention_days} days"
+
 @expose_as_rest("/tools/join_group")
 @require_auth
 async def join_group(ctx: Context, user: dict, group_id: str) -> str:
