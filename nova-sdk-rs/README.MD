@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.1.1
+**Version:** 1.2.0
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
