@@ -3,6 +3,20 @@ import { JsonRpcProvider } from '@near-js/providers';
 import axios from 'axios';
 import { Buffer } from 'buffer';
 
+// NovaError moved to ./errors.js; re-exported below so the public API is unchanged.
+export { NovaError } from './errors.js';
+import { NovaError } from './errors.js';
+
+// File-format codec (v0 legacy + v1) and the version dispatcher.
+export { encodeFile, decodeFile } from './format.js';
+export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
+
+// v0 wire codec is the frozen legacy path (kept as the current upload/retrieve
+// codec until the post-Step-4 wiring flip switches new uploads to v1).
+import { encryptV0 as encryptData, decryptV0 as decryptData } from './legacy/v0.js';
+import { encodeFile, decodeFile, FileFormat } from './format.js';
+export { encryptV0, decryptV0 } from './legacy/v0.js';
+
 // Infrastructure endpoints (public, immutable)
 const DEFAULT_MCP_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
 const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
@@ -69,6 +83,7 @@ interface PrepareUploadResponse {
 }
 
 interface FinalizeUploadResponse {
+  location: string;
   cid: string;
   trans_id: string;
   file_hash: string;
@@ -78,21 +93,10 @@ interface PrepareRetrieveResponse {
   key: string;
   encrypted_b64: string;
   ipfs_hash: string;
+  location: string;
   group_id: string;
+  format: FileFormat | null;
 }
-
-// NovaError moved to ./errors.js; re-exported below so the public API is unchanged.
-export { NovaError } from './errors.js';
-import { NovaError } from './errors.js';
-
-// File-format codec (v0 legacy + v1) and the version dispatcher.
-export { encodeFile, decodeFile } from './format.js';
-export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
-
-// v0 wire codec is the frozen legacy path (kept as the current upload/retrieve
-// codec until the post-Step-4 wiring flip switches new uploads to v1).
-import { encryptV0 as encryptData, decryptV0 as decryptData } from './legacy/v0.js';
-export { encryptV0, decryptV0 } from './legacy/v0.js';
 
 function computeSha256(data: Buffer): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -428,10 +432,12 @@ export class NovaSdk {
 
     const { upload_id, key } = prepareResult;
 
-    // Step 2: Encrypt data locally
-    const encryptedB64 = await encryptData(data, key);
+    // Step 2: Encode to the v1 format (optional deflate + v0 AES-GCM) with the
+    // per-file key from prepare_upload. `format` is persisted by Shade and returned
+    // at retrieve so decodeFile can dispatch.
+    const { bytes_b64, format } = await encodeFile(data, key);
 
-    // Step 3: Compute hash of plaintext
+    // Step 3: Compute hash of PLAINTEXT (the on-chain integrity anchor — unchanged).
     const fileHash = await computeSha256Async(data);
 
     // Step 4: Finalize upload via MCP tool
@@ -439,13 +445,14 @@ export class NovaSdk {
       'finalize_upload',
       {
         upload_id,
-        encrypted_data: encryptedB64,
+        encrypted_data: bytes_b64,
         file_hash: fileHash,
+        format,
       }
     );
 
     return {
-      cid: finalizeResult.cid,
+      cid: finalizeResult.location ?? finalizeResult.cid,
       trans_id: finalizeResult.trans_id,
       file_hash: finalizeResult.file_hash,
     };
@@ -464,22 +471,24 @@ export class NovaSdk {
    */
   async retrieve(
     groupId: string, 
-    ipfsHash: string
+    ref: string
   ): Promise<RetrieveResult> {
-    if (!ipfsHash.startsWith('Qm') && !ipfsHash.startsWith('bafy')) {
-      throw new NovaError(`Invalid CID: ${ipfsHash}`);
-    }
+    // `ref` is whatever the on-chain record stored: a legacy IPFS CID OR a FastFS
+    // location ({pred}/{recv}/{rel}). No CID prefix guard — MCP dispatches, and a
+    // malformed ref surfaces a clear error from the FastFS branch.
+    if (!ref) throw new NovaError('retrieve requires a file reference (CID or FastFS location)');
 
-    // Step 1: Get key and encrypted data from MCP
+    // Step 1: Get key, ciphertext, and format from MCP
     const prepareResult = await this.callMcpTool<PrepareRetrieveResponse>('prepare_retrieve', {
       group_id: groupId,
-      ipfs_hash: ipfsHash,
+      ipfs_hash: ref,   // MCP's param is still named ipfs_hash; it carries the ref
     });
 
-    const { key, encrypted_b64, ipfs_hash, group_id } = prepareResult;
+    const { key, encrypted_b64, ipfs_hash, group_id, format } = prepareResult;
 
-    // Step 2: Decrypt data locally
-    const decryptedData = await decryptData(encrypted_b64, key);
+    // Step 2: Decode locally — decodeFile dispatches on format (v1 FastFS vs v0
+    // legacy). null/absent format ⇒ v0 legacy path (frozen decryptV0).
+    const decryptedData = await decodeFile(encrypted_b64, key, format ?? null);
 
     return {
       data: decryptedData,

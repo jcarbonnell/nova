@@ -8,11 +8,6 @@ exports.NovaSdk = exports.decryptV0 = exports.encryptV0 = exports.decodeFile = e
 const providers_1 = require("@near-js/providers");
 const axios_1 = __importDefault(require("axios"));
 const buffer_1 = require("buffer");
-// Infrastructure endpoints (public, immutable)
-const DEFAULT_MCP_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
-const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
-const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
-const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
 // NovaError moved to ./errors.js; re-exported below so the public API is unchanged.
 var errors_js_1 = require("./errors.js");
 Object.defineProperty(exports, "NovaError", { enumerable: true, get: function () { return errors_js_1.NovaError; } });
@@ -21,12 +16,15 @@ const errors_js_2 = require("./errors.js");
 var format_js_1 = require("./format.js");
 Object.defineProperty(exports, "encodeFile", { enumerable: true, get: function () { return format_js_1.encodeFile; } });
 Object.defineProperty(exports, "decodeFile", { enumerable: true, get: function () { return format_js_1.decodeFile; } });
-// v0 wire codec is the frozen legacy path (kept as the current upload/retrieve
-// codec until the post-Step-4 wiring flip switches new uploads to v1).
-const v0_js_1 = require("./legacy/v0.js");
-var v0_js_2 = require("./legacy/v0.js");
-Object.defineProperty(exports, "encryptV0", { enumerable: true, get: function () { return v0_js_2.encryptV0; } });
-Object.defineProperty(exports, "decryptV0", { enumerable: true, get: function () { return v0_js_2.decryptV0; } });
+const format_js_2 = require("./format.js");
+var v0_js_1 = require("./legacy/v0.js");
+Object.defineProperty(exports, "encryptV0", { enumerable: true, get: function () { return v0_js_1.encryptV0; } });
+Object.defineProperty(exports, "decryptV0", { enumerable: true, get: function () { return v0_js_1.decryptV0; } });
+// Infrastructure endpoints (public, immutable)
+const DEFAULT_MCP_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+const DEFAULT_RPC_URL = 'https://rpc.mainnet.near.org';
+const DEFAULT_CONTRACT_ID = 'nova-sdk.near';
+const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
 function computeSha256(data) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const crypto = require('crypto');
@@ -308,18 +306,21 @@ class NovaSdk {
             filename,
         });
         const { upload_id, key } = prepareResult;
-        // Step 2: Encrypt data locally
-        const encryptedB64 = await (0, v0_js_1.encryptV0)(data, key);
-        // Step 3: Compute hash of plaintext
+        // Step 2: Encode to the v1 format (optional deflate + v0 AES-GCM) with the
+        // per-file key from prepare_upload. `format` is persisted by Shade and returned
+        // at retrieve so decodeFile can dispatch.
+        const { bytes_b64, format } = await (0, format_js_2.encodeFile)(data, key);
+        // Step 3: Compute hash of PLAINTEXT (the on-chain integrity anchor — unchanged).
         const fileHash = await computeSha256Async(data);
         // Step 4: Finalize upload via MCP tool
         const finalizeResult = await this.callMcpTool('finalize_upload', {
             upload_id,
-            encrypted_data: encryptedB64,
+            encrypted_data: bytes_b64,
             file_hash: fileHash,
+            format,
         });
         return {
-            cid: finalizeResult.cid,
+            cid: finalizeResult.location ?? finalizeResult.cid,
             trans_id: finalizeResult.trans_id,
             file_hash: finalizeResult.file_hash,
         };
@@ -335,18 +336,21 @@ class NovaSdk {
      * @param ipfsHash - The IPFS CID of the file
      * @returns Decrypted file data
      */
-    async retrieve(groupId, ipfsHash) {
-        if (!ipfsHash.startsWith('Qm') && !ipfsHash.startsWith('bafy')) {
-            throw new errors_js_2.NovaError(`Invalid CID: ${ipfsHash}`);
-        }
-        // Step 1: Get key and encrypted data from MCP
+    async retrieve(groupId, ref) {
+        // `ref` is whatever the on-chain record stored: a legacy IPFS CID OR a FastFS
+        // location ({pred}/{recv}/{rel}). No CID prefix guard — MCP dispatches, and a
+        // malformed ref surfaces a clear error from the FastFS branch.
+        if (!ref)
+            throw new errors_js_2.NovaError('retrieve requires a file reference (CID or FastFS location)');
+        // Step 1: Get key, ciphertext, and format from MCP
         const prepareResult = await this.callMcpTool('prepare_retrieve', {
             group_id: groupId,
-            ipfs_hash: ipfsHash,
+            ipfs_hash: ref, // MCP's param is still named ipfs_hash; it carries the ref
         });
-        const { key, encrypted_b64, ipfs_hash, group_id } = prepareResult;
-        // Step 2: Decrypt data locally
-        const decryptedData = await (0, v0_js_1.decryptV0)(encrypted_b64, key);
+        const { key, encrypted_b64, ipfs_hash, group_id, format } = prepareResult;
+        // Step 2: Decode locally — decodeFile dispatches on format (v1 FastFS vs v0
+        // legacy). null/absent format ⇒ v0 legacy path (frozen decryptV0).
+        const decryptedData = await (0, format_js_2.decodeFile)(encrypted_b64, key, format ?? null);
         return {
             data: decryptedData,
             ipfs_hash,

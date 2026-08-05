@@ -135,6 +135,29 @@ export const RotateKeySchema = z.object({
     group_id: z.string().min(1),
     contract_id: z.string().optional(),
 });
+// ── fastfs-storage.ts ──
+/** POST /fastfs/prepare_upload — group + the two auth branches (token | account_id). */
+export const PrepareFileUploadSchema = z.object({
+    group_id: z.string().min(1),
+    token: z.string().optional(),
+    account_id: z.string().optional(),
+    contract_id: z.string().optional(),
+});
+/** POST /fastfs/finalize_upload — the fixed file_ref, the v1 ciphertext, the SDK's format. */
+export const FinalizeFileUploadSchema = z.object({
+    group_id: z.string().min(1),
+    file_ref: z.string().min(1),
+    encrypted_b64: z.string().min(1),
+    format: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+/** POST /fastfs/retrieve — the FastFS location + the two auth branches. */
+export const RetrieveFileSchema = z.object({
+    group_id: z.string().min(1),
+    location: z.string().min(1),
+    token: z.string().optional(),
+    account_id: z.string().optional(),
+    contract_id: z.string().optional(),
+});
 // ════════════════════════════════════════════════════════════════════════════
 // OUTPUT SCHEMAS (oRPC)
 // ════════════════════════════════════════════════════════════════════════════
@@ -224,6 +247,23 @@ export const RotateKeyOutput = z.object({
     new_key_hash: z.string(),
     version: z.number(),
     checksum: z.string(),
+});
+// ── fastfs-storage ──
+export const PrepareFileUploadOutput = z.object({
+    file_key: z.string(),
+    file_ref: z.string(),
+    version: z.string(),
+});
+export const FinalizeFileUploadOutput = z.object({
+    location: z.string(),
+    backend: z.string(),
+});
+export const RetrieveFileOutput = z.object({
+    file_key: z.string(),
+    encrypted_b64: z.string(),
+    location: z.string(),
+    group_id: z.string(),
+    format: z.record(z.string(), z.unknown()).nullable(),
 });
 // ── wallet SIWN inputs ───────────────────────────────────────────────────────
 /**

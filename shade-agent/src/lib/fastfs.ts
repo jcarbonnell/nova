@@ -177,14 +177,24 @@ export function borshFastfsDelete(rel: string): Buffer {
 // Encryption is the CALLER's job — `ciphertext` is already AES-256-GCM'd with
 // the group/file key. FastFS only ever sees opaque bytes.
 
-export async function upload(ciphertext: Uint8Array, groupId: string): Promise<StorageLocation> {
-  const rel = newRelativePath(groupId);
-  const args = borshFastfsUpload(rel, FASTFS_MIME, ciphertext);
+export async function uploadAt(ciphertext: Uint8Array, relativePath: string): Promise<StorageLocation> {
+  // FastFS indexer rejects relative_path > 1024 chars and empty mime (is_valid).
+  // Our path is ~101 chars (sha256 + uuid); assert so a future scheme change can't
+  // silently produce envelopes the indexer drops.
+  if (relativePath.length > 1024) {
+    throw new ApiError(400, 'FASTFS_PATH_TOO_LONG', 'FastFS relative_path exceeds 1024 chars');
+  }
+  const args = borshFastfsUpload(relativePath, FASTFS_MIME, ciphertext);
   const outcome = await signAndBroadcastFunctionCall(
     FASTFS_RECEIVER, FASTFS_METHOD, args, FASTFS_GAS, 0n, { tolerateFailure: true },
   );
   assertFastfsEnvelopeFinalized(outcome);
-  return { backend: 'fastfs', location: encodeFastfsLocation(rel) };
+  return { backend: 'fastfs', location: encodeFastfsLocation(relativePath) };
+}
+
+// Convenience: generate a fresh path and upload (standalone / Step-1 harness).
+export async function upload(ciphertext: Uint8Array, groupId: string): Promise<StorageLocation> {
+  return uploadAt(ciphertext, newRelativePath(groupId));
 }
 
 export async function remove(loc: StorageLocation): Promise<void> {

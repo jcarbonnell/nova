@@ -10,11 +10,13 @@ A Rust SDK for NOVA's secure, decentralized file-sharing primitive on NEAR. NOVA
 ## Features
 
 - 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
-- 🌐 **IPFS Storage** - Decentralized file storage via Pinata
+- 🌐 **FastFS Storage** - File data on NEAR via FastFS (FastNear); legacy IPFS reads preserved
 - ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
 - 🛡️ **API Key Auth** - Secure authentication via API keys (get yours at nova-sdk.com)
 - 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
+- 🔑 **Per-File Keys** - Each file encrypted with its own key; deletion crypto-shreds it (permanently undecryptable)
+- ⏳ **Retention** - Optional per-group retention windows for time-based deletion
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 
 ## Installation
@@ -128,13 +130,13 @@ All data is encrypted **client-side** using AES-256-GCM:
 
 ### Transaction Recording
 
-File metadata (CID/hash) is recorded on-chain automatically during composite_upload.
+File metadata (location/hash) is recorded on-chain automatically during upload.
 
 ```rust
 // Query group transactions
 let txs = sdk.get_transactions_for_group("my_group", None).await?;
 for tx in txs {
-    println!("File: {} | IPFS: {}", tx.file_hash, tx.ipfs_hash);
+    println!("File: {} | Location: {}", tx.file_hash, tx.ipfs_hash);
 }
 ```
 
@@ -300,6 +302,7 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
+- [FastFS](https://fastfs.io)
 - [Shade Agent](https://docs.near.org/ai/introduction)
 - [Phala TEEs](https://phala.com/)
 

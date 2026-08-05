@@ -267,8 +267,29 @@ export async function getFileKey(input: FileKeyInput) {
 // No auth arg: callers (retention job / DeleteMemberFiles) authorize at their
 // layer (owner / retention policy). Reuses the existing storeBlobToKV path.
 export async function tombstoneFileKey(groupId: string, fileRef: string): Promise<void> {
-  await storeBlobToKV(fileKeyIdFor(groupId, fileRef), encryptBlob(TOMBSTONE));
-  log('info', 'file_key_tombstoned', {
-    group_id: groupId, file_ref_hash: sha256Hex(fileRef).slice(0, 12),
-  });
+  const keyId = fileKeyIdFor(groupId, fileRef);
+  await storeBlobToKV(keyId, encryptBlob(TOMBSTONE));
+
+  // Deletion must be read-your-writes: the instant this returns, a `final` read
+  // (getFileKey / getBlobFromKV both query at finality:'final') must see the
+  // tombstone — otherwise a just-deleted file stays retrievable for the ~2s
+  // inclusion→finality lag. We pay that latency HERE (deletion is rare and
+  // high-stakes) rather than making every file read optimistic. Poll the exact
+  // slot we wrote until a final read reflects it.
+  const deadlineMs = Date.now() + 15_000;
+  while (Date.now() < deadlineMs) {
+    const blob = await getBlobFromKV(keyId); // finality:'final'
+    if (blob && Buffer.from(decryptBlob(blob)).equals(TOMBSTONE)) {
+      log('info', 'file_key_tombstoned', {
+        group_id: groupId, file_ref_hash: sha256Hex(fileRef).slice(0, 12),
+      });
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  // The write committed but finality confirmation timed out. Do NOT silently
+  // succeed — the caller (retention job) must know the guarantee isn't yet proven,
+  // so it can retry rather than record the file as deleted.
+  throw new ApiError(500, 'TOMBSTONE_NOT_CONFIRMED',
+    'Tombstone write committed but not confirmed final within 15s');
 }

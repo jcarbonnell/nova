@@ -19,6 +19,8 @@ import {
   GenerateKeySchema, GetKeySchema, RotateKeySchema,
   StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput,
   RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput,
+  PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema,
+  PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput,
 } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
@@ -27,6 +29,7 @@ import {
   WalletNonceSchema, WalletVerifySchema, WalletNonceOutput, WalletVerifyOutput,
 } from '../lib/schemas.js';
 import { issueWalletNonce, verifyWalletSignin } from '../lib/auth.js';
+import * as fastfsService from '../lib/services/fastfs-storage.js';
 
 const INTERNAL = ['internal'];
 
@@ -84,6 +87,24 @@ const rotateApiKey = pub
   .input(ApiKeyLookupSchema)
   .output(RotateApiKeyOutput)
   .handler(({ input }) => userKeysService.rotateApiKey(input));
+
+const prepareFileUpload = pub
+  .route({ method: 'POST', path: '/fastfs/prepare_upload', tags: INTERNAL })
+  .input(PrepareFileUploadSchema)
+  .output(PrepareFileUploadOutput)
+  .handler(({ input }) => fastfsService.prepareFileUpload(input));
+
+const finalizeFileUpload = pub
+  .route({ method: 'POST', path: '/fastfs/finalize_upload', tags: INTERNAL })
+  .input(FinalizeFileUploadSchema)
+  .output(FinalizeFileUploadOutput)
+  .handler(({ input }) => fastfsService.finalizeFileUpload(input));
+
+const retrieveFile = pub
+  .route({ method: 'POST', path: '/fastfs/retrieve', tags: INTERNAL })
+  .input(RetrieveFileSchema)
+  .output(RetrieveFileOutput)
+  .handler(({ input }) => fastfsService.retrieveFile(input));
 
 /**
  * The one place the oRPC surface DIFFERS from the Hono surface, deliberately.
@@ -187,6 +208,7 @@ const walletVerify = walletPub
 export const router = {
   userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
   keyManagement: { generateKey, getKey, rotateKey },
+  fastfs: { prepareUpload: prepareFileUpload, finalizeUpload: finalizeFileUpload, retrieve: retrieveFile },
   wallet: { nonce: walletNonce, verify: walletVerify },
 };
 

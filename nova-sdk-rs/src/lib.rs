@@ -102,6 +102,9 @@ struct PrepareUploadResponse {
 
 #[derive(Deserialize, Debug)]
 struct FinalizeUploadResponse {
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
     cid: String,
     trans_id: String,
     file_hash: String,
@@ -112,7 +115,11 @@ struct PrepareRetrieveResponse {
     key: String,
     encrypted_b64: String,
     ipfs_hash: String,
+    #[serde(default)]
+    location: String,
     group_id: String,
+    #[serde(default)]
+    format: Option<FileFormatV1>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -783,23 +790,30 @@ impl NovaSdk {
         let upload_id = prepare_result.upload_id;
         let key = prepare_result.key;
 
-        // Step 2: Encrypt data locally
-        let encrypted_b64 = encrypt_data(data, &key)?;
+        // Step 2: Encode to the v1 format (optional deflate + v0 AES-GCM) with the
+        // per-file key. format is persisted by Shade and returned at retrieve.
+        let (bytes_b64, format) = encode_file(data, &key, &EncodeOptions::default())?;
 
-        // Step 3: Compute hash of plaintext
+        // Step 3: Compute hash of PLAINTEXT (on-chain integrity anchor — unchanged).
         let file_hash = Self::compute_hash(data);
 
         // Step 4: Finalize upload
         let body = json!({
             "upload_id": upload_id,
-            "encrypted_data": encrypted_b64,
-            "file_hash": file_hash
+            "encrypted_data": bytes_b64,
+            "file_hash": file_hash,
+            "format": format,
         });
         let finalize_result: FinalizeUploadResponse =
             self.call_mcp_tool("finalize_upload", body).await?;
 
+        let location = if !finalize_result.location.is_empty() {
+            finalize_result.location
+        } else {
+            finalize_result.cid
+        };
         Ok(UploadResult {
-            cid: finalize_result.cid,
+            cid: location,
             trans_id: finalize_result.trans_id,
             file_hash: finalize_result.file_hash,
         })
@@ -820,22 +834,28 @@ impl NovaSdk {
     pub async fn retrieve(
         &self,
         group_id: &str,
-        ipfs_hash: &str,
+        file_ref: &str,
     ) -> Result<RetrieveResult, NovaError> {
-        if !ipfs_hash.starts_with("Qm") && !ipfs_hash.starts_with("bafy") {
-            return Err(NovaError::InvalidCid(ipfs_hash.to_string()));
+        // `file_ref` is whatever the on-chain record stored: a legacy IPFS CID OR a
+        // FastFS location. No CID prefix guard — MCP dispatches on the ref.
+        if file_ref.is_empty() {
+            return Err(NovaError::InvalidCid("empty file reference".to_string()));
         }
 
-        // Step 1: Get key and encrypted data from MCP
+        // Step 1: Get key, ciphertext, and format from MCP
         let args = json!({
             "group_id": group_id,
-            "ipfs_hash": ipfs_hash
+            "ipfs_hash": file_ref  // MCP's param is still named ipfs_hash; carries the ref
         });
         let prepare_result: PrepareRetrieveResponse =
             self.call_mcp_tool("prepare_retrieve", args).await?;
 
-        // Step 2: Decrypt data locally
-        let decrypted_data = decrypt_data(&prepare_result.encrypted_b64, &prepare_result.key)?;
+        // Step 2: Decode locally — decode_file dispatches on format (v1 vs v0 legacy).
+        let decrypted_data = decode_file(
+            &prepare_result.encrypted_b64,
+            &prepare_result.key,
+            prepare_result.format.as_ref(),
+        )?;
 
         Ok(RetrieveResult {
             data: decrypted_data,

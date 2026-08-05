@@ -662,45 +662,87 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
 @require_auth
 async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str) -> dict:
     cleanup_expired_uploads()
-    
-    key = await _get_shade_key_internal(group_id, user)
-    
+
+    # FastFS + per-file keys (§5.1/§5.2): Shade fixes the FastFS relative path and
+    # mints a RANDOM per-file key wrapped under the group key. The client encrypts
+    # with THIS key (not the group key), and echoes file_ref back at finalize so we
+    # upload to the same path the key is bound to. Auth is via account_id behind
+    # the X-Internal-Auth gate, exactly like _get_shade_key_internal.
+    config = get_config(user["near_account_id"])
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{SHADE_API_URL}/rpc/fastfs/prepare_upload",
+            json={
+                "group_id": group_id,
+                "account_id": user["near_account_id"],
+                "contract_id": config["contract_id"],
+            },
+            headers={"X-Internal-Auth": INTERNAL_API_SECRET},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Shade prepare_upload failed: {resp.status_code} - {resp.text[:200]}")
+        prep = resp.json()
+    file_key = prep["file_key"]
+    file_ref = prep["file_ref"]
+
     upload_id = str(uuid4())
     PENDING_UPLOADS[upload_id] = {
         "group_id": group_id,
         "filename": filename,
+        "file_ref": file_ref,
         "user_id": user["near_account_id"],
         "user_email": user.get("email"),
         "wallet_id": user.get("wallet_id"),
         "access_token": user.get("access_token"),
         "expires_at": time.time() + UPLOAD_EXPIRY_SECONDS,
     }
-    
+
     return {
         "upload_id": upload_id,
-        "key": key,
+        "key": file_key,
         "group_id": group_id,
         "filename": filename
     }
 
 @expose_as_rest("/tools/finalize_upload")
 @require_auth
-async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str) -> dict:
+async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str, format: dict | None = None) -> dict:
     cleanup_expired_uploads()
-    
+
     if upload_id not in PENDING_UPLOADS:
         raise ValueError("Invalid or expired upload_id")
-    
+
     if not re.match(r'^[a-f0-9]{64}$', file_hash, re.IGNORECASE):
         raise ValueError("file_hash must be 64-char hex (SHA-256)")
-    
+
     ctx_data = PENDING_UPLOADS[upload_id]
-    
+
     if ctx_data["user_id"] != user["near_account_id"]:
         raise ValueError("Account mismatch - you do not own this upload")
-    
-    cid = await _ipfs_upload(encrypted_data, ctx_data["filename"], ctx_data["user_id"])
-    
+
+    # FastFS write (§5.2): Shade signs the __fastdata envelope (as the KV-owner
+    # signer) at the file_ref fixed in prepare_upload, and persists the format
+    # metadata. Returns the reader-independent location. NO IPFS upload path.
+    config = get_config(user["near_account_id"])
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{SHADE_API_URL}/rpc/fastfs/finalize_upload",
+            json={
+                "group_id": ctx_data["group_id"],
+                "file_ref": ctx_data["file_ref"],
+                "encrypted_b64": encrypted_data,
+                "format": format,
+            },
+            headers={"X-Internal-Auth": INTERNAL_API_SECRET},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Shade finalize_upload failed: {resp.status_code} - {resp.text[:200]}")
+        location = resp.json()["location"]
+
+    # Provenance record, signed AS THE USER (unchanged), now with backend=FastFS.
+    # location rides the existing ipfs_hash field (contract kept the name for borsh
+    # compatibility; backend disambiguates). record_transaction requires the user
+    # be is_authorized in the group — the member (gmail-14) passes.
     trans_id = await call_contract(
         user=user,
         method_name="record_transaction",
@@ -708,15 +750,17 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
             "group_id": ctx_data["group_id"],
             "user_id": ctx_data["user_id"],
             "file_hash": file_hash,
-            "ipfs_hash": cid
+            "ipfs_hash": location,
+            "backend": "FastFS",
         },
         fee_action="record_transaction"
     )
-    
+
     del PENDING_UPLOADS[upload_id]
-    
+
     return {
-        "cid": cid,
+        "location": location,
+        "cid": location,   # back-compat alias: existing SDK reads result.cid
         "trans_id": trans_id,
         "file_hash": file_hash
     }
@@ -724,17 +768,49 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
 @expose_as_rest("/tools/prepare_retrieve")
 @require_auth
 async def prepare_retrieve(ctx: Context, user: dict, group_id: str, ipfs_hash: str) -> dict:
-    if not ipfs_hash.startswith('Qm') and not ipfs_hash.startswith('bafy'):
-        raise ValueError(f"Invalid CID format: {ipfs_hash}")
-    
-    key = await _get_shade_key_internal(group_id, user)
-    encrypted_b64 = await _ipfs_retrieve(ipfs_hash, user["near_account_id"])
-    
+    # `ipfs_hash` carries whatever the on-chain record stored in its location field:
+    #   • legacy IPFS CID (Qm… / bafy…) → group key + IPFS fetch, format=null (v0)
+    #   • FastFS location ({pred}/{recv}/{rel}) → per-file key + FastFS fetch + format (v1)
+    # The SDK's decodeFile dispatches on `format`. Legacy retrieval is preserved
+    # indefinitely (§5.2); only the UPLOAD path is FastFS-only.
+    is_legacy_cid = ipfs_hash.startswith('Qm') or ipfs_hash.startswith('bafy')
+
+    if is_legacy_cid:
+        key = await _get_shade_key_internal(group_id, user)
+        encrypted_b64 = await _ipfs_retrieve(ipfs_hash, user["near_account_id"])
+        return {
+            "key": key,
+            "encrypted_b64": encrypted_b64,
+            "ipfs_hash": ipfs_hash,
+            "location": ipfs_hash,
+            "group_id": group_id,
+            "format": None,
+        }
+
+    # FastFS path — Shade returns the per-file key, the ciphertext, and the format.
+    config = get_config(user["near_account_id"])
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{SHADE_API_URL}/rpc/fastfs/retrieve",
+            json={
+                "group_id": group_id,
+                "location": ipfs_hash,
+                "account_id": user["near_account_id"],
+                "contract_id": config["contract_id"],
+            },
+            headers={"X-Internal-Auth": INTERNAL_API_SECRET},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Shade retrieve failed: {resp.status_code} - {resp.text[:200]}")
+        r = resp.json()
+
     return {
-        "key": key,
-        "encrypted_b64": encrypted_b64,
+        "key": r["file_key"],
+        "encrypted_b64": r["encrypted_b64"],
         "ipfs_hash": ipfs_hash,
-        "group_id": group_id
+        "location": r["location"],
+        "group_id": group_id,
+        "format": r.get("format"),
     }
 
 @expose_as_rest("/tools/auth_status")

@@ -38,6 +38,7 @@ export async function rpcCallWithRetry(rpcUrl, payload, retries = 3) {
             const res = await axios.post(rpcUrl, payload, { timeout: 10_000 });
             if (res.data.error) {
                 const msg = res.data.error.message || res.data.error.cause?.name || JSON.stringify(res.data.error);
+                log('warn', 'rpc_error_full', { error: JSON.stringify(res.data.error).slice(0, 800) });
                 throw new Error(`RPC error: ${msg}`);
             }
             return res.data.result;
@@ -170,8 +171,13 @@ export async function signAndBroadcastFunctionCall(receiverId, methodName, argsB
         jsonrpc: '2.0', id: 'access-key',
         method: 'query',
         params: {
+            // 'optimistic' (not 'final'): the nonce must be strictly greater than the
+            // key's last-used nonce. When two txs are signed by the same key back-to-
+            // back (e.g. generateFileKey's KV store, then the FastFS envelope), 'final'
+            // lags and returns a stale nonce → InvalidNonce{ak_nonce == tx_nonce}.
+            // 'optimistic' reflects the just-submitted tx so nonce+1 is fresh.
             request_type: 'view_access_key',
-            finality: 'final',
+            finality: 'optimistic',
             account_id: signerAccountId,
             public_key: signerPubBs58,
         },

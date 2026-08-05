@@ -10,11 +10,13 @@ A JavaScript/TypeScript SDK for NOVA's secure, decentralized file-sharing primit
 ## Features
 
 - 🔐 **Zero-Knowledge Architecture** - Keys managed in TEE; never exposed to SDK
-- 🌐 **IPFS Storage** - Decentralized file storage via Pinata
+- 🌐 **FastFS Storage** - File data on NEAR via FastFS (FastNear); legacy IPFS reads preserved
 - ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
 - 🛡️ **API Key Auth** - Secure authentication via API keys (get yours at nova-sdk.com)
 - 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
+- 🔑 **Per-File Keys** - Each file encrypted with its own key; deletion crypto-shreds it (permanently undecryptable)
+- ⏳ **Retention** - Optional per-group retention windows for time-based deletion
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 - 📦 **TypeScript Support** - Full type definitions included
 
@@ -30,7 +32,7 @@ npm install nova-sdk-js
 
 Typical costs (mainnet):
 - **Register group**: ~0.05 NEAR (~$0.15 USD)
-- **Upload file**: ~0.01 NEAR (incl. IPFS storage)
+- **Upload file**: ~0.01 NEAR (gas only; FastFS has no storage fee)
 - **Retrieve file**: ~0.001 NEAR
 
 ```typescript
@@ -41,7 +43,7 @@ const sdk = new NovaSdk('yourname.nova-sdk-6.testnet', {
 });
 ```
 
-> **Note:** On testnet, IPFS operations are mocked (in-memory storage). Blockchain operations use real testnet with faucet tokens.
+> **Note:** New uploads use FastFS on NEAR (no IPFS). Legacy files previously stored on IPFS remain retrievable. Blockchain operations on testnet use real testnet with faucet tokens.
 
 ## Quick Start
 
@@ -110,7 +112,7 @@ import fs from 'fs';
 const fileData = fs.readFileSync('./document.pdf');
 const result = await sdk.upload('my-group', fileData, 'document.pdf');
 
-console.log('CID:', result.cid);           // IPFS content ID
+console.log('Ref:', result.cid);           // FastFS location (field still named `cid` for compat)
 console.log('TX:', result.trans_id);       // NEAR transaction ID
 console.log('Hash:', result.file_hash);    // SHA-256 of plaintext
 
@@ -162,16 +164,17 @@ const fee = await sdk.estimateFee('register_group');
 ### Upload Flow
 ```
 1. SDK calls prepare_upload → MCP returns encryption key from TEE
-2. SDK encrypts file locally (AES-256-GCM)
-3. SDK calls finalize_upload with encrypted data
-4. MCP uploads to IPFS and records on NEAR
-5. Returns: { cid, trans_id, file_hash }
+2. SDK encrypts file locally (AES-256-GCM) and encodes the file format (v1)
+3. SDK calls finalize_upload with the ciphertext + format
+4. Shade signs a FastFS envelope (data lands on NEAR); MCP records the location on-chain
+5. Returns: { cid, trans_id, file_hash } // cid is now a FastFS location
 ```
 
 ### Retrieve Flow
 ```
-1. SDK calls prepare_retrieve → MCP returns key + encrypted data
-2. SDK decrypts locally (AES-256-GCM)
+1. SDK calls prepare_retrieve → MCP returns the per-file key + ciphertext + format
+   (legacy IPFS files are still served transparently)
+2. SDK decodes locally: decrypt (AES-256-GCM) + decompress if the format says so
 3. Returns: { data, ipfs_hash, group_id }
 ```
 
@@ -293,6 +296,7 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)
+- [FastFS](https://fastfs.io)
 - [Phala TEE](https://phala.com/)
 - [NEAR JavaScript API](https://docs.near.org/tools/near-api-js/quick-reference)
 

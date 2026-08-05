@@ -1,4 +1,8 @@
 import { Buffer } from 'buffer';
+export { NovaError } from './errors.js';
+export { encodeFile, decodeFile } from './format.js';
+export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
+export { encryptV0, decryptV0 } from './legacy/v0.js';
 export interface NovaSdkConfig {
     apiKey?: string;
     authUrl?: string;
@@ -27,10 +31,6 @@ export interface AuthStatusResult {
     near_account_id?: string;
     authorized_for_group?: boolean;
 }
-export { NovaError } from './errors.js';
-export { encodeFile, decodeFile } from './format.js';
-export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from './format.js';
-export { encryptV0, decryptV0 } from './legacy/v0.js';
 export declare class NovaSdk {
     private provider;
     private tokenCache;
@@ -125,7 +125,7 @@ export declare class NovaSdk {
      * @param ipfsHash - The IPFS CID of the file
      * @returns Decrypted file data
      */
-    retrieve(groupId: string, ipfsHash: string): Promise<RetrieveResult>;
+    retrieve(groupId: string, ref: string): Promise<RetrieveResult>;
     getBalance(accountId?: string): Promise<string>;
     isAuthorized(groupId: string, userId?: string): Promise<boolean>;
     getGroupChecksum(groupId: string): Promise<string | null>;
