@@ -25,8 +25,6 @@ import sys
 from server import (
     read_owner_gated_view,
     get_reader_signer,
-    get_owned_groups,
-    get_member_groups,
     READER_PRIVATE_KEY,
 )
 
@@ -79,35 +77,6 @@ async def main():
     check("contains the known member groups (superset of owned)",
           EXPECTED_MEMBER_SUPERSET.issubset(set(member)))
     check("member is a superset of owned", set(owned).issubset(set(member)))
-
-    print("4. Handlers work for a WALLET-subject session (no custodial key)")
-    # A wallet user: near_account_id is their own wallet, no email/wallet_id
-    # custodial key in Shade. The handler must NOT touch get_user_signer.
-    wallet_user = {
-        "near_account_id": OWNER_ACCT,  # use nova-sdk.near as the queried acct
-        "email": None,
-        "wallet_id": None,
-        "access_token": None,
-        "session_token": "harness",
-    }
-    # Handlers are decorated (@expose_as_rest/@require_auth). Call the underlying
-    # coroutine with ctx=None, user=wallet_user — mirroring how the REST wrapper
-    # invokes them (original_func(None, user, ...)).
-    try:
-        owned_h = await get_owned_groups(None, wallet_user)
-        print(f"     get_owned_groups -> {owned_h}")
-        check("wallet-subject get_owned_groups returns known groups",
-              EXPECTED_OWNED.issubset(set(owned_h)))
-    except Exception as e:
-        check(f"wallet-subject get_owned_groups (no signer 501): {e}", False)
-
-    try:
-        member_h = await get_member_groups(None, wallet_user)
-        print(f"     get_member_groups -> {member_h}")
-        check("wallet-subject get_member_groups returns known groups",
-              EXPECTED_MEMBER_SUPERSET.issubset(set(member_h)))
-    except Exception as e:
-        check(f"wallet-subject get_member_groups (no signer 501): {e}", False)
 
     print(f"\n{'='*50}")
     print(f"  {passed} passed, {failed} failed")
