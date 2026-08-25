@@ -43,6 +43,8 @@ CONFIG = {
 }
 
 SHADE_API_URL = os.getenv("SHADE_API_URL", "")
+READER_PRIVATE_KEY = os.getenv("READER_PRIVATE_KEY", "")
+READER_ACCOUNT_ID = os.getenv("CONTRACT_ID", "nova-sdk.near")
 PINATA_GATEWAY = os.getenv("PINATA_GATEWAY", "")
 IPFS_API_KEY = os.getenv("IPFS_API_KEY", "")
 IPFS_API_SECRET = os.getenv("IPFS_API_SECRET", "")
@@ -295,6 +297,41 @@ async def get_user_signer(user: dict) -> Account:
     acc = Account(near_account_id, private_key, config["rpc_url"])
     await acc.startup()
     return acc
+
+async def get_reader_signer() -> Account:
+    """Signer for owner-gated account views, as nova-sdk.near via the scoped
+    reader FC key. Mainnet only (the views live on the mainnet contract). The
+    FC key can only call get_owned_groups_of / get_member_groups_of, so a full
+    MCP compromise reads two group lists and nothing else."""
+    if not READER_PRIVATE_KEY:
+        raise ValueError("READER_PRIVATE_KEY not configured — reader views unavailable")
+    config = CONFIG["mainnet"]
+    acc = Account(READER_ACCOUNT_ID, READER_PRIVATE_KEY, config["rpc_url"])
+    await acc.startup()
+    return acc
+
+
+async def read_owner_gated_view(method_name: str, account_id: str) -> Any:
+    """Call an owner-gated account view (signed as the reader) and return its
+    decoded result. These are function-call *transactions* (they assert on
+    predecessor, so a pure view is ProhibitedInView), gas-only, no deposit."""
+    acc = await get_reader_signer()
+    result = await acc.function_call(
+        contract_id=READER_ACCOUNT_ID,
+        method_name=method_name,
+        args={"account_id": account_id},
+        amount=0,
+        gas=30_000_000_000_000,
+    )
+    if hasattr(result, "status") and isinstance(result.status, dict):
+        if "SuccessValue" in result.status:
+            raw = result.status["SuccessValue"]
+            if raw:
+                return json.loads(base64.b64decode(raw).decode())
+            return []
+        if "Failure" in result.status:
+            raise RuntimeError(result.status["Failure"])
+    return []
 
 async def call_contract(
     user: dict,
@@ -857,26 +894,24 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
 @expose_as_rest("/tools/get_owned_groups")
 @require_auth
 async def get_owned_groups(ctx: Context, user: dict) -> list:
-    result = await call_contract(user, "get_owned_groups", {}, "get_owned_groups")
-    if isinstance(result, str):
-        return json.loads(result) or []
+    account_id = user["near_account_id"]
+    if not account_id:
+        raise ValueError("No verified account in session")
+    result = await read_owner_gated_view("get_owned_groups_of", account_id)
     return result or []
 
 @expose_as_rest("/tools/get_member_groups")
 @require_auth
 async def get_member_groups(ctx: Context, user: dict) -> list:
-    result = await call_contract(user, "get_member_groups", {}, "get_member_groups")
-    if isinstance(result, str):
-        return json.loads(result) or []
+    account_id = user["near_account_id"]
+    if not account_id:
+        raise ValueError("No verified account in session")
+    result = await read_owner_gated_view("get_member_groups_of", account_id)
     return result or []
 
 @expose_as_rest("/tools/get_group_members")
 @require_auth
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
-    # §5.6: joinable (open-event) groups get a FREE, UNSIGNED public view — no
-    # Shade key retrieval, no fee, no user signature. Private groups keep the
-    # signed, paid path unchanged. The @require_auth session boundary (§5.0) still
-    # establishes the caller; for joinable groups we simply don't sign the read.
     joinable = await view_contract(user, "is_group_joinable", {"group_id": group_id})
     if joinable:
         result = await view_contract(user, "get_group_members_public", {"group_id": group_id})
