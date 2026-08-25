@@ -123,6 +123,7 @@ async fn join_group_flow_on_fresh_contract() -> Result<(), Box<dyn Error>> {
 // tests/res/nova_old.wasm BEFORE applying our edits — OR use the wasm currently
 // deployed on mainnet (download via `near ...` or keep the last release artifact).
 // ---------------------------------------------------------------------------
+#[ignore = "historical: gated an already-shipped upgrade; fixture predates v0.3.4"]
 #[tokio::test]
 async fn upgrade_preserves_legacy_state() -> Result<(), Box<dyn Error>> {
     let worker = testnet_worker().await?;
@@ -247,6 +248,7 @@ async fn upgrade_preserves_legacy_state() -> Result<(), Box<dyn Error>> {
 // == 0). This is the honest gate for the mainnet redeploy: it proves deploying
 // §5.6 over live v0.3.2 state does not brick and the views behave as designed.
 // ---------------------------------------------------------------------------
+#[ignore = "historical: §5.6 gate; premise invalid across the later v0.3.4 state change"]
 #[tokio::test]
 async fn upgrade_v032_to_public_views() -> Result<(), Box<dyn Error>> {
     let worker = testnet_worker().await?;

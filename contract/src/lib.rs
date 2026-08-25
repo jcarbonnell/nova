@@ -580,6 +580,44 @@ impl Contract {
         }
     }
 
+    /// Reader-gated account view (§5.0 session boundary). Returns ALL groups the
+    /// account OWNS — joinable AND private. This is NOT a public view: it is gated
+    /// to `self.owner` (the MCP reader identity, nova-sdk.near). The contract check
+    /// confirms only that MCP is the caller; MCP is responsible for passing the
+    /// account_id it established from a verified nova_session, and never a
+    /// client-supplied one. A direct `near view` from any other account fails the
+    /// assert, so private-group enumeration is NOT possible off-path.
+    /// No fee: the only caller is nova-sdk.near, which is also the fee recipient
+    /// (paying itself is a no-op and, via collect_fee's Promise, undesirable).
+    pub fn get_owned_groups_of(&self, account_id: AccountId) -> Vec<String> {
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner,
+            "Unauthorized: reader-gated view (owner only)"
+        );
+        self.owned_groups
+            .get(&account_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Reader-gated account view (§5.0). Returns ALL groups the account is a
+    /// MEMBER of — including groups OWNED BY OTHERS that the account joined, and
+    /// private groups. Same gate and same trust model as get_owned_groups_of:
+    /// owner-only on-chain; MCP passes the verified session account. No ownership
+    /// filter — membership, not ownership, is the criterion (v1.0 intent).
+    pub fn get_member_groups_of(&self, account_id: AccountId) -> Vec<String> {
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner,
+            "Unauthorized: reader-gated view (owner only)"
+        );
+        self.member_groups
+            .get(&account_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     // Core idempotent tombstone — NO auth (callers authorize). Returns true iff
     // this call NEWLY tombstoned. Preserves backend/timestamp for FastFS; for a
     // legacy (no-meta) tx it synthesises an Ipfs meta to hold the record.
@@ -929,6 +967,10 @@ mod tests {
     use near_sdk::{testing_env, Gas};
     use near_crypto::{SecretKey};
     use near_sdk::NearToken;
+    use serde_json::json;
+    use sha2::{Sha256, Digest};
+    use base64::prelude::BASE64_STANDARD;
+    use base64::Engine;
 
     fn get_context(
         signer: AccountId,
@@ -1102,6 +1144,7 @@ mod tests {
             member.clone(),
             "file_hash".to_string(),
             "ipfs_hash".to_string(),
+            None,
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 1);
@@ -1132,6 +1175,7 @@ mod tests {
             member.clone(),
             "file_hash".to_string(),
             "ipfs_hash".to_string(),
+            None,
         );
         assert!(contract.transactions.contains_key(&trans_id));
     }
@@ -1154,6 +1198,7 @@ mod tests {
             non_member,
             "file_hash".to_string(),
             "ipfs_hash".to_string(),
+            None,
         );
     }
 
@@ -1174,12 +1219,14 @@ mod tests {
             member.clone(),
             "file_hash1".to_string(),
             "ipfs_hash1".to_string(),
+            None,
         );
         contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
             "file_hash2".to_string(),
             "ipfs_hash2".to_string(),
+            None,
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 2);
@@ -1946,6 +1993,7 @@ mod tests {
             owner.clone(),
             "fh1".to_string(),
             "ih1".to_string(),
+            None,
         );
 
         let signed = contract.get_transactions_for_group("hack".to_string());
@@ -1957,5 +2005,96 @@ mod tests {
         assert_eq!(public[0].ipfs_hash, signed[0].ipfs_hash);
         assert_eq!(public[0].group_id, signed[0].group_id);
         assert_eq!(public[0].user_id, signed[0].user_id);
+    }
+
+    // ── Reader-gated account views (§5.0 session boundary) ──────────────────
+    // These return ALL of an account's groups (private included), gated to the
+    // owner (nova-sdk.near = the MCP reader identity). The security invariant is
+    // that a NON-owner caller panics — this is what stops a direct near-view from
+    // enumerating a private member's groups off-path.
+
+    #[test]
+    fn t3_7_owned_groups_of_returns_all_including_private() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 200_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+
+        // One private group, one joinable — both OWNED by owner.
+        contract.register_group("private-grp".to_string(), Some(false));
+        contract.register_group("open-grp".to_string(), Some(true));
+
+        // Reader (owner) sees BOTH — no joinable filter.
+        let owned = contract.get_owned_groups_of(owner.clone());
+        assert_eq!(owned.len(), 2, "reader sees all owned groups incl. private");
+        assert!(owned.contains(&"private-grp".to_string()));
+        assert!(owned.contains(&"open-grp".to_string()));
+    }
+
+    #[test]
+    fn t3_8_member_groups_of_includes_groups_owned_by_others() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let alice: AccountId = "alice.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let mut context = get_context(owner.clone(), 200_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+
+        // owner creates a joinable group; alice joins it (alice is a MEMBER, not owner).
+        contract.register_group("owner-grp".to_string(), Some(true));
+        let future = env::block_timestamp() + 1_000_000_000_000;
+        contract.open_hackathon_join("owner-grp".to_string(), U64(future), None);
+
+        context = get_context(alice.clone(), 0);
+        testing_env!(context.build());
+        contract.join_group("owner-grp".to_string());
+
+        // Reader queries alice's MEMBERSHIPS as the owner (predecessor = owner).
+        context = get_context(owner.clone(), 0);
+        testing_env!(context.build());
+        let member_of = contract.get_member_groups_of(alice.clone());
+
+        // alice is a member of a group she does NOT own — it must appear.
+        assert!(
+            member_of.contains(&"owner-grp".to_string()),
+            "member view returns groups owned by others that the account joined"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: reader-gated view")]
+    fn t3_9_owned_groups_of_rejects_non_owner() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let attacker: AccountId = "attacker.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 200_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+        contract.register_group("victim-private".to_string(), Some(false));
+
+        // A NON-owner caller must be rejected — this is the enumeration gate.
+        let ctx2 = get_context(attacker, 0);
+        testing_env!(ctx2.build());
+        contract.get_owned_groups_of(owner.clone()); // panics
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: reader-gated view")]
+    fn t3_10_member_groups_of_rejects_non_owner() {
+        let owner: AccountId = "owner.testnet".parse().unwrap();
+        let attacker: AccountId = "attacker.testnet".parse().unwrap();
+        let shade_id: AccountId = "shade.testnet".parse().unwrap();
+        let fee_recipient: AccountId = "nova-sdk-4.testnet".parse().unwrap();
+        let context = get_context(owner.clone(), 200_000_000_000_000_000_000_000u128);
+        testing_env!(context.build());
+        let mut contract = Contract::new(owner.clone(), shade_id, fee_recipient);
+
+        let ctx2 = get_context(attacker.clone(), 0);
+        testing_env!(ctx2.build());
+        contract.get_member_groups_of(attacker); // panics before returning anything
     }
 }

@@ -354,6 +354,37 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     assert!(refused_txs.is_err(), "public tx view must refuse a non-joinable group");
     println!("✅ Public views refuse non-joinable groups (security invariant holds on real testnet)");
 
+    // ── Reader-gated account views (§5.0) ──────────────────────────────────
+    // Signed as the OWNER (the reader identity). Returns all groups incl. private.
+    // owner owns "public_group" (joinable) and "test_group_nova" (private) by now.
+    let owned: Vec<Value> = owner_account
+        .call(contract.id(), "get_owned_groups_of")
+        .args_json(json!({ "account_id": owner_account.id().to_string() }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?
+        .json()?;
+    assert!(owned.len() >= 2, "reader sees all owned groups incl. private");
+    assert!(
+        owned.iter().any(|g| g == "test_group_nova"),
+        "private group MUST appear in the reader view (unlike the public twin)"
+    );
+    println!("✅ get_owned_groups_of returns private groups to the owner-reader");
+
+    // SECURITY INVARIANT: a NON-owner signer is rejected — the enumeration gate.
+    let attacker = worker.dev_create_account().await?;
+    let refused = attacker
+        .call(contract.id(), "get_owned_groups_of")
+        .args_json(json!({ "account_id": owner_account.id().to_string() }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await;
+    assert!(
+        refused.is_err() || refused.unwrap().is_failure(),
+        "non-owner caller MUST be rejected by get_owned_groups_of"
+    );
+    println!("✅ get_owned_groups_of rejects a non-owner signer (enumeration gate holds)");
+
     println!("\n🎉 All tests passed with nonce-based tokens and real Shade agent integration!");
 
     Ok(())
