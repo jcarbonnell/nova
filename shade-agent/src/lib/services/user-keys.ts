@@ -17,7 +17,7 @@ import type { z } from 'zod';
 
 import { encryptBlob, decryptBlob, deriveKey, sha256Hex, hashForLog } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
-import { verifyAuth0Token } from '../auth.js';
+import { verifyAuth0Token, verifyNovaSession } from '../auth.js';
 import { log } from '../logger.js';
 import { ApiError } from '../errors.js';
 import type {
@@ -292,9 +292,43 @@ async function writeApiKeyRecord(accountId: string, v: number, hash: string): Pr
   await storeBlobToKV(hashKeyId, encryptBlob(Buffer.from(JSON.stringify({ v, hash }), 'utf8')));
 }
 
-/** Resolve the target account for an API-key operation. Email+token is the ONLY authenticated path. */
-async function resolveApiKeyTarget(input: ApiKeyLookupInput): Promise<string> {
-  const { email, auth_token, account_id, wallet_id } = input;
+/**
+ * Resolve the target account for an API-key operation.
+ *
+ * TWO authenticated paths, both establishing the account by construction (§5.0):
+ *   1. session_token with sub=`wallet|…` — a verified nova_session. The account
+ *      comes from the SIGNED claim (verifyNovaSession checks the HMAC), never
+ *      from a body field. Wallet users have no custodial key; API-key derivation
+ *      is account-keyed, so none is needed.
+ *   2. email + auth_token — the Auth0 path (unchanged).
+ *
+ * The bare account_id / wallet_id branch stays DISABLED (Fix E/F) — that was the
+ * account-takeover hole (a client naming any account, unauthenticated). The
+ * wallet path is safe ONLY because the account is extracted from a signature
+ * Shade verified, which the disabled branch never did.
+ *
+ * wallet|-ONLY gate: an email|/apikey| session is intentionally NOT accepted
+ * here — email keeps its Auth0 path, apikey callers don't hit this route, and
+ * isolating Auth0 keeps the §5.11-B better-near-auth switch off the wallet path.
+ */
+export async function resolveApiKeyTarget(input: ApiKeyLookupInput): Promise<string> {
+  const { email, auth_token, account_id, wallet_id, session_token } = input;
+
+  // Path W (§5.11-A): verified wallet nova_session. Checked first so a wallet
+  // caller never reaches the disabled bare-assertion branch below.
+  if (session_token) {
+    const claims = verifyNovaSession(session_token); // throws ApiError(401) if invalid
+    if (!claims.subject.startsWith('wallet|')) {
+      // A validly-signed but non-wallet session (email|/apikey|) does not belong
+      // on this path. Reject rather than silently widen the Auth0 surface.
+      log('warn', 'api_key_session_wrong_subject', {
+        account_hash: hashForLog(claims.account_id),
+      });
+      throw new ApiError(403, 'UNAUTHORIZED', 'Session not valid for this operation');
+    }
+    log('info', 'api_key_wallet_session_resolved', { account_id: claims.account_id });
+    return claims.account_id;
+  }
 
   if (email && auth_token) {
     const verified = await verifyAuth0Token(auth_token);

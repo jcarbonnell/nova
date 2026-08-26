@@ -45,6 +45,7 @@ import { WalletNonceStore } from './wallet-nonce.js';
 import { NEAR_RPC_URL } from './config.js';
 import { getRpcUrl, viewFunction } from './near.js';
 import { log } from './logger.js';
+import { ApiError } from './errors.js';
 // ────────────────────────────────────────────────
 // 1. Auth0 (email users)
 // ────────────────────────────────────────────────
@@ -93,6 +94,47 @@ export async function verifyAuth0Token(token) {
             resolve({ email, sub });
         });
     });
+}
+export function verifyNovaSession(token) {
+    const secret = process.env.SESSION_TOKEN_SECRET;
+    const issuer = process.env.SESSION_TOKEN_ISSUER;
+    const audience = process.env.SESSION_TOKEN_AUDIENCE;
+    // Misconfiguration must fail closed, not fall through to an unverified path.
+    if (!secret || !issuer || !audience) {
+        log('error', 'nova_session_verify_misconfigured');
+        throw new ApiError(500, 'SESSION_VERIFY_MISCONFIGURED', 'Session verification not configured');
+    }
+    let payload;
+    try {
+        // HS256 ONLY — never allow alg downgrade. aud/iss/exp enforced by the lib.
+        const verified = jwt.verify(token, secret, {
+            algorithms: ['HS256'],
+            issuer,
+            audience,
+        });
+        if (typeof verified === 'string') {
+            throw new Error('Unexpected string payload');
+        }
+        payload = verified;
+    }
+    catch (e) {
+        // Scrubbed by the logger; carries no token bytes.
+        log('warn', 'nova_session_verify_failed', {
+            reason: e instanceof Error ? e.name : 'unknown',
+        });
+        throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+    }
+    if (payload.type !== 'nova_session') {
+        log('warn', 'nova_session_verify_failed', { reason: 'wrong_type' });
+        throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+    }
+    const account_id = payload.account_id;
+    const subject = payload.sub;
+    if (typeof account_id !== 'string' || !account_id || typeof subject !== 'string' || !subject) {
+        log('warn', 'nova_session_verify_failed', { reason: 'missing_claims' });
+        throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+    }
+    return { account_id, subject };
 }
 // ────────────────────────────────────────────────
 // 2. NOVA ephemeral token (NEAR-account self-signed)

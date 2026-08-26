@@ -50,6 +50,7 @@ import { NEAR_RPC_URL } from './config.js';
 
 import { getRpcUrl, viewFunction } from './near.js';
 import { log } from './logger.js';
+import { ApiError } from './errors.js';
 
 // ────────────────────────────────────────────────
 // 1. Auth0 (email users)
@@ -109,6 +110,77 @@ export async function verifyAuth0Token(token: string): Promise<{ email: string; 
       }
     );
   });
+}
+
+// ────────────────────────────────────────────────
+// 1b. nova_session (HS256, minted by the frontend)
+// ────────────────────────────────────────────────
+//
+// The frontend mints a nova_session JWT (lib/session.ts, `jose` HS256) for every
+// authenticated identity — email|…, apikey|…, wallet|… — all sharing ONE shape.
+// MCP already verifies it (SESSION_TOKEN_* env). This is the SAME verification,
+// added to Shade so the wallet API-key path (§5.11-A) can resolve a wallet
+// user's account from their session cookie WITHOUT a custodial key — the account
+// comes from a signature Shade verifies, never from a bare client assertion.
+//
+// Uses `jsonwebtoken` (already imported for Auth0), so no new dependency. Reads
+// the SAME three env vars MCP verifies against, so the two stay consistent
+// through the §5.12 CVM-URL churn (the audience IS the MCP URL, which that
+// migration changes — keep it in env, never hardcode).
+//
+// Throws ApiError(401) on ANY failure (bad signature, wrong alg/aud/iss, expired,
+// missing claim, wrong `type`). The caller trusts the returned account_id ONLY
+// because this function verified the HMAC — that is the whole security argument.
+
+export interface NovaSessionClaims {
+  account_id: string;
+  subject: string; // the JWT `sub`: `email|…`, `apikey|…`, or `wallet|…`
+}
+
+export function verifyNovaSession(token: string): NovaSessionClaims {
+  const secret = process.env.SESSION_TOKEN_SECRET;
+  const issuer = process.env.SESSION_TOKEN_ISSUER;
+  const audience = process.env.SESSION_TOKEN_AUDIENCE;
+
+  // Misconfiguration must fail closed, not fall through to an unverified path.
+  if (!secret || !issuer || !audience) {
+    log('error', 'nova_session_verify_misconfigured');
+    throw new ApiError(500, 'SESSION_VERIFY_MISCONFIGURED', 'Session verification not configured');
+  }
+
+  let payload: JwtPayload;
+  try {
+    // HS256 ONLY — never allow alg downgrade. aud/iss/exp enforced by the lib.
+    const verified = jwt.verify(token, secret, {
+      algorithms: ['HS256'],
+      issuer,
+      audience,
+    });
+    if (typeof verified === 'string') {
+      throw new Error('Unexpected string payload');
+    }
+    payload = verified;
+  } catch (e) {
+    // Scrubbed by the logger; carries no token bytes.
+    log('warn', 'nova_session_verify_failed', {
+      reason: e instanceof Error ? e.name : 'unknown',
+    });
+    throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+  }
+
+  if (payload.type !== 'nova_session') {
+    log('warn', 'nova_session_verify_failed', { reason: 'wrong_type' });
+    throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+  }
+
+  const account_id = payload.account_id;
+  const subject = payload.sub;
+  if (typeof account_id !== 'string' || !account_id || typeof subject !== 'string' || !subject) {
+    log('warn', 'nova_session_verify_failed', { reason: 'missing_claims' });
+    throw new ApiError(401, 'INVALID_SESSION', 'Invalid or expired session');
+  }
+
+  return { account_id, subject };
 }
 
 // ────────────────────────────────────────────────

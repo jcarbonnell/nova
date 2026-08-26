@@ -116,12 +116,21 @@ export const CheckSchema = z.object({
   account_id: z.string().optional(),
 });
 
-/** POST /generate-api-key and POST /has-api-key — same shape, all optional. */
+/**
+ * POST /generate-api-key, /rotate-api-key, /has-api-key — same shape, all optional.
+ *
+ * `session_token` (§5.11-A wallet path): a verified nova_session whose `sub` is
+ * `wallet|<account>`. The handler (resolveApiKeyTarget) verifies its HMAC and
+ * derives the account from the signed claim — NEVER from a bare `account_id`
+ * body field (that stays the disabled Fix E/F branch). All optional so the three
+ * existing entry shapes are unchanged.
+ */
 export const ApiKeyLookupSchema = z.object({
   email: z.string().optional(),
   auth_token: z.string().optional(),
   account_id: z.string().optional(),
   wallet_id: z.string().optional(),
+  session_token: z.string().optional(),
 });
 
 /**
