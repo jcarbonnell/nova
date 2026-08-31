@@ -14,7 +14,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "nova-sdk-js": "1.2.2",
+    "nova-sdk-js": "1.2.3",
     "zod": "4.1.12"
   }
 }
