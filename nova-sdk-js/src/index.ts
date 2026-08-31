@@ -354,6 +354,27 @@ export class NovaSdk {
     return this.callMcpTool<AuthStatusResult>('auth_status', { group_id: groupId });
   }
 
+  // List groups the authenticated account owns. Routed through MCP: the owning
+  // account is derived from the verified session (no arg passed, so no
+  // client-supplied account can be spoofed). Returns [] when none are owned.
+  async getOwnedGroups(): Promise<string[]> {
+    return this.callMcpTool<string[]>('get_owned_groups', {});
+  }
+
+  // List groups the authenticated account is a member of. Same MCP-session
+  // identity model as getOwnedGroups. Returns [] when a member of none.
+  async getMemberGroups(): Promise<string[]> {
+    return this.callMcpTool<string[]>('get_member_groups', {});
+  }
+
+  // List the members of a group. Routed through MCP because the underlying
+  // contract read is authorization-gated; an unauthorized caller is rejected by
+  // the contract and surfaced here as a NovaError. Caller must be authorized
+  // on the group.
+  async getGroupMembers(groupId: string): Promise<string[]> {
+    return this.callMcpTool<string[]>('get_group_members', { group_id: groupId });
+  }
+
   // Register a new group. Caller becomes owner.
   async registerGroup(groupId: string): Promise<string> {
     const result = await this.callMcpTool<{ message?: string }>('register_group', { 
