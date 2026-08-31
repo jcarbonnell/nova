@@ -616,23 +616,15 @@ export class NovaSdk {
     }
   }
 
-  async getTransactionsForGroup(groupId: string, userId?: string): Promise<Transaction[]> {
-    const id = userId || this.accountId;
-    try {
-      const result = await this.provider.query({
-        request_type: 'call_function',
-        account_id: this.contractId,
-        method_name: 'get_transactions_for_group',
-        args_base64: Buffer.from(JSON.stringify({ group_id: groupId, user_id: id })).toString('base64'),
-        finality: 'final',
-      });
-      
-      const callResult = result as unknown as CallFunctionResponse;
-      const decoded = Buffer.from(callResult.result).toString();
-      return JSON.parse(decoded) as Transaction[];
-    } catch (e) {
-      throw new NovaError(`Transactions query error: ${e}`, e as Error);
-    }
+  // Routed through MCP (not direct RPC). The contract's get_transactions_for_group
+  // is #[payable] + gated (is_authorized || owner), so a free view call panics
+  // ("Attach at least … for fee"). MCP's get_group_transactions branches on
+  // joinability: a joinable group uses the free public view; a private group uses
+  // the signed, fee'd path (~0.0013 NEAR) and returns the list only to an
+  // authorized member. The `userId` param is dropped — MCP derives identity from
+  // the verified session, so a caller can't query as another account.
+  async getTransactionsForGroup(groupId: string): Promise<Transaction[]> {
+    return this.callMcpTool<Transaction[]>('get_group_transactions', { group_id: groupId });
   }
 
   // Utility Methods

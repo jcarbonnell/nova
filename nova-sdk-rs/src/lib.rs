@@ -1,4 +1,4 @@
-// nova-sdk-rs v1.0.1 - NOVA SDK for Rust
+// nova-sdk-rs v1.2.3 - NOVA SDK for Rust
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
 use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
@@ -1033,34 +1033,20 @@ impl NovaSdk {
     }
 
     /// get transactions for a group.
+    ///
+    /// Routed through MCP (not direct RPC). The contract's get_transactions_for_group
+    /// is #[payable] + gated (is_authorized || owner), so a free view call panics
+    /// ("Attach at least … for fee"). MCP's get_group_transactions branches on
+    /// joinability: a joinable group uses the free public view; a private group
+    /// uses the signed, fee'd path (~0.0013 NEAR) and returns the list only to an
+    /// authorized member. The `user_id` param is dropped — MCP derives identity from
+    /// the verified session, so a caller can't query as another account.
     pub async fn get_transactions_for_group(
         &self,
         group_id: &str,
-        user_id: Option<&str>,
     ) -> Result<Vec<Transaction>, NovaError> {
-        let id = user_id.unwrap_or(&self.account_id);
-        let args = json!({"group_id": group_id, "user_id": id}).to_string().into_bytes();
-        
-        let request = methods::query::RpcQueryRequest {
-            block_reference: BlockReference::Finality(Finality::Final),
-            request: QueryRequest::CallFunction {
-                account_id: self.contract_id.clone(),
-                method_name: "get_transactions_for_group".to_string(),
-                args: args.into(),
-            },
-        };
-        
-        let response = self.client.call(request).await
-            .map_err(|e| NovaError::Near(e.to_string()))?;
-        
-        match response.kind {
-            JsonRpcQueryResponseKind::CallResult(result) => {
-                let txs: Vec<Transaction> = serde_json::from_slice(&result.result)
-                    .map_err(|e| NovaError::Near(format!("Failed to parse transactions: {}", e)))?;
-                Ok(txs)
-            }
-            _ => Err(NovaError::Near("Invalid response kind".to_string())),
-        }
+        let args = json!({ "group_id": group_id });
+        self.call_mcp_tool("get_group_transactions", args).await
     }
 
     /// Compute SHA256 hash of data.
@@ -1296,24 +1282,22 @@ mod tests {
     #[tokio::test]
     async fn test_get_transactions_for_group() {
         let sdk = make_sdk(TEST_ACCOUNT_ID).unwrap();
-        let result = sdk.get_transactions_for_group("test_group", Some("random.user.testnet")).await;
-        match result {
-            Ok(txs) => {
-                // May be empty for random user
-                println!("Found {} transactions", txs.len());
-            }
-            Err(e) => {
-                assert!(matches!(e, NovaError::Near(_)));
-            }
-        }
+        // MCP-routed now (test api_key → fails at session-token stage). Accept any
+        // auth/transport error variant instead of the old direct-RPC Near error.
+        let result = sdk.get_transactions_for_group("test_group").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            NovaError::Token(_) | NovaError::Mcp(_) | NovaError::Http(_) | NovaError::Auth(_)
+        ));
     }
 
     #[tokio::test]
-    async fn test_get_transactions_for_group_default_user() {
+    async fn test_get_transactions_for_group_mcp_routed() {
         let sdk = make_sdk(TEST_ACCOUNT_ID).unwrap();
-        let result = sdk.get_transactions_for_group("test_group", None).await;
-        // Uses sdk.account_id by default
-        assert!(result.is_ok() || matches!(result.unwrap_err(), NovaError::Near(_)));
+        // No second arg anymore; MCP derives identity from the session.
+        let result = sdk.get_transactions_for_group("test_group").await;
+        assert!(result.is_err()); // test api_key can't mint a real session
     }
 
     #[tokio::test]
@@ -1661,7 +1645,7 @@ mod tests {
             }
         };
 
-        let txs = sdk.get_transactions_for_group("test_group", None).await.unwrap();
+        let txs = sdk.get_transactions_for_group("test_group").await.unwrap();
         println!("Retrieved {} transactions for group", txs.len());
         
         if !txs.is_empty() {

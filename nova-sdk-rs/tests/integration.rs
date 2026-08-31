@@ -234,20 +234,13 @@ async fn test_get_transactions_for_group() {
         .with_api_key("nova_sk_testkey1234567890123456789012345678901");
     let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
 
-    // Test with likely unauthorized user → expect empty vec or error
-    let result = sdk.get_transactions_for_group("test_group", Some("random.user.testnet")).await;
-    
-    match result {
-        Ok(txs) => {
-            // Unauthorized might return empty vec
-            println!("✅ Retrieved {} transactions (may be 0 for unauthorized user)", txs.len());
-        }
-        Err(e) => {
-            // Or contract might panic with auth error
-            assert!(matches!(e, NovaError::Near(_)), "Expect Near error for auth failure");
-            println!("⚠️  Auth error (expected): {}", e);
-        }
-    }
+    // MCP-routed now: a test api_key fails at the session-token stage.
+    let result = sdk.get_transactions_for_group("test_group").await;
+    assert!(result.is_err(), "test api_key should not authenticate");
+    assert!(matches!(
+        result.unwrap_err(),
+        NovaError::Token(_) | NovaError::Mcp(_) | NovaError::Http(_) | NovaError::Auth(_)
+    ));
 }
 
 // =========================================================================
@@ -647,9 +640,9 @@ async fn test_get_transactions_for_group_integration() {
         }
     };
 
-    // Query transactions for authorized user (using SDK's account_id)
-    let result = sdk.get_transactions_for_group("test_group", None).await;
-
+    // Query transactions (MCP derives identity from the session; no user_id arg).
+    let result = sdk.get_transactions_for_group("test_group").await;
+    
     match result {
         Ok(txs) => {
             println!("✅ Retrieved {} transactions for test_group", txs.len());

@@ -1,0 +1,20 @@
+{
+  "name": "@nova-sdk/plugin",
+  "version": "0.1.0",
+  "description": "NOVA plugin for Claude Code and Codex — a local stdio MCP shim exposing NOVA store/retrieve/list over the proven API-key path.",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/jcarbonnell/nova" },
+  "engines": { "node": ">=22" },
+  "files": [
+    "server",
+    ".mcp.json",
+    ".claude-plugin",
+    "README.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "nova-sdk-js": "1.2.2",
+    "zod": "4.1.12"
+  }
+}

@@ -59,3 +59,6 @@ shade-agent/near-rpc.json
 
 # nova-submit wasm tool
 nova-submit-tool/target/
+
+# agent plugins
+claude-plugin/node_modules/

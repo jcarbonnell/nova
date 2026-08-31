@@ -135,7 +135,7 @@ export declare class NovaSdk {
     getGroupChecksum(groupId: string): Promise<string | null>;
     getGroupOwner(groupId: string): Promise<string | null>;
     estimateFee(action: string): Promise<bigint>;
-    getTransactionsForGroup(groupId: string, userId?: string): Promise<Transaction[]>;
+    getTransactionsForGroup(groupId: string): Promise<Transaction[]>;
     /** Compute SHA256 hash of data (synchronous, Node.js only) */
     computeHash(data: Buffer): string;
     /** Compute SHA256 hash of data (async, works everywhere) */

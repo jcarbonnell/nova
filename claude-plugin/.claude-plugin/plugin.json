@@ -1,0 +1,29 @@
+{
+  "name": "nova",
+  "version": "0.1.0",
+  "description": "NOVA inside your own agent — verifiable, privacy-preserving shared storage on NEAR. Store, retrieve, and manage encrypted files through NOVA's memory primitive using only an API key.",
+  "author": {
+    "name": "CivicTech OÜ",
+    "url": "https://nova-sdk.com"
+  },
+  "homepage": "https://nova-sdk.com",
+  "repository": "https://github.com/jcarbonnell/nova",
+  "license": "MIT",
+  "keywords": ["near", "storage", "encryption", "mcp", "memory"],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "NOVA_ACCOUNT_ID": {
+      "type": "string",
+      "title": "NOVA Account ID",
+      "description": "Your NOVA account ID (e.g. alice.nova-sdk.near). Get one at nova-sdk.com.",
+      "required": true
+    },
+    "NOVA_API_KEY": {
+      "type": "string",
+      "title": "NOVA API Key",
+      "description": "Your NOVA API key (starts with nova_sk_). From nova-sdk.com \u2192 Manage Account. Stored securely; never shown in logs.",
+      "required": true,
+      "sensitive": true
+    }
+  }
+}

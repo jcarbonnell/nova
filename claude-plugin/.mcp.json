@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "nova": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.js"],
+      "env": {
+        "NOVA_API_KEY": "${user_config.NOVA_API_KEY}",
+        "NOVA_ACCOUNT_ID": "${user_config.NOVA_ACCOUNT_ID}",
+        "NOVA_MCP_URL": "${NOVA_MCP_URL}",
+        "NOVA_AUTH_URL": "${NOVA_AUTH_URL}",
+        "NOVA_RPC_URL": "${NOVA_RPC_URL}",
+        "NOVA_CONTRACT_ID": "${NOVA_CONTRACT_ID}"
+      }
+    }
+  }
+}
