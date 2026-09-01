@@ -1,15 +1,15 @@
-# NOVA Secure File-Sharing
+# NOVA  - Persistent memory for AI agents
 
-NOVA is a privacy-first, decentralized file-sharing primitive, empowering user-owned AI at scale with encryted data persistence. NOVA enables secure storage and sharing of sensitive data (e.g., datasets for AI agent fine-tuning) without centralized intermediaries, leveraging group key management, IPFS, NEAR smart contracts, and verifiable TEEs via Shade Agents.
+NOVA is a privacy-first data layer primitive, empowering AI agents with an encrypted, auditable, and self-sovereign memory. NOVA enables the secure storage and sharing of sensitive data (e.g., a private conversation with your AI agent) without centralized intermediaries, leveraging group key management,  FastFS (NEAR-native storage), NEAR smart contracts, and verifiable Trusted Execution Environments via Shade Agents.
 
-NOVA fills critical gaps in AI ecosystem —no native encrypted persistence— while inheriting NEAR Protocol’s strengths like sharding for scalability, low-cost transactions (~0.01 NEAR/gas), and AI-native tools (e.g., NEAR AI CLI). Whether you're building AI social platforms, DeFi apps, or autonomous agent workflows, NOVA provides a secure, verifiable data layer.
+NOVA fills critical gaps in AI ecosystems —no native encrypted data persistence across agents— while inheriting NEAR Protocol’s strengths like sharding for scalability, low-cost transactions (~0.01 NEAR/gas), and AI-native tools (e.g., NEAR AI CLI). Whether you're building AI social platforms, DeFi apps, or autonomous agent workflows, NOVA provides a secure, verifiable data layer, protable across your LLMs and persistent beyond any model lifetime.
 
-**Dual-Network Support**: Use mainnet for production [nova-sdk.com](https://nova-sdk.com) or testnet for development [testnet.nova-sdk.com](https://testnet.nova-sdk.com). Testnet uses mocked IPFS for free testing; mainnet uses real Pinata integration (paid).
+**Dual-Network Support**: Use mainnet for production [nova-sdk.com](https://nova-sdk.com) or testnet for development [testnet.nova-sdk.com](https://testnet.nova-sdk.com). Testnet uses mocked storage for free testing; mainnet stores files on FastFS (NEAR-native).
 
 ## Why Use NOVA?
 
 - **Privacy-First**: Encrypt files with group keys managed off-chain in TEEs, ensuring only authorized users or AI agents access data—keys never exposed on-chain.
-- **Decentralized**: Store files on IPFS, log metadata on NEAR’s immutable ledger, and manage access via smart contracts. No central servers.
+- **Decentralized**: Store files on FastFS (durability rooted in NEAR block history), log metadata on NEAR’s immutable ledger, and manage access via smart contracts. No central servers.
 - **AI-Ready**: Seamlessly integrates with NEAR’s TEEs, Intents, and Shade Agents, enabling secure data for AI training and execution.
 - **Developer-Friendly**: Free-to-integrate SDKs (Rust crate and JS package) with pay-per-action fees baked into the contract, blending into your dApp’s backend.
 
@@ -17,9 +17,9 @@ NOVA fills critical gaps in AI ecosystem —no native encrypted persistence— w
 
 - **Group Creation & Management**: Owners (NEAR AccountIds) create groups via smart contracts, supporting collaborative AI training with multi-group membership. Anyone can create groups (per future update—currently owner-gated for MVP stability).
 - **Access Control**: Smart contracts maintain a mapping table for members and attestations, ensuring only authorized users access files via ephemeral tokens. Vital for user-owned AI privacy.
-- **Secure Storage**: Files are encrypted with group keys and pinned to IPFS, optimized for AI dApps (e.g., datasets for fine-tuning).
+- **Secure Storage**: Files are encrypted with per-file keys (wrapped under the group key) and stored on FastFS, optimized for AI dApps (e.g., datasets for fine-tuning). Deletion crypto-shreds a file's key and tombstones its record — real removal, not just unpinning.
 - **Access Workflow**: SDKs retrieve encryption keys from TEE via secure tokens, then perform client-side encryption/decryption —plaintext data never leaves your device or server.
-- **Revocation & Key Rotation**: Remove members and rotate keys in TEEs with lazy re-encryption to minimize latency/gas costs for large groups.
+- **Revocation & Key Rotation**: Remove members and rotate the group key in the TEE so a revoked member cannot decrypt files uploaded after revocation.
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
 ## Group Key Security
@@ -27,11 +27,11 @@ NOVA fills critical gaps in AI ecosystem —no native encrypted persistence— w
 **Keys are managed off-chain in verifiable TEEs via Shade Agents. Never published on-chain, NOVA file-sharing ensures unbreakable privacy against blockchain fetches.**
 
 NOVA's keys are generated, stored, and distributed exclusively within Trusted Execution Environments (TEEs) using Shade Agents. This eliminates any on-chain exposure:
-- **Off-Chain Key Management**: Keys are derived via HKDF from a master seed and encrypted with AES-256-CBC inside the TEE. Encrypted blobs are stored on-chain in `nova-kv.near` — a purpose-built NEAR smart contract — accessible only by the Shade Agent's deterministic signer key, registered with minimal FunctionCall permission scope.
+- **Off-Chain Key Management**: Keys are derived via HKDF from a master seed and encrypted with AES-256-GCM inside the TEE (one legacy blob, the master-root, remains AES-256-CBC and is read transparently for backward compatibility; all new writes are GCM). Encrypted blobs are stored on-chain in `nova-kv.near` — a purpose-built NEAR smart contract — accessible only by the Shade Agent's deterministic signer key, registered with minimal FunctionCall permission scope.
 - **No On-Chain Keys**: The smart contract stores only group metadata, attestations (checksums/code hashes), and used nonces—no keys or decryptable data. RPC queries (e.g., view_state) reveal nothing sensitive.
 - **Secure Distribution**: Users request ephemeral nonce-based access tokens from the contract (gated by on-chain membership). Tokens incorporate a timestamp and nonce verified in-TEE before key release. Group keys are derived deterministically from a master seed using HKDF — the same key is always re-derived for the same group, making keys stateless and recoverable across TEE restarts.
 - **Verification & Attestation**: Every key operation returns a TEE checksum (via agentInfo), proving execution in genuine hardware with unmodified code—no tampering possible.
-- **Rotation & Revocation**: On member removal, `revoke_member` atomically revokes on-chain and rotates the group key in a single call — a new versioned salt is derived, the rotated key is stored on `nova-kv.near`, and the revoked member's prior key is immediately invalid.
+- **Rotation & Revocation**: On member removal, membership is revoked on-chain and the group key is rotated off-chain in the TEE — a new versioned salt is derived and the rotated key is stored on `nova-kv.near`, so the revoked member cannot decrypt files uploaded after revocation.
 - **Attack Resistance**: Even targeted attacks (e.g., indexing interactions or RPC dumps) can't extract keys: they're never on-chain. High-value targets (e.g., AI datasets) remain secure against nation-state or sophisticated threats.
 
 NOVA's architecture combined with Shade/TEEs confidentiality provides bullet-proof security for your data: verifiable, private, and resilient, aligning with NEAR's user-owned AI vision.
@@ -47,20 +47,20 @@ NOVA complements NEAR’s AI-focused tools:
 
 Choose the integration that best fits your use case:
 
-### 🤖 MCP Server - AI Assistant Integration
+### 🤖 Claude Plugin - AI Assistant Integration
 
-For AI-assisted workflows using Claude or other MCP-compatible assistants, integrate the publicly deployed MCP server as a custom connector in your MCP client:
-```
-https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/mcp
-```
+For AI-assisted workflows, install the `nova-ai-memory` plugin in Claude Code or Claude Cowork — it exposes NOVA's store, retrieve, list, and group-management tools natively. No wallet, no NEAR knowledge, just an API key; encryption stays client-side on your machine.
 
-The MCP server runs alongside the Shade Agent in a Phala TDX CVM — no centralized hosting, no third-party auth gate. You can also interact with NOVA directly from its multi-user interface at [https://nova-sdk.com](https://nova-sdk.com)
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install nova-ai-memory@claude-community
 
-**Best for**: Natural language file operations, AI agent workflows, conversational interfaces
+On install you enter your NOVA Account ID and API key (stored in your OS keychain). Then ask your agent: "Which group do I own?" or "Upload these notes to my research group." You can also interact with NOVA directly from its multi-user interface at [https://nova-sdk.com](https://nova-sdk.com)
 
-**OpenClaw Skill**: For agent-side retrieval, use the [nova-skill](./openclaw/skills/nova-file-sharing) — a shell + Python skill that authenticates, retrieves, and decrypts NOVA files directly from any OpenClaw-compatible agent.
+**Best for**: Natural language file operations, AI agent workflows, conversational interfaces. *(Codex/ChatGPT support is on the roadmap.)*
 
-**Documentation**: [/mcp-server](./mcp-server) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
+**IronClaw tool**: For agent-side encrypted uploads, use [nova-submit](./nova-submit-tool) — a self-contained IronClaw WASM tool that AES-256-GCM-encrypts a file and uploads it to a NOVA group in one call, with the crypto compiled in so the agent's model never touches keys or ciphertext.
+
+**Documentation**: [/nova-ai-memory](./nova-ai-memory) | [GitBook](https://civictech-ou.gitbook.io/nova-docs/)
 
 ---
 
@@ -74,7 +74,7 @@ npm install nova-sdk-js
 
 **Best for**: Web dApps, API servers, browser applications, TypeScript projects
 
-**Documentation**: [/nova-sdk-js](./nova-sdk-js) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
+**Documentation**: [/nova-sdk-js](./nova-sdk-js) | [GitBook](https://civictech-ou.gitbook.io/nova-docs/)
 
 ---
 
@@ -84,12 +84,12 @@ For high-performance applications, blockchain integration, and system-level deve
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.1.0"
+nova-sdk-rs = "1.2.3"
 ```
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
 
-**Documentation**: [/nova-sdk-rs](./nova-sdk-rs) | [GitBook](https://nova-25.gitbook.io/nova-docs/)
+**Documentation**: [/nova-sdk-rs](./nova-sdk-rs) | [GitBook](https://civictech-ou.gitbook.io/nova-docs/)
 
 ---
 
@@ -138,13 +138,13 @@ const result = await sdk.upload(
 );
 
 console.log('✅ Uploaded!');
-console.log('📦 IPFS CID:', result.cid);
+console.log('📦 Ref:', result.cid);  // FastFS location
 console.log('🔗 Transaction:', result.trans_id);
 
 // Retrieve and decrypt file (client-side decryption)
 const { data } = await sdk.retrieve(
   'my-private-files',
-  result.cid  // IPFS hash from upload
+  result.cid  // storage ref from upload
 );
 
 fs.writeFileSync('./decrypted-doc.pdf', data);
@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
 
     println!("✅ Uploaded!");
-    println!("📦 IPFS CID: {}", result.cid);
+    println!("📦 Ref: {}", result.cid);  // FastFS location
     println!("🔗 Transaction: {}", result.trans_id);
 
     // Retrieve file (client-side decryption)
@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 🧪 Testnet Usage
 
-⚠️ **Testnet Mode**: IPFS uploads are mocked on testnet - files are stored in-memory and not persisted to IPFS. Blockchain operations (group registration, member management) are real and use faucet tokens on nova-sdk-6.testnet.
+⚠️ **Testnet Mode**: file uploads are mocked on testnet - files are stored in-memory and not persisted. Blockchain operations (group registration, member management) are real and use faucet tokens on nova-sdk-6.testnet.
 
 For development, use **testnet** explicitly:
 
@@ -237,8 +237,8 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
     └─┬───────────────┬────────────────┘
       │               │                │
 ┌─────▼──┐      ┌─────▼─────┐        ┌─▼─────────┐
-│  IPFS  │      │   NEAR    │        │ Shade/TEE │
-│(Pinata)│      │ Blockchain│        │ (key ops) │
+│ FastFS │      │   NEAR    │        │ Shade/TEE │
+│        │      │ Blockchain│        │ (key ops) │
 └────────┘      └─────┬─────┘        └───────────┘
  Encrypted       nova-sdk.near          Keys Never
    Storage       nova-kv.near           Exposed
@@ -250,10 +250,10 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 2. **SDK sends request** to MCP server with session token (auto-managed)
 3. **MCP verifies JWT** → retrieves encryption key from Shade TEE
 4. **SDK encrypts locally** using AES-256-GCM (key never leaves client unencrypted)
-5. **MCP uploads encrypted data** to IPFS and records transaction on NEAR
+5. **MCP writes encrypted data** to FastFS and records transaction on NEAR
 6. **Shade Agent** derives keys in TEE via HKDF and stores encrypted blobs on `nova-kv.near` — keys are never exposed in plaintext on-chain
-7. **IPFS stores** encrypted files (ciphertext only)
-8. **NEAR records** transaction metadata (CID, file hash)
+7. **FastFS stores** encrypted files (ciphertext only), durability rooted in NEAR block history
+8. **NEAR records** transaction metadata (location, file hash)
 
 
 ## Use Cases
@@ -269,7 +269,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 - **Audit Trails**: Immutable transaction logs on NEAR blockchain
 
 ### 🔐 Privacy-Preserving Applications
-- **Healthcare Records**: HIPAA-compliant data sharing
+- **Healthcare Records**: privacy-preserving, HIPAA-aligned data sharing (NOVA provides the encryption and auditable-access primitives; it is not itself a certified compliance product)
 - **Financial Data**: Secure transmission of sensitive financial information
 - **Identity Documents**: User-controlled identity verification data
 
@@ -277,11 +277,11 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 
 Operations require small NEAR deposits:
 
-- Register group: ~0.1 NEAR
-- Add member: ~0.0005 NEAR
-- Revoke member: ~0.0005 NEAR
-- Retrieve file: ~0.001 NEAR
-- Upload file: ~0.01 NEAR
+- Register group: ~0.64 NEAR
+- Add member: ~0.013 NEAR
+- Revoke member: ~0.001 NEAR
+- Retrieve file: ~0.013 NEAR
+- Upload file: ~0.039 NEAR
 
 Ensure your NEAR account has sufficient balance before operations.
 
@@ -289,15 +289,15 @@ Ensure your NEAR account has sufficient balance before operations.
 
 Comprehensive documentation is available on GitBook:
 
-📚 **[NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)**
+📚 **[NOVA Documentation](https://civictech-ou.gitbook.io/nova-docs/)**
 
 ### Quick Links
-- [Quick Start Examples](https://nova-25.gitbook.io/nova-docs#quick-start-examples)
-- [MCP Server Guide](https://nova-25.gitbook.io/nova-docs/mcp-server)
-- [JavaScript SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-js)
-- [Rust SDK Reference](https://nova-25.gitbook.io/nova-docs/nova-sdk-rs)
-- [NOVA Shade Agent](https://nova-25.gitbook.io/nova-docs/shade-agent)
-- [Architecture & Concepts](https://nova-25.gitbook.io/nova-docs#architecture)
+- [Quick Start Examples](https://civictech-ou.gitbook.io/nova-docs#quick-start-examples)
+- [MCP Server Guide](https://civictech-ou.gitbook.io/nova-docs/mcp-server)
+- [JavaScript SDK Reference](https://civictech-ou.gitbook.io/nova-docs/nova-sdk-js)
+- [Rust SDK Reference](https://civictech-ou.gitbook.io/nova-docs/nova-sdk-rs)
+- [NOVA Shade Agent](https://civictech-ou.gitbook.io/nova-docs/shade-agent)
+- [Architecture & Concepts](https://civictech-ou.gitbook.io/nova-docs#architecture)
 
 ## Security Considerations
 
@@ -305,23 +305,27 @@ Comprehensive documentation is available on GitBook:
 
 1. **Private Keys** - Never publish NEAR private keys to version control
 2. **Key Storage** - Keys managed in TEEs; never handle plaintext in code
-3. **IPFS Privacy** - IPFS content is addressable by CID; encryption is essential
+3. **Storage Privacy** - stored content is addressable by reference; client-side encryption is essential
 4. **Access Control** - Always verify user authorization before operations
 5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
-6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to IPFS or MCP server
+6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to FastFS or MCP server
 7. **Token Ephemerality** - Nonces and timestamps prevent replay; session tokens auto-refresh
 8. **API Key Security** - Store API keys in environment variables; never commit to version control
 
 
 ## Future Roadmap
 
+### In Progress
+- **Off-chain retention driver**: Per-group retention windows and file deletion are live on-chain (`set_group_retention`, `get_expired_transactions`, `tombstone_transactions`); the scheduled off-chain driver that reads expired files and tombstones them is the last remaining backend piece.
+- **Codex / ChatGPT plugin**: The Claude plugin (`nova-ai-memory`) is shipped. A Codex/ChatGPT equivalent is deferred — those surfaces require a hosted MCP endpoint consumed by a cloud agent, which is incompatible with NOVA's client-side encryption model (plaintext and keys never leave the user's machine). NOVA ships there unchanged if/when they support local, client-side-encrypting plugins in their public directories.
+- **Cold master-seed backup**: NOVA accounts and group keys persist on `nova-kv.near` and recover across TEE restarts via the master seed. Remaining risk is master seed loss — a cold backup mechanism for the encrypted master seed blob is on the roadmap.
+
 ### Potential Enhancements
-- **AI Metadata Extraction**: Automate metadata extraction for optimized IPFS indexing.
+- **AI Metadata Extraction**: Automate metadata extraction for optimized storage indexing.
 - **Dataset Monetization**: Add pricing for file access/downloads.
 - **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
 - **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + IPFS storage costs)
 - **Multi-Chain Support**: Expand to other NEAR-compatible chains
-- **NOVA account Backup**: NOVA accounts and group keys are now persisted on `nova-kv.near` as encrypted blobs, recoverable across TEE restarts via the master seed. Remaining risk is master seed loss — a cold backup mechanism for the encrypted master seed blob is on the roadmap.
 
 ## Contributing
 
@@ -347,7 +351,7 @@ See individual SDK directories for specific testing instructions.
 ## Resources
 
 ### NOVA Resources
-- [Documentation](https://nova-25.gitbook.io/nova-docs/)
+- [Documentation](https://civictech-ou.gitbook.io/nova-docs/)
 - [GitHub Repository](https://github.com/jcarbonnell/nova)
 - [Issues](https://github.com/jcarbonnell/nova/issues)
 - [Discussions](https://github.com/jcarbonnell/nova/discussions)
@@ -373,7 +377,7 @@ Need help? We're here for you:
 
 - **Issues**: [GitHub Issues](https://github.com/jcarbonnell/nova/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/jcarbonnell/nova/discussions)
-- **Documentation**: [GitBook](https://nova-25.gitbook.io/nova-docs/)
+- **Documentation**: [GitBook](https://civictech-ou.gitbook.io/nova-docs/)
 
 ## License
 

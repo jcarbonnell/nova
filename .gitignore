@@ -8,6 +8,8 @@
 .idea/
 .vscode/
 nova-venv/
+**/node_modules/
+**/.env
 
 # Contract
 contract/target
@@ -61,4 +63,6 @@ shade-agent/near-rpc.json
 nova-submit-tool/target/
 
 # agent plugins
-claude-plugin/node_modules/
+nova-ai-memory/node_modules/
+nova-ai-memory/.env
+.claude/
