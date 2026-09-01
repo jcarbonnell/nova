@@ -1,5 +1,5 @@
 {
-  "name": "nova",
+  "name": "nova-ai-memory",
   "version": "0.1.0",
   "description": "NOVA inside your own agent — verifiable, privacy-preserving shared storage on NEAR. Store, retrieve, and manage encrypted files through NOVA's memory primitive using only an API key.",
   "author": {
