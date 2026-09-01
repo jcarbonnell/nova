@@ -60,8 +60,8 @@ await nova.registerGroup({ group_id: 'my-group' });
 
 // Upload a file, end-to-end encrypted:
 const up = await nova.prepareUpload({ group_id: 'my-group', filename: 'doc.pdf' });
-// up.result.key is the base64 AES-256 GROUP key — encrypt client-side with it,
-// then finalize:
+// up.result.key is the base64 AES-256 PER-FILE key (random per upload, wrapped
+// under the group key server-side) — encrypt client-side with it, then finalize:
 await nova.finalizeUpload({
   upload_id: up.result.upload_id,
   encrypted_data,          // your base64 IV|ciphertext|tag
@@ -91,7 +91,7 @@ const nova = createNovaClient({
 | `authStatus` | `POST /tools/auth_status` | read-only |
 | `registerGroup` | `POST /tools/register_group` | mutating; caller becomes owner |
 | `addGroupMember` | `POST /tools/add_group_member` | mutating |
-| `revokeGroupMember` | `POST /tools/revoke_group_member` | mutating; **currently server-blocked** (see below) |
+| `revokeGroupMember` | `POST /tools/revoke_group_member` | mutating; removes a member and rotates the group key |
 | `prepareUpload` | `POST /tools/prepare_upload` | returns the group key |
 | `finalizeUpload` | `POST /tools/finalize_upload` | records the transaction on-chain |
 | `prepareRetrieve` | `POST /tools/prepare_retrieve` | returns the group key |
@@ -101,19 +101,19 @@ client describe that envelope faithfully.
 
 ## Notes on honesty
 
-- **`revoke_group_member`** is described but not yet confirmed against a `200`:
-  the live endpoint currently returns a server-side `500`. The contract entry is
-  the intended success shape; it will be confirmed once the server issue is
-  resolved.
+- **`revoke_group_member`** is confirmed against the live endpoint (member removal
+  + group-key rotation); the contract entry reflects the verified success shape.
 - **The OpenAPI spec documents success (`200`) responses only.** Error responses
   (`401`/`403`/`404`/`500`) are intentionally not yet described.
 
 ## Security
 
-`prepare_upload` and `prepare_retrieve` return a base64 **group** key so an
-authorized member can encrypt/decrypt client-side. This is by design. A NEAR
-**private** key never appears on this surface, and the spec generator fails the
-build if the string `private_key` ever appears in the emitted spec.
+`prepare_upload` returns a base64 **per-file** key (random per upload, wrapped
+under the group key inside the TEE); `prepare_retrieve` returns the per-file key
+for an authorized member to decrypt. This is by design — an authorized member
+must receive a file key to encrypt/decrypt client-side. A NEAR **private** key
+never appears on this surface, and the spec generator fails the build if the
+string `private_key` ever appears in the emitted spec.
 
 ## Development
 

@@ -1,404 +1,113 @@
 # NOVA MCP Server
 
-A Model Context Protocol (MCP) server for NOVA secure file-sharing on NEAR blockchain. Enables AI assistants like Claude to interact with encrypted, decentralized file storage through natural language, providing seamless group-based access control, IPFS persistence, and TEE-secured keys via Shade Agents.
+The hosted Model Context Protocol (MCP) server that powers NOVA. It is the signing-and-orchestration layer between NOVA's clients (the SDKs, the `nova-ai-memory` plugin, the `nova-submit` tool) and NOVA's on-chain contracts, off-chain TEE key management (Shade Agent), and FastFS storage.
 
-## Features
+> **You probably don't call this directly.** Application developers use the [JavaScript SDK](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-js), the [Rust SDK](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs), the [`nova-ai-memory` Claude plugin](https://github.com/jcarbonnell/nova/tree/main/nova-ai-memory), or the [`@nova-sdk/contract`](https://github.com/jcarbonnell/nova/tree/main/api-contract) typed client — all of which wrap this server. This document describes what the server is, how it's deployed, and the tool surface it exposes.
 
-- 🤖 **AI-Native Integration** - Natural language interface for encrypted file operations
-- 🔐 **AES-256-CBC Encryption** - Client-side encryption exposed through MCP tools
-- 🌐 **IPFS Storage** - Decentralized file storage via Pinata
-- ⛓️ **NEAR Blockchain** - Immutable transaction records and access control
-- 👥 **Group Management** - Fine-grained access control with member authorization
-- 🔑 **TEE-Secured Keys** - Off-chain key storage in Shade Agents (Phala TEEs) with ed25519 token auth
-- 🔄 **Key Rotation** - Automatic key rotation on member revocation via Shade events
-- 🚀 **Composite Operations** - High-level workflows for upload/retrieve
-- 💬 **Conversational** - Natural language commands for all NOVA operations
+## What it is
 
-## What is MCP?
+- A **hosted** FastMCP (Python, FastMCP v3+) server, deployed in a Phala TDX Confidential VM (CVM) alongside the Shade Agent — no centralized third-party hosting.
+- Dual-network: mainnet (`nova-sdk.near`) and testnet (`nova-sdk-6.testnet`), selected per request from the caller's account.
+- The signing proxy: clients never hold NEAR private keys. The server verifies a session token, retrieves the caller's key material from the Shade Agent's TEE (behind an internal auth gate), and signs the on-chain transaction on their behalf.
 
-The [Model Context Protocol](https://modelcontextprotocol.io) is an open standard that enables AI assistants to securely connect with external tools and data sources. MCP servers expose capabilities that AI models can use to perform actions on behalf of users.
-
-NOVA's MCP server allows AI assistants to:
-- Encrypt and upload files to IPFS
-- Retrieve and decrypt files from IPFS
-- Manage blockchain-based access control groups
-- Record and query file transactions on NEAR
-- Fetch ephemeral keys from TEE-secured Shade Agents
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- NEAR testnet account ([create one](https://testnet.mynearwallet.com/))
-- Pinata API credentials ([sign up](https://pinata.cloud))
-- Shade Agent API URL (from [Phala cloud](https://cloud.phala.network/))
-
-### Install from PyPI (upcoming)
-
-```bash
-pip install nova-mcp-server
+**Base URL (mainnet):**
 ```
-
-### Install from Source
-
-```bash
-git clone https://github.com/jcarbonnell/nova.git
-cd nova/mcp-server
-pip install -e .
+https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network
 ```
+The REST tool surface is at `/tools/*` (each tool is also registered as a FastMCP tool for MCP-protocol clients).
 
-## Configuration
+## Authentication
 
-### Environment Variables
+The server accepts a verified `nova_session` JWT as a Bearer token. There is **no** unauthenticated path and no private key ever crosses the client boundary.
 
-Create a `.env` file or set environment variables:
+1. A client exchanges its API key (`nova_sk_...`) for a short-lived session token at `https://nova-sdk.com/api/auth/session-token` (custom `X-API-Key` header).
+2. The client calls `/tools/*` with `Authorization: Bearer <nova_session>`.
+3. The server verifies the token (HS256, issuer + audience checked), extracts the caller's account, and cross-checks any `x-account-id` hint against the verified account — the hint is never trusted as identity.
 
-```bash
-# NEAR Configuration
-NEAR_RPC_URL=https://rpc.testnet.near.org
-NEAR_CONTRACT_ID=nova-contract.testnet
-NEAR_ACCOUNT_ID=your-account.testnet
-NEAR_PRIVATE_KEY=ed25519:your_private_key
+The API key itself is obtained at [nova-sdk.com](https://nova-sdk.com) → *Manage Account*. Session tokens auto-refresh in the SDKs; the long-lived API key is rotatable.
 
-# Pinata Configuration
-PINATA_API_KEY=your_pinata_api_key
-PINATA_SECRET_KEY=your_pinata_secret_key
-```
-
-### Claude Desktop Integration
-
-Add to your Claude Desktop config file:
-
-**MacOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "nova": {
-      "command": "python",
-      "args": ["-m", "nova_mcp_server"],
-      "env": {
-        "NEAR_RPC_URL": "https://rpc.testnet.near.org",
-        "NEAR_CONTRACT_ID": "nova-contract.testnet",
-        "NEAR_ACCOUNT_ID": "your-account.testnet",
-        "NEAR_PRIVATE_KEY": "ed25519:your_private_key",
-        "PINATA_API_KEY": "your_pinata_key",
-        "PINATA_SECRET_KEY": "your_pinata_secret"
-      }
-    }
-  }
-}
-```
-
-After updating the config, restart Claude Desktop.
-
-## Quick Start
-
-Once configured, interact with NOVA through natural language in Claude:
+## Architecture
 
 ```
-You: "Create a new group called 'research_team' and add bob.testnet as a member"
-
-Claude: [uses register_group and add_group_member tools]
-✅ Group 'research_team' created
-✅ Added bob.testnet to the group
-
-You: "Upload this research data to the research_team group"
-[attach file or provide data]
-
-Claude: [uses composite_upload tool]
-✅ File encrypted and uploaded to IPFS: QmXxX...
-📝 Transaction recorded: ABC123...
-🔒 File hash: sha256:def456...
-
-You: "Is alice.testnet authorized to access research_team?"
-
-Claude: [uses auth_status tool]
-❌ alice.testnet is not currently authorized for research_team
+        Client (SDK / plugin / api-contract)
+                    │ Authorization: Bearer <nova_session>
+                    ▼
+        ┌───────────────────────────┐
+        │      NOVA MCP Server       │
+        │  (verify token → sign)     │
+        └────┬───────────┬──────────┘
+             │           │            │
+     X-Internal-Auth     │            │
+             ▼           ▼            ▼
+     ┌────────────┐ ┌─────────┐ ┌──────────┐
+     │ Shade Agent│ │  NEAR   │ │  FastFS  │
+     │   (TEE)    │ │contract │ │(on NEAR) │
+     │ key ops    │ │ access  │ │ ciphertext│
+     └────────────┘ └─────────┘ └──────────┘
+      keys never     nova-sdk.near   durability
+      leave the TEE  nova-kv.near    rooted in
+                     (enc. blobs)    NEAR history
 ```
 
-## Available Tools
+The server runs in the same CVM as the Shade Agent and reaches it over the internal network behind an `X-Internal-Auth` shared secret. All symmetric encryption is **AES-256-GCM**; keys are derived in the TEE and stored as encrypted blobs on `nova-kv.near`, never in plaintext on-chain.
 
-The MCP server exposes 11 tools for AI assistants:
+## Storage
 
-### File Operations
+New uploads use **FastFS** (file bytes flow through NEAR receipts; durability is the chain, the gateway is swappable). Legacy files previously stored on IPFS remain retrievable transparently — the retrieve path dispatches on the stored reference (a FastFS location vs a legacy IPFS CID). There is no IPFS upload path.
 
-- **`composite_upload`** - Encrypt file (using Shade key), upload to IPFS, record transaction
-  ```
-  Parameters: group_id, user_id, data, filename
-  Returns: cid, trans_id, file_hash
-  ```
+## Tool surface
 
-- **`composite_retrieve`** - Fetch from IPFS and decrypt (using Shade key)
-  ```
-  Parameters: group_id, ipfs_hash
-  Returns: decrypted_b64, file_hash
-  ```
+The server exposes these `/tools/*` operations. The canonical, typed description of the public surface — with input/output schemas verified against the live server — is the [`@nova-sdk/contract`](https://github.com/jcarbonnell/nova/tree/main/api-contract) package.
 
-- **`ipfs_upload`** - Upload encrypted data to IPFS
-- **`ipfs_retrieve`** - Retrieve data from IPFS
+### File operations
 
-### Encryption
+- **`prepare_upload`** — returns a per-file encryption key (wrapped under the group key, from the TEE) and an `upload_id`. The client encrypts locally.
+- **`finalize_upload`** — accepts the client's ciphertext + format, writes it to FastFS, and records the transaction on-chain (`backend=FastFS`).
+- **`prepare_retrieve`** — returns the per-file key + ciphertext + format for an authorized member to decrypt locally (legacy IPFS files served transparently).
 
-- **`encrypt_data`** - AES-256-CBC encryption
-- **`decrypt_data`** - AES-256-CBC decryption
+### Group management
 
-### Group Management
+- **`register_group`** — create a group (caller becomes owner); triggers Shade group-key generation.
+- **`add_group_member`** / **`revoke_group_member`** — manage membership; revoke rotates the group key off-chain in the TEE.
+- **`set_group_retention`** — set/clear a per-group retention window (owner-gated).
+- **`join_group`** — self-join an open group (the caller joins themselves).
+- **`create_hackathon_group`** / **`close_hackathon_join`** — one-call "deploy event" (register joinable + generate key + open join window) and manual early-close.
 
-- **`register_group`** - Create new access control group (auto-generates Shade key)
-- **`add_group_member`** - Grant member access
-- **`revoke_group_member`** - Revoke access and rotate Shade key
-- **`auth_status`** - Check user authorization
+### Queries
 
-### Key Management
+- **`get_owned_groups`** / **`get_member_groups`** — the caller's groups (reader-gated account views).
+- **`get_group_members`** / **`get_group_transactions`** — a group's members / file audit trail (joinable groups use free public views; private groups use the signed, authorized path).
+- **`auth_status`** — authentication + group-authorization check.
 
-- **`get_shade_key`** - Retrieve ephemeral key from TEE-secured Shade Agent (token-gated)
+## Encryption model
 
+Encryption and decryption are **client-side**, in the SDKs — the MCP server never sees plaintext. The server returns keys and ciphertext; the byte-sensitive operations run in the client (SDK, plugin, or WASM tool), which is what keeps plaintext and keys from ever traveling together. This separation is deliberate: byte-exact crypto driven by an LLM is not stable, so it stays in compiled, deterministic client code.
 
-### Transaction Recording
+## Security considerations
 
-- **`record_near_transaction`** - Log file metadata on NEAR
+1. **No private keys client-side** — the server signs on the caller's behalf using TEE-held key material; clients hold only a session token.
+2. **Fails closed** — a missing or invalid session token is rejected; there is no header-only fallback.
+3. **TEE key custody** — encryption keys are derived and held in the Shade Agent's TEE, stored only as GCM-encrypted blobs on `nova-kv.near`, never on-chain in plaintext.
+4. **Internal gate** — the server↔Shade path is protected by `X-Internal-Auth`; health checks are exempt.
+5. **Attestation** — key operations are backed by TEE attestation; group checksums are verifiable on-chain.
 
-## Usage Examples
+## Deployment
 
-### Example 1: Secure File Sharing
-
-```
-You: "I need to share a confidential document with my team. 
-     Create a group called 'project_alpha' and upload this file securely."
-
-Claude: I'll help you set up secure file sharing:
-1. Creating group 'project_alpha' (TEE key generated)...
-2. Encrypting and uploading your document (using Shade key)...
-
-[uses register_group, then composite_upload]
-
-✅ Done! Your document is encrypted and stored at IPFS hash: QmABC...
-The transaction is recorded on NEAR blockchain.
-
-Would you like to add team members to the group?
-```
-
-### Example 2: Access Control
-
-```
-You: "Add carol.testnet and dave.testnet to project_alpha, 
-     then remove bob.testnet"
-
-Claude: [uses add_group_member twice, then revoke_group_member]
-
-✅ Added carol.testnet to project_alpha
-✅ Added dave.testnet to project_alpha
-✅ Revoked bob.testnet and rotated TEE key
-
-Bob can no longer access any new files shared in this group.
-```
-
-### Example 3: File Retrieval
-
-```
-You: "Retrieve the file at QmABC... from project_alpha and show me its contents"
-
-Claude: [uses composite_retrieve with Shade key]
-
-📄 Retrieved and decrypted file:
-[displays file contents]
-
-🔒 Verified file hash matches: sha256:xyz789...
-```
-
-### Example 4: High-Value Data Workflow
-
-```
-You: "I have sensitive AI training data. Create a group called 'ai_collab' and upload this dataset securely."
-
-Claude: I'll set up secure sharing for your AI dataset:
-1. Creating group 'ai_collab' (TEE key generated in Shade Agent)...
-2. Fetching ephemeral Shade key (token-signed and attested)...
-3. Encrypting dataset with TEE key and uploading to IPFS...
-
-[uses register_group, then composite_upload with get_shade_key]
-
-✅ Done! Your dataset is encrypted and stored at IPFS hash: QmHighValue...
-📝 Transaction recorded: DEF456...
-🔒 File hash: sha256:ghi789... (verified)
-
-You: "Share access with partner.eth for collaboration."
-
-Claude: [uses add_group_member]
-
-✅ Added partner.eth to 'ai_collab' group
-Partner can now retrieve via their own token (TEE-verified access).
-
-You: "Show me the dataset contents to verify."
-
-Claude: Fetching via partner token for verification...
-[uses composite_retrieve with get_shade_key]
-
-📄 Retrieved and decrypted dataset preview:
-[displays sample data rows/embeddings]
-
-✅ Access confirmed—full dataset available securely.
-
-You: "The collaboration is over; revoke partner.eth access."
-
-Claude: [uses revoke_group_member]
-
-✅ Revoked partner.eth from 'ai_collab'
-🔄 TEE key rotated in Shade Agent—old tokens invalid, future files locked to partner.
-
-Partner cannot access new uploads, and old files remain encrypted.
-```
-
-## Core Concepts
-
-### Groups
-
-Groups provide isolated access control domains. Each group has:
-- A unique identifier (`group_id`)
-- An owner (NEAR account) who manages membership
-- A TEE-secured encryption key (generated/rotated in Shade Agent)
-- A list of authorized members
-
-### Encryption Flow
-
-1. **Upload**: Fetch ephemeral Shade key (token-gated) → Encrypt locally → Upload to IPFS → Record transaction
-2. **Download**: Fetch ephemeral Shade key → Fetch from IPFS → Decrypt locally
-
-### Access Control
-
-- Only group owners can add/revoke members
-- Keys retrieved via signed tokens (ed25519, nonce/timestamp-gated) from TEE
-- Member revocation triggers automatic TEE key rotation
-- All operations logged on NEAR blockchain; Shade attestations verified on-chain
-
-## Security Considerations
-
-⚠️ **Important Security Notes:**
-
-1. **Private Keys** - Store NEAR private keys securely; never commit to version control
-2. **TEE Keys** - Encryption keys stored encrypted in Shade TEEs—never on-chain; access via attested tokens only
-3. **IPFS Privacy** - IPFS content is public by CID; encryption + TEE gating essential
-4. **Key Rotation** - Revoked members cannot decrypt files uploaded after revocation (TEE swap)
-5. **Local Decryption** - Files are decrypted client-side; tokens expire post-use (replay-proof)
-6. **Attestation** - Shade checksums verified on-chain—ensures TEE integrity
-
-
-## NEAR Token Deposits
-
-Some operations require NEAR token deposits for storage:
-
-- `register_group` - ~0.1 NEAR (includes Shade init)
-- `add_group_member` - ~0.0005 NEAR
-- `revoke_group_member` - ~0.0005 NEAR  (includes Shade rotate)
-- `claim_token` (internal) - ~0.001 NEAR
-- `record_transaction` - ~0.002 NEAR
-
-Ensure your NEAR account has sufficient balance.
-
-## Development
-
-### Running Tests
-
-```bash
-# Install development dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run with coverage
-pytest --cov=nova_mcp_server
-```
-
-### Building from Source
-
-```bash
-# Clone repository
-git clone https://github.com/jcarbonnell/nova.git
-cd nova/mcp-server
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run MCP server
-python -m nova_mcp_server
-```
-
-### MCP Inspector
-
-Test the MCP server using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
-
-```bash
-npx @modelcontextprotocol/inspector python -m nova_mcp_server
-```
-
-## Comparison with SDKs
-
-| Feature | MCP Server | JavaScript SDK | Rust SDK |
-|---------|-----------|----------------|----------|
-| **Interface** | Natural language | Programmatic API | Programmatic API |
-| **Use Case** | AI assistants | Web/Node.js apps | System apps, smart contracts |
-| **Installation** | `pip install` | `npm install` | `cargo add` |
-| **Encryption** | Automatic | Manual control | Manual control |
-| **Integration** | Claude Desktop | Any JS runtime | Any Rust project |
-
-Choose MCP for AI-assisted workflows, JS SDK for web applications, or Rust SDK for high-performance system integration.
-
-## Troubleshooting
-
-### MCP Server Not Connecting
-
-1. Check Claude Desktop config path is correct
-2. Verify all environment variables are set (incl. SHADE_API_URL)
-3. Restart Claude Desktop after config changes
-4. Check logs: `~/Library/Logs/Claude/mcp-*.log` (MacOS)
-
-### NEAR Transaction Failures
-
-1. Verify account has sufficient balance: `near state your-account.testnet`
-2. Check private key format: `ed25519:base58_encoded_key`
-3. Ensure contract ID is correct for network (testnet/mainnet)
-
-### Shade/TEE Issues
-
-1. Verify SHADE_API_URL reachable (e.g., curl {SHADE_API_URL}/api/key-management/get_key)
-2. Check checksum mismatches: Ensure update_checksum called post-gen
-3. Token errors: Validate timestamp/nonce in payload; refresh if expired
-
-### IPFS Upload Failures
-
-1. Verify Pinata API credentials are correct
-2. Check file size limits (100MB default on free tier)
-3. Ensure stable internet connection
+The server ships as a Docker image (`jcarbonnell/nova-mcp`) and runs in the Phala CVM via `docker-compose`, alongside the Shade Agent image. It has no external database — all state is on-chain (the NOVA contract and `nova-kv.near`) or in the TEE. Configuration is entirely environment-driven (contract IDs, RPC URLs, session-token issuer/audience/secret, the internal auth secret, the FastNear API key, the reader key). No secrets are hardcoded.
 
 ## Resources
 
-- [NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)
+- [NOVA Documentation](https://civictech-ou.gitbook.io/nova-docs/)
+- [`@nova-sdk/contract`](https://github.com/jcarbonnell/nova/tree/main/api-contract) — typed client + the canonical tool surface
+- [JavaScript SDK](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-js) · [Rust SDK](https://github.com/jcarbonnell/nova/tree/main/nova-sdk-rs) · [Claude plugin](https://github.com/jcarbonnell/nova/tree/main/nova-ai-memory)
 - [Model Context Protocol](https://modelcontextprotocol.io)
-- [Claude Desktop MCP Guide](https://docs.anthropic.com/claude/docs/model-context-protocol)
-- [NEAR Protocol](https://near.org)
-- [Shade Agents](https://docs.near.org/ai/introduction)
-- [IPFS](https://ipfs.io)
-- [Pinata](https://pinata.cloud)
+- [NEAR Protocol](https://near.org) · [FastFS](https://fastfs.io) · [Phala TEE](https://phala.com)
 
 ## Support
 
 - Issues: [GitHub Issues](https://github.com/jcarbonnell/nova/issues)
 - Discussions: [GitHub Discussions](https://github.com/jcarbonnell/nova/discussions)
 
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass (`pytest`)
-5. Submit a pull request
-
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](https://github.com/jcarbonnell/LICENSE) file for details.
+MIT — Copyright (c) 2026 CivicTech OÜ

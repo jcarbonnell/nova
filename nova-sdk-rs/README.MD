@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.2.1
+**Version:** 1.2.3
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -25,19 +25,19 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.1.1"
+nova-sdk-rs = "1.2.3"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4"
 ```
 
 ## ⚠️ Mainnet Notice
 
-**NOVA v1.0.0 operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
+**NOVA SDK operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
 
-**Typical costs:**
-- Register group: ~0.05 NEAR (~$0.15 USD)
-- Upload file: ~0.01 NEAR + IPFS storage
-- Retrieve file: ~0.001 NEAR
+**Typical costs (mainnet):**
+- Register group: ~0.64 NEAR
+- Upload file: ~0.039 NEAR (claim token + record transaction; FastFS has no storage fee)
+- Retrieve file: ~0.013 NEAR
 
 For development, use testnet configuration:
 ```rust
@@ -46,7 +46,7 @@ let config = NovaSdkConfig::testnet()
 let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
 ```
 
-> **Note:** On testnet, IPFS operations are mocked (in-memory storage). Blockchain operations use real testnet with faucet tokens.
+> **Note:** On testnet, file storage is mocked (in-memory). Blockchain operations use real testnet with faucet tokens.
 
 ## Quick Start
 
@@ -134,7 +134,7 @@ File metadata (location/hash) is recorded on-chain automatically during upload.
 
 ```rust
 // Query group transactions
-let txs = sdk.get_transactions_for_group("my_group", None).await?;
+let txs = sdk.get_transactions_for_group("my_group").await;
 for tx in txs {
     println!("File: {} | Location: {}", tx.file_hash, tx.ipfs_hash);
 }
@@ -219,18 +219,24 @@ sdk.revoke_group_member("my-group", "bob.near").await?;
 // Self-join an OPEN group (hackathon submission groups the organizer has opened).
 // Idempotent: safe to call again if already a member.
 sdk.join_group("hackathon-group-id").await?;
+
+// List your groups (routed through MCP; identity from the session)
+let owned = sdk.get_owned_groups().await?;
+let member = sdk.get_member_groups().await?;
+
+// List a group's members (must be authorized on the group)
+let members = sdk.get_group_members("my-group").await?;
 ```
 
 ### File Operations
 
 ```rust
-// Upload (encrypts locally, uploads to IPFS, records on NEAR)
+// Upload (encrypts locally, stores on FastFS, records on NEAR)
 let result = sdk.upload(group_id, &data, filename).await?;
-// Returns: UploadResult { cid, trans_id, file_hash }
+// Returns: UploadResult { cid, trans_id, file_hash }  // cid is a FastFS location
 
-// Retrieve (fetches from IPFS, decrypts locally)
+// Retrieve (fetches ciphertext, decrypts locally; legacy IPFS served transparently)
 let retrieved = sdk.retrieve(group_id, ipfs_hash).await?;
-// Returns: RetrieveResult { data, ipfs_hash, group_id }
 ```
 
 **Deprecated methods** (still work, but emit warnings):
@@ -298,7 +304,7 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 ## Resources
 
-- [NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)
+- [NOVA Documentation](https://civictech-ou.gitbook.io/nova-docs/)
 - [NEAR Protocol](https://near.org)
 - [IPFS](https://ipfs.io)
 - [Pinata](https://pinata.cloud)

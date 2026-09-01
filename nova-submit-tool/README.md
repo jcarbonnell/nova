@@ -1,4 +1,4 @@
-# nova-submit
+# nova-submit - IronClaw WASM Tool
 
 A self-contained [IronClaw](https://docs.ironclaw.com) WASM tool that encrypts a file with AES-256-GCM and uploads it to a [NOVA](https://nova-sdk.com) group on NEAR — in a single call.
 
@@ -11,8 +11,8 @@ Given a file's content, `nova-submit` performs the entire NOVA upload sequence *
 1. `POST /api/auth/session-token` — obtain a short-lived session token
 2. `POST /tools/prepare_upload` — obtain the group's encryption key and an `upload_id`
 3. AES-256-GCM encrypt the file in-process (RustCrypto `aes-gcm`)
-4. `POST /tools/finalize_upload` — NOVA pins the ciphertext to IPFS and records the transaction on NEAR
-5. return the IPFS `cid`, the NEAR `trans_id`, and the plaintext `file_hash`
+4. `POST /tools/finalize_upload` — NOVA stores the ciphertext on FastFS and records the transaction on NEAR
+5. return the storage `cid` (a FastFS location), the NEAR `trans_id`, and the plaintext `file_hash`
 
 The agent calls the tool once with a JSON parameter object and gets back a JSON result. Because the encryption is compiled and deterministic, the model cannot corrupt the byte handling — which is the whole reason this is a WASM tool rather than a script the agent drives.
 

@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.2.1
+**Version:** 1.2.3
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -30,10 +30,10 @@ npm install nova-sdk-js
 
 **NOVA SDK operates on NEAR mainnet by default.** All operations consume real NEAR tokens.
 
-Typical costs (mainnet):
-- **Register group**: ~0.05 NEAR (~$0.15 USD)
-- **Upload file**: ~0.01 NEAR (gas only; FastFS has no storage fee)
-- **Retrieve file**: ~0.001 NEAR
+**Typical costs (mainnet):**
+- **Register group**: ~0.64 NEAR
+- **Upload file**: ~0.039 NEAR (claim token + record transaction; FastFS has no storage fee)
+- **Retrieve file**: ~0.013 NEAR
 
 ```typescript
 const sdk = new NovaSdk('yourname.nova-sdk-6.testnet', {
@@ -108,7 +108,7 @@ const sdk = new NovaSdk('alice.nova-sdk.near', {
 ```typescript
 import fs from 'fs';
 
-// Upload (encrypts client-side, stores on IPFS, records on NEAR)
+// Upload (encrypts client-side, stores on FastFS, records on NEAR)
 const fileData = fs.readFileSync('./document.pdf');
 const result = await sdk.upload('my-group', fileData, 'document.pdf');
 
@@ -116,7 +116,7 @@ console.log('Ref:', result.cid);           // FastFS location (field still named
 console.log('TX:', result.trans_id);       // NEAR transaction ID
 console.log('Hash:', result.file_hash);    // SHA-256 of plaintext
 
-// Retrieve (fetches from IPFS, decrypts client-side)
+// Retrieve (fetches ciphertext, decrypts client-side; legacy IPFS served transparently)
 const { data } = await sdk.retrieve('my-group', result.cid);
 fs.writeFileSync('./downloaded.pdf', data);
 ```
@@ -250,11 +250,11 @@ try {
 
 Some operations require NEAR token deposits (paid from user's NOVA account):
 
-- `registerGroup()` - ~0.05 NEAR
-- `addGroupMember()` - ~0.001 NEAR
+- `registerGroup()` - ~0.64 NEAR
+- `addGroupMember()` - ~0.013 NEAR
 - `revokeGroupMember()` - ~0.001 NEAR
-- `upload()` - ~0.003 NEAR (claim token + record Tx)
-- `retrieve()` - 0.001 NEAR (claim only)
+- `upload()` - ~0.039 NEAR (claim token + record Tx)
+- `retrieve()` - ~0.013 NEAR (claim only)
 
 Ensure your NOVA account has sufficient balance before calling these methods.
 
@@ -280,6 +280,9 @@ new NovaSdk(accountId: string, config?: NovaSdkConfig)
 | `getGroupOwner(groupId)` | Get group owner |
 | `getGroupChecksum(groupId)` | Get TEE attestation checksum |
 | `getTransactionsForGroup(groupId)` | List group transactions |
+| `getOwnedGroups()` | List groups you own |
+| `getMemberGroups()` | List groups you're a member of |
+| `getGroupMembers(groupId)` | List a group's members (must be authorized) |
 | `getBalance(accountId?)` | Get NEAR balance |
 | `estimateFee(action)` | Estimate operation cost |
 | `refreshToken()` | Force token refresh |
@@ -292,10 +295,11 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 ## Resources
 
-- [NOVA Documentation](https://nova-25.gitbook.io/nova-docs/)
+- [NOVA Documentation](https://civictech-ou.gitbook.io/nova-docs/)
 - [NEAR Protocol](https://near.org)
-- [IPFS](https://ipfs.io)
-- [Pinata](https://pinata.cloud)
+- [FastFS](https://fastfs.io)
+- [IPFS](https://ipfs.io) (legacy reads)
+- [Pinata](https://pinata.cloud) (legacy reads)
 - [FastFS](https://fastfs.io)
 - [Phala TEE](https://phala.com/)
 - [NEAR JavaScript API](https://docs.near.org/tools/near-api-js/quick-reference)

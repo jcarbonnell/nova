@@ -15,7 +15,7 @@ NOVA fills critical gaps in AI ecosystems —no native encrypted data persistenc
 
 ## Key Features
 
-- **Group Creation & Management**: Owners (NEAR AccountIds) create groups via smart contracts, supporting collaborative AI training with multi-group membership. Anyone can create groups (per future update—currently owner-gated for MVP stability).
+- **Group Creation & Management**: Anyone can create a group via the smart contract and becomes its owner, supporting self-sovereign AI workflows with multi-group membership. Owners manage membership; open groups additionally support self-service join.
 - **Access Control**: Smart contracts maintain a mapping table for members and attestations, ensuring only authorized users access files via ephemeral tokens. Vital for user-owned AI privacy.
 - **Secure Storage**: Files are encrypted with per-file keys (wrapped under the group key) and stored on FastFS, optimized for AI dApps (e.g., datasets for fine-tuning). Deletion crypto-shreds a file's key and tombstones its record — real removal, not just unpinning.
 - **Access Workflow**: SDKs retrieve encryption keys from TEE via secure tokens, then perform client-side encryption/decryption —plaintext data never leaves your device or server.
@@ -104,7 +104,7 @@ Visit **[nova-sdk.com](https://nova-sdk.com)** to:
 ```
 You: "Create a group called 'research_team' and upload my dataset securely"
 NOVA chat: ✅ Group created! Uploading... 
-        📦 File encrypted and uploaded to IPFS
+        📦 File encrypted and stored on FastFS
         🔗 Transaction recorded: https://nearblocks.io/txns/ABC123...
 ```
 
@@ -324,7 +324,7 @@ Comprehensive documentation is available on GitBook:
 - **AI Metadata Extraction**: Automate metadata extraction for optimized storage indexing.
 - **Dataset Monetization**: Add pricing for file access/downloads.
 - **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
-- **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + IPFS storage costs)
+- **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + storage costs)
 - **Multi-Chain Support**: Expand to other NEAR-compatible chains
 
 ## Contributing
@@ -363,8 +363,9 @@ See individual SDK directories for specific testing instructions.
 - [Create NEAR Account](https://app.mynearwallet.com/)
 
 ### Storage Resources
-- [IPFS](https://ipfs.io)
-- [Pinata](https://pinata.cloud)
+- [FastFS](https://fastfs.io)
+- [IPFS](https://ipfs.io) (legacy reads)
+- [Pinata](https://pinata.cloud) (legacy reads)
 
 ### AI Integration
 - [Model Context Protocol](https://modelcontextprotocol.io)
@@ -387,7 +388,7 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 Built with ❤️ for the NEAR ecosystem, leveraging:
 - NEAR Protocol for decentralized access control
-- IPFS/Pinata for decentralized storage
+- FastFS for NEAR-native decentralized storage
 - Shade Agents & TEEs for verifiable key management
 - Model Context Protocol for AI integration
 

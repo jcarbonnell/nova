@@ -128,11 +128,13 @@ from your account balance (see the table above). Ensure your account is funded
 before storing files or managing groups. Retrieval and listing your own groups
 are effectively free.
 
-## Codex
+## Codex / ChatGPT
 
-The server is a standard stdio MCP server, so it is portable to
-[Codex](https://developers.openai.com/codex) with a Codex-side manifest. Codex
-support is a planned follow-up; this release targets Claude Code.
+Deferred. Public Codex/ChatGPT plugins require a hosted MCP endpoint consumed by
+a cloud agent, which is incompatible with NOVA's client-side encryption model
+(plaintext and keys never leave your machine). This local plugin ships to those
+directories unchanged if/when they support local, client-side-encrypting plugins.
+This release targets Claude Code and Claude Cowork.
 
 ## Development
 
@@ -168,7 +170,7 @@ claude --plugin-dir /path/to/nova/nova-ai-memory
 
 - NOVA: [nova-sdk.com](https://nova-sdk.com)
 - SDK: [`nova-sdk-js`](https://www.npmjs.com/package/nova-sdk-js)
-- Docs: [nova-25.gitbook.io/nova-docs](https://nova-25.gitbook.io/nova-docs/)
+- Docs: [civictech-ou.gitbook.io/nova-docs](https://civictech-ou.gitbook.io/nova-docs/)
 - Source: [github.com/jcarbonnell/nova](https://github.com/jcarbonnell/nova)
 
 ## License

@@ -1,4 +1,12 @@
-# NOVA File Sharing Skill for OpenClaw
+# NOVA Skill for OpenClaw
+
+> ⚠️ **Unmaintained.** This OpenClaw skill is no longer maintained and is kept for
+> reference only. It predates NOVA's move to FastFS storage and the current
+> plugin/SDK surfaces. For agent integration use the
+> [`nova-ai-memory` Claude plugin](https://github.com/jcarbonnell/nova/tree/main/nova-ai-memory),
+> the [SDKs](https://github.com/jcarbonnell/nova), or the
+> [`nova-submit` tool](https://github.com/jcarbonnell/nova/tree/main/nova-submit-tool).
+> Details below may be out of date.
 
 Securely retrieve and decrypt files from NOVA groups within OpenClaw agents running in TEE (Trusted Execution Environment).
 
