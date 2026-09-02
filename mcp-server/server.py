@@ -572,19 +572,60 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
 @require_auth
 async def set_group_retention(ctx: Context, user: dict, group_id: str, retention_days: int | None = None) -> str:
     # §6.1 retention window (contract v0.3.5), owner-gated on-chain. retention_days
-    # = None clears the window (retention = forever, the default). No protocol fee:
-    # set_group_retention isn't in the fees map, so estimate_fee returns 0. This
-    # configures the window only — it deletes nothing; the (Ping-driven) retention
-    # driver reads get_expired_transactions and does the deleting.
+    # = None clears the window (retention = forever, the default). No protocol fee.
+    # The off-chain expiry driver reads a Shade-held REGISTRY of retention groups
+    # (on-chain windows can't be enumerated), so this dual-writes that registry.
+    #
+    # ORDERING (registry ⊇ on-chain windows, never a subset):
+    #   SET   → register in KV FIRST, then set on-chain. If register fails we abort
+    #           before touching the chain (no unregistered window). If the on-chain
+    #           set then fails, the registry has a harmless extra entry the driver
+    #           filters via get_group_retention == None.
+    #   CLEAR → clear on-chain FIRST, then best-effort deregister. A failed
+    #           deregister leaves a stale entry the driver filters harmlessly, so
+    #           it must NOT block the clear.
+    headers = {"Content-Type": "application/json", "X-Internal-Auth": INTERNAL_API_SECRET}
+
+    if retention_days is not None:
+        # SET: registry-first, fail hard if the registry write fails.
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{SHADE_API_URL}/rpc/retention/register",
+                json={"group_id": group_id},
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Retention registry write failed ({resp.status_code}); "
+                    f"aborting before on-chain set - {resp.text[:200]}"
+                )
+        await call_contract(
+            user=user,
+            method_name="set_group_retention",
+            args={"group_id": group_id, "retention_days": retention_days},
+            fee_action="set_group_retention",
+        )
+        return f"Set retention for group '{group_id}' to {retention_days} days"
+
+    # CLEAR: on-chain first, then best-effort deregister.
     await call_contract(
         user=user,
         method_name="set_group_retention",
         args={"group_id": group_id, "retention_days": retention_days},
         fee_action="set_group_retention",
     )
-    if retention_days is None:
-        return f"Cleared retention window for group '{group_id}'"
-    return f"Set retention for group '{group_id}' to {retention_days} days"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.post(
+                f"{SHADE_API_URL}/rpc/retention/deregister",
+                json={"group_id": group_id},
+                headers=headers,
+            )
+    except Exception as e:
+        # Non-fatal: a stale registry entry is filtered by the driver's
+        # get_group_retention check. Log and move on.
+        logger.warning(f"Retention deregister (non-fatal) failed for {group_id}: {e}")
+    return f"Cleared retention window for group '{group_id}'"
 
 @expose_as_rest("/tools/join_group")
 @require_auth

@@ -198,6 +198,24 @@ export const RetrieveFileSchema = z.object({
   contract_id: z.string().optional(),
 });
 
+// ── retention registry (§6.1) ──
+
+/**
+ * POST /retention/register and /retention/deregister — same one-field shape.
+ * The off-chain expiry driver needs a candidate list of groups with a retention
+ * window because the contract's retention_windows LookupMap is not iterable.
+ * register is called registry-FIRST by MCP's set_group_retention (before the
+ * on-chain set); deregister is best-effort on a window clear.
+ */
+export const RetentionRegisterSchema = z.object({
+  group_id: z.string().min(1),
+});
+
+/** POST /retention/scan — read-only dry-run; optional contract override. */
+export const RetentionScanSchema = z.object({
+  contract_id: z.string().optional(),
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // OUTPUT SCHEMAS (oRPC)
 // ════════════════════════════════════════════════════════════════════════════
@@ -321,6 +339,31 @@ export const RetrieveFileOutput = z.object({
   location: z.string(),
   group_id: z.string(),
   format: z.record(z.string(), z.unknown()).nullable(),
+});
+
+// ── retention registry ──
+// register and deregister share this shape; the optional booleans distinguish
+// which operation ran (registered/already_present vs deregistered/was_present).
+export const RetentionRegisterOutput = z.object({
+  registered: z.boolean().optional(),
+  deregistered: z.boolean().optional(),
+  already_present: z.boolean().optional(),
+  was_present: z.boolean().optional(),
+  size: z.number(),
+});
+
+// §6.1 scan (read-only). Mirrors ScanResult / ScanGroupResult from the service.
+export const RetentionScanOutput = z.object({
+  scanned_at: z.string(),
+  registry_size: z.number(),
+  total_expired: z.number(),
+  groups: z.array(z.object({
+    group_id: z.string(),
+    retention_days: z.number().nullable(),
+    expired_trans_ids: z.array(z.string()),
+    skipped_reason: z.string().optional(),
+    error: z.string().optional(),
+  })),
 });
 
 // ── wallet SIWN inputs ───────────────────────────────────────────────────────

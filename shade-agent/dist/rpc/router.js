@@ -13,13 +13,14 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub, storeLimited, walletPub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
 import { WalletNonceSchema, WalletVerifySchema, WalletNonceOutput, WalletVerifyOutput, } from '../lib/schemas.js';
 import { issueWalletNonce, verifyWalletSignin } from '../lib/auth.js';
 import * as fastfsService from '../lib/services/fastfs-storage.js';
+import * as retentionService from '../lib/services/retention.js';
 const INTERNAL = ['internal'];
 // ────────────────────────────────────────────────
 // user-keys
@@ -169,9 +170,48 @@ const walletVerify = walletPub
     }
     return { account_id: result.account_id, public_key: result.public_key };
 });
+// ────────────────────────────────────────────────
+// retention registry (§6.1) — gated + seeded (touches KV), like the others.
+// register is called registry-FIRST by MCP's set_group_retention (before the
+// on-chain set) so the registry can never miss a real window; deregister is
+// best-effort on a window clear.
+// ────────────────────────────────────────────────
+const retentionRegister = pub
+    .route({
+    method: 'POST',
+    path: '/retention/register',
+    tags: INTERNAL,
+    summary: 'Add a group to the retention registry (before the on-chain window is set)',
+})
+    .input(RetentionRegisterSchema)
+    .output(RetentionRegisterOutput)
+    .handler(({ input }) => retentionService.registerRetentionGroup(input));
+const retentionDeregister = pub
+    .route({
+    method: 'POST',
+    path: '/retention/deregister',
+    tags: INTERNAL,
+    summary: 'Remove a group from the retention registry (best-effort on window clear)',
+})
+    .input(RetentionRegisterSchema)
+    .output(RetentionRegisterOutput)
+    .handler(({ input }) => retentionService.deregisterRetentionGroup(input));
+// READ-ONLY (Piece 2). Reports what a sweep would tombstone; destroys nothing.
+// The destructive execute path is a SEPARATE route (Piece 3), not a flag here.
+const retentionScan = pub
+    .route({
+    method: 'POST',
+    path: '/retention/scan',
+    tags: INTERNAL,
+    summary: 'Dry-run: report expired transactions per retention group (destroys nothing)',
+})
+    .input(RetentionScanSchema)
+    .output(RetentionScanOutput)
+    .handler(({ input }) => retentionService.scanRetention(input));
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
     keyManagement: { generateKey, getKey, rotateKey },
     fastfs: { prepareUpload: prepareFileUpload, finalizeUpload: finalizeFileUpload, retrieve: retrieveFile },
     wallet: { nonce: walletNonce, verify: walletVerify },
+    retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan },
 };
