@@ -719,6 +719,45 @@ impl Contract {
         expired
     }
 
+    /// §6.1 — OWNER-GATED detailed twin of get_expired_transactions. Returns
+    /// (trans_id, location) for each expired, non-deleted FastFS transaction, so
+    /// the off-chain retention driver can destroy them: crypto-shred keys on the
+    /// location's relativePath, and FastFS-remove needs the location. Locations are
+    /// access-pattern metadata (§5.6), so this MUST NOT be public — unlike the
+    /// free public get_expired_transactions (trans_ids only), which is unchanged.
+    ///
+    /// Gated: group owner OR contract owner. The driver signs as the contract
+    /// owner (nova-sdk.near), so it authorizes for ANY group. Reads
+    /// predecessor_account_id ⇒ NOT a free `view` (ProhibitedInView); the driver
+    /// calls it as a signed, gas-only read (same as the private get_group_members
+    /// path). Logic is identical to get_expired_transactions except for the owner
+    /// gate and pulling tx.ipfs_hash (the §5.5 location) into the returned tuple.
+    pub fn get_expired_transactions_detailed(&self, group_id: String) -> Vec<(String, String)> {
+        let caller = env::predecessor_account_id();
+        let owner = self.groups.get(&group_id).expect("Group not found").owner.clone();
+        assert!(caller == owner || caller == self.owner, "Unauthorized");
+
+        let days = match self.retention_windows.get(&group_id) { Some(d) => *d, None => return Vec::new() };
+        let window_ns = (days as u64).saturating_mul(86_400).saturating_mul(1_000_000_000);
+        let now = env::block_timestamp();
+        let mut expired: Vec<(String, String)> = Vec::new();
+        if let Some(tx_ids) = self.group_transactions.get(&group_id) {
+            for tid in tx_ids.iter() {
+                if let Some(meta) = self.tx_meta.get(tid) {
+                    if meta.deleted.is_none()
+                        && meta.backend == StorageBackend::FastFS
+                        && meta.timestamp.saturating_add(window_ns) < now
+                    {
+                        if let Some(tx) = self.transactions.get(tid.as_str()) {
+                            expired.push((tid.clone(), tx.ipfs_hash.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        expired
+    }
+
     /// Free view: per-transaction metadata (backend, upload time, deletion record),
     /// or None for legacy transactions with no meta row.
     pub fn get_transaction_meta(&self, trans_id: String) -> Option<TxMetaView> {

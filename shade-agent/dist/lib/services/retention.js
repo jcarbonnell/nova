@@ -87,15 +87,12 @@ export async function deregisterRetentionGroup(input) {
 export async function listRetentionGroups() {
     return readRegistry();
 }
-// A view call that DISTINGUISHES an RPC failure from a genuine null result.
-// lib/near.ts's viewFunction collapses both to null (§7.7); for a compliance
-// sweep that conflation is dangerous — an RPC blip would look like "no window"
-// and the group's expired data would silently never be swept. So we call
-// rpcCallWithRetry directly (it THROWS on RPC error, after 3 backed-off tries)
-// and decode the view result ourselves. Throw ⇒ RPC failure (surfaced per-group
-// as `error`, never silently skipped). Returned value ⇒ authoritative on-chain
-// answer (including a genuine null for "no window").
-async function viewOrThrow(rpcUrl, contractId, methodName, args) {
+// Exported (underscore convention would be _viewOrThrow, but it's used internally
+// by scanRetention too, so we keep the name and just export it) so the Piece 2
+// harness can prove a transport error THROWS here — the §7.7 distinction — without
+// the shared-RPC-URL problem that makes it untestable through scanRetention
+// (KV_RPC_URL === NEAR_RPC_URL in config.ts, so a dead URL also kills seed load).
+export async function viewOrThrow(rpcUrl, contractId, methodName, args) {
     const result = await rpcCallWithRetry(rpcUrl, {
         jsonrpc: '2.0',
         id: 'retention-view',

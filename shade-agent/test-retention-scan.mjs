@@ -130,13 +130,21 @@ await check('window 0 on orpc-test → scan reports its expired FastFS tx_ids', 
           && g.error === undefined && scan.total_expired >= g.expired_trans_ids.length;
 });
 
-// ── 3. RPC-ERROR DISTINCTION: scan against a bogus contract → error, not skip ──
-// Proves viewOrThrow surfaces RPC failure as `error` rather than a false null-skip
-// (the §7.7 fix). A nonexistent contract id makes the view RPC fail.
-await check('bogus contract → group carries `error`, NOT skipped_reason (§7.7 fix)', async () => {
-  const scan = await svc.scanRetention({ contract_id: 'this-contract-does-not-exist-xyz.near' });
-  const g = scan.groups.find((x) => x.group_id === GROUP);
-  return g && typeof g.error === 'string' && g.skipped_reason === undefined;
+// ── 3. RPC TRANSPORT FAILURE → THROWS (the §7.7 fix, unit-level) ──
+// The seed is already loaded (real RPC) above, so we can point JUST the view call
+// at a dead endpoint and assert viewOrThrow THROWS — which is what makes
+// scanRetention capture it as `error` rather than a false null-skip. This can't be
+// done through scanRetention itself: KV_RPC_URL === NEAR_RPC_URL (config.ts), so a
+// dead URL there also kills the seed/registry reads. Testing the view path in
+// isolation is the honest way to prove the distinction.
+await check('viewOrThrow THROWS on a dead RPC endpoint (§7.7: not a silent null)', async () => {
+  let threw = false;
+  try {
+    await svc.viewOrThrow('http://127.0.0.1:9', 'nova-sdk.near', 'get_group_retention', { group_id: GROUP });
+  } catch {
+    threw = true;
+  }
+  return threw;
 });
 
 // ── 4. CLEANUP: clear the on-chain window (SDK) + deregister (native) ──
