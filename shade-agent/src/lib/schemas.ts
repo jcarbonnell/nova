@@ -216,6 +216,18 @@ export const RetentionScanSchema = z.object({
   contract_id: z.string().optional(),
 });
 
+/**
+ * POST /retention/execute — the IRREVERSIBLE destroy path (per group).
+ * `confirm` defaults to false: without it, execute returns the PLAN and destroys
+ * nothing (dry-run echo). Only { confirm: true } actually deletes. `confirm` is
+ * optional so a bare call is a safe dry-run, never an accidental deletion.
+ */
+export const RetentionExecuteSchema = z.object({
+  group_id: z.string().min(1),
+  confirm: z.boolean().optional(),
+  contract_id: z.string().optional(),
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // OUTPUT SCHEMAS (oRPC)
 // ════════════════════════════════════════════════════════════════════════════
@@ -362,6 +374,24 @@ export const RetentionScanOutput = z.object({
     retention_days: z.number().nullable(),
     expired_trans_ids: z.array(z.string()),
     skipped_reason: z.string().optional(),
+    error: z.string().optional(),
+  })),
+});
+
+// §6.1/§6.2 execute (irreversible). Mirrors ExecuteResult / ExecuteFileResult.
+// confirmed:false ⇒ dry-run (destroyed_count 0, all results destroyed:false).
+// destroyed:true + bookkeeping_incomplete:true ⇒ key shredded (data gone) but a
+// later step failed; re-run finishes the audit tombstone (data-centric Q3).
+export const RetentionExecuteOutput = z.object({
+  group_id: z.string(),
+  confirmed: z.boolean(),
+  candidates: z.number(),
+  destroyed_count: z.number(),
+  results: z.array(z.object({
+    trans_id: z.string(),
+    location: z.string(),
+    destroyed: z.boolean(),
+    bookkeeping_incomplete: z.boolean().optional(),
     error: z.string().optional(),
   })),
 });

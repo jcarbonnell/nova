@@ -24,13 +24,16 @@
 import type { z } from 'zod';
 
 import { encryptBlob, decryptBlob } from '../crypto.js';
-import { getBlobFromKV, storeBlobToKV } from '../kv.js';
+import { getBlobFromKV, storeBlobToKV, rpcCallWithRetry, signAndBroadcastFunctionCall } from '../kv.js';
 import { log } from '../logger.js';
-import type { RetentionRegisterSchema } from '../schemas.js';
+import { ApiError } from '../errors.js';
+import type { RetentionRegisterSchema, RetentionExecuteSchema } from '../schemas.js';
 import { getRpcUrl, resolveContract } from '../near.js';
-import { rpcCallWithRetry } from '../kv.js';
+import { tombstoneFileKey } from './key-management.js';
+import { remove, parseFastfsLocation } from '../fastfs.js';
 
 type RetentionRegisterInput = z.infer<typeof RetentionRegisterSchema>;
+type RetentionExecuteInput = z.infer<typeof RetentionExecuteSchema>;
 
 // Fixed singleton key. Unlike user/file blobs this is not a per-entity id, so it
 // is a well-known constant, not a sha256(...) hash. One blob, one JSON array.
@@ -229,5 +232,170 @@ export async function scanRetention(input: { contract_id?: string }): Promise<Sc
     registry_size: groups.length,
     groups: results,
     total_expired: totalExpired,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// §6.1 / §6.2 — RETENTION EXECUTE (Piece 3). The IRREVERSIBLE destroy path.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Separate FUNCTIONS from the read-only scan (though same file). The destroy
+// primitives are invoked ONLY here; scan never deletes.
+//
+// KEY-FIRST ordering per file (fail-safe, same rationale as the registry-first
+// invariant): the crypto-shred IS the deletion. If the process dies mid-sequence
+// the file is already unrecoverable (goal achieved) and a re-run finishes the
+// bookkeeping. On-chain-first would risk the audit record claiming "deleted"
+// while the file is still recoverable — the wrong direction for a compliance
+// feature. Steps:
+//   1. tombstoneFileKey(group, fileRef)  — crypto-shred the wrapped file key (KV).
+//   2. remove({backend:'fastfs', location}) — FastFS null-write (cosmetic).
+//   3. tombstone_transactions([trans_id], RetentionPolicy) — on-chain audit mark.
+//
+// All three sign as nova-sdk.near (KV-owner signer = NOVA contract owner), so the
+// tombstone_transactions owner-gate passes for ANY group, AND the owner-gated
+// get_expired_transactions_detailed read (below) authorizes.
+//
+// Idempotent / resumable: re-running after a partial failure is safe — shredding
+// an already-shredded key is harmless, the contract tombstone keeps the first
+// record, FastFS remove of a gone path is a no-op.
+//
+// CONFIRM FLAG: without { confirm: true } this returns the PLAN and destroys
+// NOTHING (dry-run echo) — the extra deliberate step for an irreversible op.
+
+const NOVA_GAS = 100_000_000_000_000n; // 100 TGas — matches MCP's call_contract default
+
+// Decode the SuccessValue (base64 JSON) from a signed-call broadcast result.
+// broadcast_tx_commit returns a top-level `status` object; a successful function
+// call's return value is status.SuccessValue, base64-encoded (NEAR RPC docs).
+// signAndBroadcastFunctionCall throws on Failure by default, so reaching here is
+// success; we just pull the value out.
+function decodeSuccessValue(outcome: unknown): unknown {
+  const status = (outcome as { status?: { SuccessValue?: string } })?.status;
+  const sv = status?.SuccessValue;
+  if (sv === undefined || sv === null || sv === '') return null;
+  return JSON.parse(Buffer.from(sv, 'base64').toString('utf8'));
+}
+
+// Signed read of the OWNER-GATED detailed view (contract v0.3.6). Returns
+// [[trans_id, location], ...] for expired FastFS files. Signed as nova-sdk.near
+// (contract owner) so the gate passes. NOT a free view (ProhibitedInView).
+async function fetchExpiredDetailed(
+  contractId: string, groupId: string,
+): Promise<Array<[string, string]>> {
+  const args = Buffer.from(JSON.stringify({ group_id: groupId }));
+  const outcome = await signAndBroadcastFunctionCall(
+    contractId, 'get_expired_transactions_detailed', args, NOVA_GAS, 0n,
+  );
+  const decoded = decodeSuccessValue(outcome);
+  if (!Array.isArray(decoded)) return [];
+  return decoded as Array<[string, string]>;
+}
+
+export interface ExecuteFileResult {
+  trans_id: string;
+  location: string;
+  destroyed: boolean;              // true iff the file key was crypto-shredded
+  bookkeeping_incomplete?: boolean; // key shredded (data gone) but step 2/3 failed
+  error?: string;
+}
+
+export interface ExecuteResult {
+  group_id: string;
+  confirmed: boolean;             // false ⇒ dry-run (nothing destroyed)
+  candidates: number;
+  results: ExecuteFileResult[];
+  destroyed_count: number;
+}
+
+/**
+ * Execute (or dry-run) a retention sweep for ONE group (per-group scope = tight
+ * blast radius). Without confirm:true, returns the plan and destroys nothing.
+ *
+ * Q3 reporting (data-centric): if the crypto-shred (step 1) SUCCEEDS but a later
+ * step fails, the DATA IS GONE — so destroyed:true, with bookkeeping_incomplete
+ * flagging that a re-run is needed to finish the audit tombstone. A compliance
+ * reader sees destroyed:true accurately (the file is unrecoverable); the flag
+ * drives the re-run. Only a step-1 failure is destroyed:false (nothing shredded).
+ */
+export async function executeRetention(input: RetentionExecuteInput): Promise<ExecuteResult> {
+  const { group_id, confirm, contract_id } = input;
+  const { contractId } = resolveContract(contract_id);
+
+  const expired = await fetchExpiredDetailed(contractId, group_id);
+
+  // DRY-RUN: no confirm ⇒ echo the plan, destroy nothing.
+  if (!confirm) {
+    return {
+      group_id,
+      confirmed: false,
+      candidates: expired.length,
+      results: expired.map(([trans_id, location]) => ({ trans_id, location, destroyed: false })),
+      destroyed_count: 0,
+    };
+  }
+
+  const results: ExecuteFileResult[] = [];
+  let destroyed = 0;
+
+  for (const [trans_id, location] of expired) {
+    // fileRef = the FastFS relativePath (how §5.1 keyed the file key).
+    let relativePath: string;
+    try {
+      ({ relativePath } = parseFastfsLocation(location));
+    } catch (err) {
+      // A malformed/legacy location we can't parse — nothing shredded, safe.
+      results.push({ trans_id, location, destroyed: false, error: `bad location: ${(err as Error).message}` });
+      log('warn', 'retention_file_bad_location', { group_id, trans_id: trans_id.slice(0, 12) });
+      continue;
+    }
+
+    // STEP 1 — KEY-FIRST crypto-shred. THE deletion. Throws if not confirmed final.
+    try {
+      await tombstoneFileKey(group_id, relativePath);
+    } catch (err) {
+      // Step-1 failure ⇒ nothing destroyed for this file (safe direction).
+      results.push({ trans_id, location, destroyed: false, error: `shred failed: ${(err as Error).message}` });
+      log('warn', 'retention_shred_failed', { group_id, trans_id: trans_id.slice(0, 12), error: (err as Error).message });
+      continue;
+    }
+
+    // Past here the KEY IS SHREDDED — the file is unrecoverable (destroyed:true).
+    // Steps 2/3 are bookkeeping; a failure sets bookkeeping_incomplete for re-run.
+    destroyed++;
+    let bookkeepingError: string | undefined;
+
+    // STEP 2 — FastFS null-write (cosmetic serving cleanup).
+    try {
+      await remove({ backend: 'fastfs', location });
+    } catch (err) {
+      bookkeepingError = `fastfs remove failed: ${(err as Error).message}`;
+    }
+
+    // STEP 3 — on-chain tombstone (audit trail). Per-file (Q4: batch later if cost).
+    if (!bookkeepingError) {
+      try {
+        const args = Buffer.from(JSON.stringify({ trans_ids: [trans_id], reason: 'RetentionPolicy' }));
+        await signAndBroadcastFunctionCall(contractId, 'tombstone_transactions', args, NOVA_GAS, 0n);
+      } catch (err) {
+        bookkeepingError = `on-chain tombstone failed: ${(err as Error).message}`;
+      }
+    }
+
+    if (bookkeepingError) {
+      results.push({ trans_id, location, destroyed: true, bookkeeping_incomplete: true, error: bookkeepingError });
+      log('warn', 'retention_bookkeeping_incomplete', { group_id, trans_id: trans_id.slice(0, 12), error: bookkeepingError });
+    } else {
+      results.push({ trans_id, location, destroyed: true });
+      log('info', 'retention_file_destroyed', { group_id, trans_id: trans_id.slice(0, 12) });
+    }
+  }
+
+  return {
+    group_id,
+    confirmed: true,
+    candidates: expired.length,
+    results,
+    destroyed_count: destroyed,
   };
 }

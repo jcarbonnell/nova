@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub, storeLimited, walletPub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -197,7 +197,6 @@ const retentionDeregister = pub
     .output(RetentionRegisterOutput)
     .handler(({ input }) => retentionService.deregisterRetentionGroup(input));
 // READ-ONLY (Piece 2). Reports what a sweep would tombstone; destroys nothing.
-// The destructive execute path is a SEPARATE route (Piece 3), not a flag here.
 const retentionScan = pub
     .route({
     method: 'POST',
@@ -208,10 +207,24 @@ const retentionScan = pub
     .input(RetentionScanSchema)
     .output(RetentionScanOutput)
     .handler(({ input }) => retentionService.scanRetention(input));
+// IRREVERSIBLE (Piece 3). Destroys expired files in ONE group, KEY-FIRST.
+// Without { confirm: true } it returns the plan and destroys NOTHING (dry-run
+// echo) — the extra deliberate step for an irreversible op. Gated + seeded like
+// the others (pub); the destroy code lives only in retention.ts's execute path.
+const retentionExecute = pub
+    .route({
+    method: 'POST',
+    path: '/retention/execute',
+    tags: INTERNAL,
+    summary: 'Destroy expired files in a group (crypto-shred + FastFS + tombstone). Requires confirm:true.',
+})
+    .input(RetentionExecuteSchema)
+    .output(RetentionExecuteOutput)
+    .handler(({ input }) => retentionService.executeRetention(input));
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
     keyManagement: { generateKey, getKey, rotateKey },
     fastfs: { prepareUpload: prepareFileUpload, finalizeUpload: finalizeFileUpload, retrieve: retrieveFile },
     wallet: { nonce: walletNonce, verify: walletVerify },
-    retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan },
+    retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
 };
