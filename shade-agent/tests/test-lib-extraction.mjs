@@ -13,20 +13,23 @@
 //
 // Usage, from shade-agent/:
 //     npm run build
-//     node ../test-lib-extraction.mjs
-// (or pass an explicit path: node test-lib-extraction.mjs ./dist/lib/crypto.js)
+//     node tests/test-lib-extraction.mjs
+// (or pass an explicit path: node tests/test-lib-extraction.mjs ../dist/lib/crypto.js)
 
 import crypto, { hkdfSync } from 'crypto';
 import path from 'path';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 // ── env must be set before the lib reads it (it reads at call time, not import) ──
 const TEE_SECRET = 'b'.repeat(64); // 32-byte hex key, test-only
 process.env.TEE_KEY_SECRET = TEE_SECRET;
 
 // ── load the compiled lib ──────────────────────────────────────────────────────
-const libPath = process.argv[2] || './dist/lib/crypto.js';
-const abs = path.resolve(process.cwd(), libPath);
+// Default path is resolved relative to THIS FILE (tests/), not cwd — so it works
+// whether you run `node tests/...` from shade-agent/ or from inside tests/.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const libPath = process.argv[2] || path.join(__dirname, '../dist/lib/crypto.js');
+const abs = path.isAbsolute(libPath) ? libPath : path.resolve(process.cwd(), libPath);
 let lib;
 try {
   lib = await import(pathToFileURL(abs).href);

@@ -83,7 +83,7 @@ console.log('\nRetention scan harness (Piece 2, read-only)\n');
 
 // ── seed (real → ONLINE) ──
 try {
-  const { initializeMasterSeed } = await import('./dist/lib/seed.js');
+  const { initializeMasterSeed } = await import('../dist/lib/seed.js');
   await initializeMasterSeed();
   console.log('seed: real master seed loaded\n');
 } catch (e) {
@@ -91,7 +91,7 @@ try {
   process.exit(2);
 }
 
-const svc = await import('./dist/lib/services/retention.js');
+const svc = await import('../dist/lib/services/retention.js');
 
 // Baseline: registry should be empty (we cleared it in the Piece 1 smoke). If not,
 // we still proceed — the assertions target orpc-test specifically.

@@ -61,7 +61,7 @@ console.log(`test registry key: ${TEST_KEY}\n`);
 // ── Seed: real seed enables the ONLINE (real-KV) run. Without it, skip. ──
 let haveRealSeed = false;
 try {
-  const { initializeMasterSeed } = await import('./dist/lib/seed.js');
+  const { initializeMasterSeed } = await import('../dist/lib/seed.js');
   await initializeMasterSeed();
   haveRealSeed = true;
   console.log('seed: real master seed loaded (ONLINE enabled)\n');
@@ -72,9 +72,9 @@ try {
 if (haveRealSeed) {
   console.log('ONLINE (real service, real KV, throwaway key):');
 
-  const svc = await import('./dist/lib/services/retention.js');
-  const { getBlobFromKV, storeBlobToKV } = await import('./dist/lib/kv.js');
-  const { encryptBlob } = await import('./dist/lib/crypto.js');
+  const svc = await import('../dist/lib/services/retention.js');
+  const { getBlobFromKV, storeBlobToKV } = await import('../dist/lib/kv.js');
+  const { encryptBlob } = await import('../dist/lib/crypto.js');
 
   // Ensure a clean slate: the throwaway key is fresh per run (uuid), so KV has
   // no blob for it yet. Confirm the "never written" read path returns [].

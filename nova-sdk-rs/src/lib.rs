@@ -1063,8 +1063,6 @@ mod tests {
     use super::*;
     use std::env;
 
-    // Mock session token for unit tests (not valid for real MCP calls)
-    const MOCK_SESSION_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Utbm92YS5ub3ZhLXNkay01LnRlc3RuZXQiLCJ0eXBlIjoibm92YV9zZXNzaW9uIn0.mock";
     const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
 
     // =========================================================================
@@ -1562,7 +1560,9 @@ mod tests {
         println!("✅ Upload success: cid={}, hash={}", result.cid, result.file_hash);
 
         assert!(!result.cid.is_empty());
-        assert!(result.cid.starts_with("Qm"));
+        // Returns a FastFS LOCATION ({predecessor}/{receiver}/{relativePath}), not a legacy IPFS "Qm…" CID.
+        assert!(result.cid.contains('/') && !result.cid.starts_with("Qm"),
+            "expected a FastFS location, got: {}", result.cid);
         assert!(!result.trans_id.is_empty());
         assert_eq!(result.file_hash.len(), 64);
     }

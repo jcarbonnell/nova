@@ -31,7 +31,7 @@ import path from 'node:path';
 const API_KEY = process.env.NOVA_API_KEY;
 const SDK_DIR = process.env.SDK_DIR || '../nova-ai-memory';
 const ACCOUNT = 'gmail-14.nova-sdk.near';
-// Fresh throwaway group per run — created, used, and left registered-then-cleaned.
+// Reusable fixture group (registered once, reused every run — see header).
 const GROUP = 'retention-exec-fixture';
 
 if (!API_KEY) {
@@ -72,7 +72,7 @@ console.log(`throwaway group: ${GROUP}\n`);
 
 // ── seed (real → ONLINE required) ──
 try {
-  const { initializeMasterSeed } = await import('./dist/lib/seed.js');
+  const { initializeMasterSeed } = await import('../dist/lib/seed.js');
   await initializeMasterSeed();
   console.log('seed: real master seed loaded\n');
 } catch (e) {
@@ -80,9 +80,9 @@ try {
   process.exit(2);
 }
 
-const retention = await import('./dist/lib/services/retention.js');
-const fastfsSvc = await import('./dist/lib/services/fastfs-storage.js');
-const keyMgmt = await import('./dist/lib/services/key-management.js');
+const retention = await import('../dist/lib/services/retention.js');
+const fastfsSvc = await import('../dist/lib/services/fastfs-storage.js');
+const keyMgmt = await import('../dist/lib/services/key-management.js');
 
 // ── SETUP: create a throwaway group, upload one real file into it ──
 // register_group via SDK (gmail-14 becomes owner + member). Then upload a file
@@ -116,7 +116,7 @@ await check('setup: ensure group exists + upload a fresh file into it', async ()
   location = parsed.cid;          // FastFS location
   transId = String(parsed.trans_id).replace(/^"+|"+$/g, '');
   // fileRef = the relativePath inside the location
-  const { parseFastfsLocation } = await import('./dist/lib/fastfs.js');
+  const { parseFastfsLocation } = await import('../dist/lib/fastfs.js');
   fileRef = parseFastfsLocation(location).relativePath;
   console.log(`      uploaded: loc=${location.slice(0, 48)}… trans=${transId.slice(0, 12)}`);
   return location.includes('/') && !!transId && !!fileRef;
@@ -182,8 +182,8 @@ await check('post-delete: getFileKey → FILE_DELETED (key crypto-shredded)', as
 
 // ── 4. on-chain tombstone recorded ──
 await check('post-delete: on-chain tx is tombstoned (is_tombstoned true)', async () => {
-  const { getRpcUrl } = await import('./dist/lib/config.js');
-  const { rpcCallWithRetry } = await import('./dist/lib/kv.js');
+  const { getRpcUrl } = await import('../dist/lib/config.js');
+  const { rpcCallWithRetry } = await import('../dist/lib/kv.js');
   // read-your-writes: the tombstone tx may need a moment to reach finality.
   return settle(async () => {
     const res = await rpcCallWithRetry(getRpcUrl('mainnet'), {

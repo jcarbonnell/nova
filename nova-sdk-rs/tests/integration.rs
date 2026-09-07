@@ -1,8 +1,6 @@
 // nova-sdk-rs v3 Integration Tests
 use nova_sdk_rs::{NovaSdk, NovaError};
 
-// Mock session token for tests that don't need real MCP auth
-const MOCK_SESSION_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYWxpY2Utbm92YS5ub3ZhLXNkay01LnRlc3RuZXQiLCJ0eXBlIjoibm92YV9zZXNzaW9uIn0.mock";
 const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
 
 fn make_test_sdk(account_id: &str) -> NovaSdk {
