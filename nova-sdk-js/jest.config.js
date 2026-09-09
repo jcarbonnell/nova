@@ -12,7 +12,8 @@ module.exports = {
     '/node_modules/(?!(@noble)/)'  // Ensure @noble transpiled
   ],
   moduleNameMapper: {
-    '^@/(.*)$': '<rootDir>/src/$1'
+    '^@/(.*)$': '<rootDir>/src/$1',
+    '^(\\.{1,2}/.*)\\.js$': '$1'
   },
   testTimeout: 30000,
   forceExit: true,

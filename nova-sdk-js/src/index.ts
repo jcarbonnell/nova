@@ -44,11 +44,21 @@ interface CallFunctionResponse {
   block_hash: string;
 }
 
+export interface DeletionRecord {
+  deleted_at: string;   // ns since epoch, as a string
+  deleted_by: string;
+  reason: "MemberRevocation" | "OwnerRequest" | "RetentionPolicy" | "ComplianceRequest";
+}
+
 export interface Transaction {
+  trans_id: string;
   group_id: string;
   user_id: string;
   file_hash: string;
   ipfs_hash: string;
+  backend: "FastFS" | "Ipfs" | null;   // null ⇒ legacy tx with no meta row
+  timestamp: string | null;            // ns since epoch as string; divide by 1e6 for a Date
+  deleted: DeletionRecord | null;      // null ⇒ active (not tombstoned)
 }
 
 export interface UploadResult {

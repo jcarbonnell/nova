@@ -25,10 +25,26 @@ export declare const getGroupTransactions: import("@orpc/contract").ContractProc
     group_id: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     result: z.ZodArray<z.ZodObject<{
+        trans_id: z.ZodString;
         group_id: z.ZodString;
         user_id: z.ZodString;
         file_hash: z.ZodString;
         ipfs_hash: z.ZodString;
+        backend: z.ZodNullable<z.ZodEnum<{
+            FastFS: "FastFS";
+            Ipfs: "Ipfs";
+        }>>;
+        timestamp: z.ZodNullable<z.ZodString>;
+        deleted: z.ZodNullable<z.ZodObject<{
+            deleted_at: z.ZodString;
+            deleted_by: z.ZodString;
+            reason: z.ZodEnum<{
+                MemberRevocation: "MemberRevocation";
+                OwnerRequest: "OwnerRequest";
+                RetentionPolicy: "RetentionPolicy";
+                ComplianceRequest: "ComplianceRequest";
+            }>;
+        }, z.core.$strip>>;
     }, z.core.$loose>>;
 }, z.core.$strip>, Record<never, never>, Record<never, never>>;
 export declare const registerGroup: import("@orpc/contract").ContractProcedureBuilderWithInputOutput<z.ZodObject<{
@@ -108,10 +124,26 @@ export declare const contract: {
         group_id: z.ZodString;
     }, z.core.$strip>, z.ZodObject<{
         result: z.ZodArray<z.ZodObject<{
+            trans_id: z.ZodString;
             group_id: z.ZodString;
             user_id: z.ZodString;
             file_hash: z.ZodString;
             ipfs_hash: z.ZodString;
+            backend: z.ZodNullable<z.ZodEnum<{
+                FastFS: "FastFS";
+                Ipfs: "Ipfs";
+            }>>;
+            timestamp: z.ZodNullable<z.ZodString>;
+            deleted: z.ZodNullable<z.ZodObject<{
+                deleted_at: z.ZodString;
+                deleted_by: z.ZodString;
+                reason: z.ZodEnum<{
+                    MemberRevocation: "MemberRevocation";
+                    OwnerRequest: "OwnerRequest";
+                    RetentionPolicy: "RetentionPolicy";
+                    ComplianceRequest: "ComplianceRequest";
+                }>;
+            }, z.core.$strip>>;
         }, z.core.$loose>>;
     }, z.core.$strip>, Record<never, never>, Record<never, never>>;
     registerGroup: import("@orpc/contract").ContractProcedureBuilderWithInputOutput<z.ZodObject<{

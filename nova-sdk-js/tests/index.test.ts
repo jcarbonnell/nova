@@ -45,7 +45,7 @@ describe('NovaSdk v3', () => {
 
     test('accepts custom config', () => {
       const sdk = new NovaSdk(testAccountId, {
-        sessionToken: mockSessionToken,
+        apiKey: mockApiKey,
         rpcUrl: 'https://rpc.mainnet.near.org',
         contractId: 'nova-sdk.near',
         mcpUrl: 'https://custom-mcp.example.com',
@@ -256,12 +256,11 @@ describe('NovaSdk v3', () => {
       expect(result.data.toString()).toBe(originalData);
     });
 
-    test('retrieve validates CID format', async () => {
+    test('retrieve rejects an empty reference', async () => {
       const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
-
       await expect(
-        sdk.retrieve('test-group', 'invalid_cid')
-      ).rejects.toThrow('Invalid CID: invalid_cid');
+        sdk.retrieve('test-group', '')
+      ).rejects.toThrow('retrieve requires a file reference');
     });
   });
 
@@ -314,24 +313,49 @@ describe('NovaSdk v3', () => {
       expect(fee).toBe(1000000000000000000000n);
     });
 
-    test('getTransactionsForGroup returns array', async () => {
-      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
-
-      const mockProvider = (sdk as any).provider;
-      jest.spyOn(mockProvider, 'query').mockResolvedValueOnce({
-        result: Buffer.from(JSON.stringify([
-          {
-            group_id: 'test-group',
-            user_id: testAccountId,
-            file_hash: 'abc123',
-            ipfs_hash: 'QmTest',
-          },
-        ])),
+    test('getTransactionsForGroup returns enriched array (FastFS + legacy)', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          result: [
+            {
+              trans_id: 'abc123def',
+              group_id: 'test-group',
+              user_id: testAccountId,
+              file_hash: 'abc123',
+              ipfs_hash: 'nova-sdk.near/fastfs.near/aaa/bbb',
+              backend: 'FastFS',
+              timestamp: '1785913537344349235',
+              deleted: null,
+            },
+            {
+              trans_id: 'legacy456',
+              group_id: 'test-group',
+              user_id: testAccountId,
+              file_hash: 'def456',
+              ipfs_hash: 'QmLegacyCid',
+              backend: null,
+              timestamp: null,
+              deleted: null,
+            },
+          ],
+        },
       });
 
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
       const transactions = await sdk.getTransactionsForGroup('test-group');
+
       expect(Array.isArray(transactions)).toBe(true);
-      expect(transactions[0].group_id).toBe('test-group');
+
+      // FastFS row — enriched fields populated
+      expect(transactions[0].trans_id).toBe('abc123def');
+      expect(transactions[0].backend).toBe('FastFS');
+      expect(transactions[0].timestamp).toBe('1785913537344349235');
+      expect(transactions[0].deleted).toBeNull();
+
+      // legacy row — meta fields null (the direction the type change must allow)
+      expect(transactions[1].backend).toBeNull();
+      expect(transactions[1].timestamp).toBeNull();
     });
   });
 

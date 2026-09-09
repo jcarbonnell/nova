@@ -1,4 +1,4 @@
-// nova-sdk-rs v1.2.3 - NOVA SDK for Rust
+// nova-sdk-rs v1.2.4 - NOVA SDK for Rust
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
 use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
@@ -63,11 +63,22 @@ impl From<aes_gcm::Error> for NovaError {
 
 // Public types
 #[derive(Deserialize, Debug, Clone)]
+pub struct DeletionRecord {
+    pub deleted_at: String,
+    pub deleted_by: String,
+    pub reason: String, // MemberRevocation | OwnerRequest | RetentionPolicy | ComplianceRequest
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Transaction {
+    pub trans_id: String,
     pub group_id: String,
     pub user_id: String,
     pub file_hash: String,
     pub ipfs_hash: String,
+    pub backend: Option<String>,          // "FastFS" | "Ipfs" | null
+    pub timestamp: Option<String>,        // ns since epoch, as a string
+    pub deleted: Option<DeletionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -1657,6 +1668,38 @@ mod tests {
             println!("First tx: group={}, user={}, ipfs={}", 
                      tx.group_id, tx.user_id, tx.ipfs_hash);
         }
+    }
+
+    #[test]
+    fn test_transaction_deserializes_enriched_and_legacy() {
+        let fastfs = r#"{
+            "trans_id": "abc123",
+            "group_id": "g",
+            "user_id": "u.near",
+            "file_hash": "fh",
+            "ipfs_hash": "nova-sdk.near/fastfs.near/a/b",
+            "backend": "FastFS",
+            "timestamp": "1785913537344349235",
+            "deleted": null
+        }"#;
+        let tx: Transaction = serde_json::from_str(fastfs).unwrap();
+        assert_eq!(tx.trans_id, "abc123");
+        assert_eq!(tx.backend.as_deref(), Some("FastFS"));
+        assert!(tx.deleted.is_none());
+
+        let legacy = r#"{
+            "trans_id": "leg456",
+            "group_id": "g",
+            "user_id": "u.near",
+            "file_hash": "fh2",
+            "ipfs_hash": "QmLegacy",
+            "backend": null,
+            "timestamp": null,
+            "deleted": null
+        }"#;
+        let tx: Transaction = serde_json::from_str(legacy).unwrap();
+        assert!(tx.backend.is_none());
+        assert!(tx.timestamp.is_none());
     }
 
     #[tokio::test]

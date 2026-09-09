@@ -1,13 +1,13 @@
 {
   "info": {
     "title": "NOVA Public API",
-    "version": "0.4.0",
+    "version": "0.4.3",
     "description": "Verifiable, privacy-preserving shared storage. Public wire protocol (MCP /tools/*). Authenticate with a nova_session bearer token from nova-sdk.com. Every success response is wrapped in { \"result\": ... }."
   },
   "servers": [
     {
       "url": "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network",
-      "description": "Production MCP (v19)"
+      "description": "Production MCP (v35)"
     }
   ],
   "security": [
@@ -251,6 +251,9 @@
                       "items": {
                         "type": "object",
                         "properties": {
+                          "trans_id": {
+                            "type": "string"
+                          },
                           "group_id": {
                             "type": "string"
                           },
@@ -262,13 +265,73 @@
                           },
                           "ipfs_hash": {
                             "type": "string"
+                          },
+                          "backend": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "FastFS",
+                                  "Ipfs"
+                                ],
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "timestamp": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "deleted": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "deleted_at": {
+                                    "type": "string"
+                                  },
+                                  "deleted_by": {
+                                    "type": "string"
+                                  },
+                                  "reason": {
+                                    "enum": [
+                                      "MemberRevocation",
+                                      "OwnerRequest",
+                                      "RetentionPolicy",
+                                      "ComplianceRequest"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "deleted_at",
+                                  "deleted_by",
+                                  "reason"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
+                          "trans_id",
                           "group_id",
                           "user_id",
                           "file_hash",
-                          "ipfs_hash"
+                          "ipfs_hash",
+                          "backend",
+                          "timestamp",
+                          "deleted"
                         ],
                         "additionalProperties": {}
                       }

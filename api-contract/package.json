@@ -1,18 +1,31 @@
 {
-  "name": "@nova-sdk/contract",
-  "version": "0.4.0",
+  "name": "nova-sdk-api-contract",
+  "version": "0.4.1",
   "description": "Contract-first description of NOVA's public wire protocol (MCP /tools/*).",
   "type": "module",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/jcarbonnell/nova" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jcarbonnell/nova"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./contract": { "types": "./dist/contract.d.ts", "import": "./dist/contract.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contract": {
+      "types": "./dist/contract.d.ts",
+      "import": "./dist/contract.js"
+    },
     "./openapi.json": "./openapi.json"
   },
-  "files": ["dist", "openapi.json", "README.md"],
+  "files": [
+    "dist",
+    "openapi.json",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "openapi": "tsx scripts/generate-openapi.ts",

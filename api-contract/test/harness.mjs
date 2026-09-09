@@ -73,6 +73,7 @@ const CASES = [
   { op: 'getOwnedGroups', body: {} },
   { op: 'authStatus', body: { group_id: 'mcp-test-group' } },
   { op: 'getMemberGroups', body: {} },
+  { op: 'getGroupTransactions', body: { group_id: 'engine-test-evt' } },
 ];
 
 async function main() {

@@ -26,7 +26,7 @@ const generator = new OpenAPIGenerator({
 const spec = await generator.generate(contract, {
   info: {
     title: 'NOVA Public API',
-    version: '0.4.0',
+    version: '0.4.3',
     description:
       'Verifiable, privacy-preserving shared storage. Public wire protocol ' +
       '(MCP /tools/*). Authenticate with a nova_session bearer token from ' +
@@ -35,7 +35,7 @@ const spec = await generator.generate(contract, {
   servers: [
     {
       url: 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network',
-      description: 'Production MCP (v19)',
+      description: 'Production MCP (v35)',
     },
   ],
   security: [{ novaSession: [] }],

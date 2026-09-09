@@ -12,15 +12,28 @@ const AccountId = z.string();
 // Message ops (register/add/revoke) return a bare human-readable string.
 const MessageResult = z.string();
 
-// Transaction shape: four fields confirmed on an older build; on-chain struct
-// unchanged since. .passthrough() so v0.5 additions (location/backend/deleted)
-// surface without false-failing; a MISSING declared field still fails.
+// Transaction shape: enriched read surface (contract v0.3.6, mainnet 2026-09).
+// The four original fields plus the TxMeta join (trans_id + backend/timestamp/
+// deleted). backend/timestamp/deleted are ALWAYS PRESENT but null for legacy
+// IPFS txs with no meta row (confirmed live: orpc-test legacy Qm rows → null,
+// FastFS rows → populated). .passthrough() retained so any future field surfaces
+// without a false-fail.
+const DeletionRecord = z.object({
+  deleted_at: z.string(),
+  deleted_by: z.string(),
+  reason: z.enum(['MemberRevocation', 'OwnerRequest', 'RetentionPolicy', 'ComplianceRequest']),
+});
+
 const Transaction = z
   .object({
+    trans_id: z.string(),
     group_id: z.string(),
     user_id: z.string(),
     file_hash: z.string(),
     ipfs_hash: z.string(),
+    backend: z.enum(['FastFS', 'Ipfs']).nullable(),
+    timestamp: z.string().nullable(),
+    deleted: DeletionRecord.nullable(),
   })
   .passthrough();
 

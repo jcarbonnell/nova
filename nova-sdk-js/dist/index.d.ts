@@ -10,11 +10,20 @@ export interface NovaSdkConfig {
     contractId?: string;
     mcpUrl?: string;
 }
+export interface DeletionRecord {
+    deleted_at: string;
+    deleted_by: string;
+    reason: "MemberRevocation" | "OwnerRequest" | "RetentionPolicy" | "ComplianceRequest";
+}
 export interface Transaction {
+    trans_id: string;
     group_id: string;
     user_id: string;
     file_hash: string;
     ipfs_hash: string;
+    backend: "FastFS" | "Ipfs" | null;
+    timestamp: string | null;
+    deleted: DeletionRecord | null;
 }
 export interface UploadResult {
     cid: string;
