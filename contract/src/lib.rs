@@ -121,6 +121,19 @@ pub struct JoinWindowView {
     pub open: bool,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub struct TransactionView {
+    pub trans_id: String,
+    pub group_id: String,
+    pub user_id: String,
+    pub file_hash: String,
+    pub ipfs_hash: String,                 // location (FastFS ref or legacy CID)
+    pub backend: Option<StorageBackend>,   // from TxMeta; None ⇒ legacy IPFS
+    pub timestamp: Option<String>,         // ns string from TxMeta; None ⇒ legacy (unknown)
+    pub deleted: Option<DeletionRecordView>,
+}
+
 #[derive(BorshStorageKey, BorshSerialize)]
 enum StorageKey {
     Groups,
@@ -559,8 +572,10 @@ impl Contract {
         members.iter().cloned().collect::<Vec<AccountId>>()
     }
 
-    /// Free PUBLIC view of `get_transactions_for_group`. 
-    pub fn get_transactions_for_group_public(&self, group_id: String) -> Vec<Transaction> {
+    /// Free PUBLIC view of `get_transactions_for_group`. Returns the enriched
+    /// row (trans_id + TxMeta join: backend, upload timestamp, deletion record).
+    /// backend/timestamp/deleted are null for legacy IPFS txs with no meta row.
+    pub fn get_transactions_for_group_public(&self, group_id: String) -> Vec<serde_json::Value> {
         assert!(self.groups.contains_key(&group_id), "Group not found");
         assert!(
             *self.joinable_groups.get(&group_id).unwrap_or(&false),
@@ -568,16 +583,44 @@ impl Contract {
         );
         // Use the per-group index to avoid scanning all transactions:
         if let Some(tx_ids) = self.group_transactions.get(&group_id) {
-            let mut out: Vec<Transaction> = Vec::new();
+            let mut out: Vec<serde_json::Value> = Vec::new();
             for tx_id in tx_ids.iter() {
                 if let Some(tx) = self.transactions.get(tx_id.as_str()) {
-                    out.push(tx.clone());
+                    out.push(self.tx_view(tx_id.as_str(), tx));
                 }
             }
             out
         } else {
             Vec::new()
         }
+    }
+
+    /// Assemble the enriched transaction JSON: the stored Transaction fields
+    /// (unchanged names) + trans_id + the TxMeta join. Absent meta ⇒ legacy IPFS
+    /// ⇒ backend/timestamp/deleted all null. u64 timestamps are strings (JS 2^53).
+    fn tx_view(&self, trans_id: &str, tx: &Transaction) -> serde_json::Value {
+        let (backend, timestamp, deleted) = match self.tx_meta.get(trans_id) {
+            Some(m) => (
+                Some(m.backend.clone()),
+                Some(m.timestamp.to_string()),
+                m.deleted.as_ref().map(|d| serde_json::json!({
+                    "deleted_at": d.deleted_at.to_string(),
+                    "deleted_by": d.deleted_by.to_string(),
+                    "reason": d.reason.clone(),
+                })),
+            ),
+            None => (None, None, None),
+        };
+        serde_json::json!({
+            "trans_id": trans_id,
+            "group_id": tx.group_id.clone(),
+            "user_id": tx.user_id.clone(),
+            "file_hash": tx.file_hash.clone(),
+            "ipfs_hash": tx.ipfs_hash.clone(),
+            "backend": backend,
+            "timestamp": timestamp,
+            "deleted": deleted,
+        })
     }
 
     /// Reader-gated account view (§5.0 session boundary). Returns ALL groups the
@@ -847,7 +890,7 @@ impl Contract {
     }
 
     #[payable]
-    pub fn get_transactions_for_group(&mut self, group_id: String) -> Vec<Transaction> {
+    pub fn get_transactions_for_group(&mut self, group_id: String) -> Vec<serde_json::Value> {
         let attached = env::attached_deposit().as_yoctonear();
         self.collect_fee("get_transactions_for_group", attached);
 
@@ -858,10 +901,10 @@ impl Contract {
         
         // Use the per-group index to avoid scanning all transactions:
         if let Some(tx_ids) = self.group_transactions.get(&group_id) {
-            let mut out: Vec<Transaction> = Vec::new();
+            let mut out: Vec<serde_json::Value> = Vec::new();
             for tx_id in tx_ids.iter() {
                 if let Some(tx) = self.transactions.get(tx_id.as_str()) {
-                    out.push(tx.clone());
+                    out.push(self.tx_view(tx_id.as_str(), tx));
                 }
             }
             out
@@ -1187,10 +1230,10 @@ mod tests {
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 1);
-        assert_eq!(transactions[0].group_id, "test_group");
-        assert_eq!(transactions[0].user_id, member.to_string());
-        assert_eq!(transactions[0].file_hash, "file_hash");
-        assert_eq!(transactions[0].ipfs_hash, "ipfs_hash");
+        assert_eq!(transactions[0]["group_id"], "test_group");
+        assert_eq!(transactions[0]["user_id"], member.to_string());
+        assert_eq!(transactions[0]["file_hash"], "file_hash");
+        assert_eq!(transactions[0]["ipfs_hash"], "ipfs_hash");
         assert!(contract.transactions.contains_key(&trans_id));
     }
 
@@ -1269,8 +1312,8 @@ mod tests {
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 2);
-        assert!(transactions.iter().any(|tx| tx.file_hash == "file_hash1" && tx.ipfs_hash == "ipfs_hash1"));
-        assert!(transactions.iter().any(|tx| tx.file_hash == "file_hash2" && tx.ipfs_hash == "ipfs_hash2"));
+        assert!(transactions.iter().any(|tx| tx["file_hash"] == "file_hash1" && tx["ipfs_hash"] == "ipfs_hash1"));
+        assert!(transactions.iter().any(|tx| tx["file_hash"] == "file_hash2" && tx["ipfs_hash"] == "ipfs_hash2"));
     }
 
     #[test]
@@ -2040,10 +2083,17 @@ mod tests {
 
         assert_eq!(signed.len(), 1);
         assert_eq!(public.len(), signed.len());
-        assert_eq!(public[0].file_hash, signed[0].file_hash);
-        assert_eq!(public[0].ipfs_hash, signed[0].ipfs_hash);
-        assert_eq!(public[0].group_id, signed[0].group_id);
-        assert_eq!(public[0].user_id, signed[0].user_id);
+        assert_eq!(public[0]["file_hash"], signed[0]["file_hash"]);
+        assert_eq!(public[0]["ipfs_hash"], signed[0]["ipfs_hash"]);
+        assert_eq!(public[0]["group_id"], signed[0]["group_id"]);
+        assert_eq!(public[0]["user_id"], signed[0]["user_id"]);
+        // enrichment: trans_id surfaced identically on both views (backend-agnostic)
+        assert_eq!(public[0]["trans_id"], signed[0]["trans_id"]);
+        assert_ne!(public[0]["trans_id"], serde_json::Value::Null);
+        // legacy (backend=None) tx ⇒ no TxMeta row ⇒ meta fields null on both views
+        assert!(public[0]["backend"].is_null());
+        assert!(public[0]["timestamp"].is_null());
+        assert!(public[0]["deleted"].is_null());
     }
 
     // ── Reader-gated account views (§5.0 session boundary) ──────────────────

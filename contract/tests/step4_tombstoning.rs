@@ -225,6 +225,25 @@ async fn record_transaction_backend_behavior() -> R {
     assert!(meta["deleted"].is_null(), "freshly recorded tx must not be tombstoned");
     assert!(meta["timestamp"].as_str().is_some(), "timestamp is a stringified u64");
 
+    // enriched list view (v0.3.6 read surface): the same TxMeta join must appear
+    // on get_transactions_for_group[_public], not only on get_transaction_meta —
+    // this is the shape the dashboard consumes.
+    let txs: Vec<serde_json::Value> = contract
+        .view("get_transactions_for_group_public")
+        .args_json(json!({ "group_id": "g1" }))
+        .await?
+        .json()?;
+
+    let legacy_row = txs.iter().find(|t| t["trans_id"] == json!(legacy_id)).expect("legacy tx in list");
+    assert!(legacy_row["backend"].is_null(), "legacy row: backend null");
+    assert!(legacy_row["timestamp"].is_null(), "legacy row: timestamp null");
+    assert!(legacy_row["deleted"].is_null(), "legacy row: deleted null");
+
+    let fastfs_row = txs.iter().find(|t| t["trans_id"] == json!(fastfs_id)).expect("fastfs tx in list");
+    assert_eq!(fastfs_row["backend"], json!("FastFS"));
+    assert!(fastfs_row["timestamp"].as_str().is_some(), "fastfs row: timestamp stringified u64");
+    assert!(fastfs_row["deleted"].is_null(), "fastfs row: not tombstoned");
+    
     Ok(())
 }
 
