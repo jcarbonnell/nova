@@ -51,6 +51,8 @@ class NovaSdk {
     tokenCache = null;
     authUrl;
     apiKey = null;
+    injectedToken = null;
+    injectedTokenExpMs = null;
     accountId;
     contractId;
     mcpUrl;
@@ -85,6 +87,13 @@ class NovaSdk {
         this.accountId = accountId;
         this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
         this.apiKey = config.apiKey || null;
+        this.injectedToken = config.sessionToken || null;
+        // Decode exp ONCE at construction (seconds → ms). Comparison happens at call
+        // time in getSessionToken, so a token valid now but expired later still
+        // surfaces cleanly. A token with no decodable exp is used verbatim.
+        this.injectedTokenExpMs = this.injectedToken
+            ? this.decodeJwtExpMs(this.injectedToken)
+            : null;
         this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
         this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
         this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
@@ -107,6 +116,15 @@ class NovaSdk {
      * Called automatically before each API request.
      */
     async getSessionToken() {
+        // Injected-token mode: use the caller-supplied nova_session VERBATIM and
+        // never mint. Checked BEFORE apiKey so an injected token wins when both are
+        // present. Expiry is checked here (call time), not at construction.
+        if (this.injectedToken) {
+            if (this.injectedTokenExpMs !== null && this.injectedTokenExpMs <= Date.now()) {
+                throw new errors_js_2.NovaError('Injected session token has expired; construct a new NovaSdk with a fresh sessionToken');
+            }
+            return this.injectedToken;
+        }
         // Return cached token if still valid (5 min buffer for safety)
         if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 5 * 60 * 1000) {
             return this.tokenCache.token;
@@ -153,6 +171,23 @@ class NovaSdk {
             throw new errors_js_2.NovaError(`Failed to get session token: ${e}`, e);
         }
     }
+    // Decode a JWT's `exp` claim (RFC 7519: seconds since epoch) into ms, without
+    // verifying the signature — MCP verifies; this only reads expiry for a clean
+    // client-side error. Returns null if the token has no decodable numeric exp,
+    // in which case the token is used verbatim and MCP is the sole arbiter.
+    decodeJwtExpMs(token) {
+        try {
+            const parts = token.split('.');
+            if (parts.length !== 3)
+                return null;
+            const payloadB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const payload = JSON.parse(buffer_1.Buffer.from(payloadB64, 'base64').toString('utf-8'));
+            return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+        }
+        catch {
+            return null;
+        }
+    }
     parseExpiry(expiresIn) {
         const match = expiresIn.match(/^(\d+)([hmd])$/);
         if (!match)
@@ -171,6 +206,13 @@ class NovaSdk {
      * Useful if you get auth errors and want to retry with a fresh token.
      */
     async refreshToken() {
+        // In injected mode there is nothing to refresh to: getSessionToken returns
+        // the token verbatim (valid) or throws the dedicated expired error (expired).
+        // Either way we do NOT clear a cache we don't own or fall through to minting.
+        if (this.injectedToken) {
+            await this.getSessionToken();
+            return;
+        }
         this.tokenCache = null;
         await this.getSessionToken();
     }

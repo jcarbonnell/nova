@@ -156,6 +156,12 @@ struct TokenCache {
 #[derive(Clone)]
 pub struct NovaSdkConfig {
     pub api_key: Option<String>,
+    /// Pre-minted nova_session JWT. When present, the SDK uses it VERBATIM and
+    /// never mints (the api_key mint path is skipped even if api_key is also set).
+    /// For server-session apps whose proxy mints from an Auth0 cookie and injects
+    /// the token. An expired injected token surfaces NovaError::Token rather than
+    /// falling through to minting.
+    pub session_token: Option<String>,
     pub auth_url: String,
     pub rpc_url: String,
     pub contract_id: String,
@@ -166,6 +172,7 @@ impl Default for NovaSdkConfig {
     fn default() -> Self {
         Self {
             api_key: None,
+            session_token: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: DEFAULT_RPC_URL.to_string(),
             contract_id: DEFAULT_CONTRACT_ID.to_string(),
@@ -179,6 +186,7 @@ impl NovaSdkConfig {
     pub fn testnet() -> Self {
         Self {
             api_key: None,
+            session_token: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: "https://rpc.testnet.near.org".to_string(),
             contract_id: "nova-sdk-6.testnet".to_string(),
@@ -194,6 +202,12 @@ impl NovaSdkConfig {
     /// Set the API key for authentication
     pub fn with_api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
+        self
+    }
+
+    /// Set a pre-minted nova_session token (injected mode). Wins over api_key.
+    pub fn with_session_token(mut self, session_token: &str) -> Self {
+        self.session_token = Some(session_token.to_string());
         self
     }
 }
@@ -421,6 +435,8 @@ pub struct NovaSdk {
     rpc_url: String,
     network_id: String,
     token_cache: Arc<RwLock<Option<TokenCache>>>,
+    injected_token: Option<String>,
+    injected_token_exp_ms: Option<u64>,  // ms; None ⇒ no decodable exp
 }
 
 impl NovaSdk {
@@ -464,6 +480,15 @@ impl NovaSdk {
             eprintln!("💰 Check costs at: https://github.com/jcarbonnell/nova");
         }
 
+        // Decode the injected token's exp ONCE at construction (seconds → ms).
+        // Comparison happens at call time in get_session_token, so a token valid
+        // now but expired later still surfaces cleanly. No decodable exp ⇒ used
+        // verbatim (MCP is the sole arbiter).
+        let injected_token = config.session_token;
+        let injected_token_exp_ms = injected_token
+            .as_deref()
+            .and_then(Self::decode_jwt_exp_ms);
+
         Ok(Self {
             client: JsonRpcClient::connect(&config.rpc_url),
             http_client: Client::new(),
@@ -475,12 +500,32 @@ impl NovaSdk {
             rpc_url: config.rpc_url,
             network_id,
             token_cache: Arc::new(RwLock::new(None)),
+            injected_token,
+            injected_token_exp_ms,
         })
     }
 
     // Token Management
     /// Get a valid session token, fetching or refreshing if needed.
     async fn get_session_token(&self) -> Result<String, NovaError> {
+        // Injected-token mode: use the caller-supplied nova_session VERBATIM and
+        // never mint. Checked BEFORE api_key so an injected token wins when both
+        // are present. Expiry is checked here (call time), not at construction.
+        if let Some(ref token) = self.injected_token {
+            if let Some(exp_ms) = self.injected_token_exp_ms {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                if exp_ms <= now_ms {
+                    return Err(NovaError::Token(
+                        "Injected session token has expired; construct a new NovaSdk with a fresh sessionToken".to_string()
+                    ));
+                }
+            }
+            return Ok(token.clone());
+        }
+
         // Require API key
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             NovaError::Auth("API key required. Get yours at nova-sdk.com".to_string())
@@ -569,6 +614,26 @@ impl NovaSdk {
         Ok(token_response.token)
     }
 
+    // Decode a JWT's `exp` claim (RFC 7519: seconds since epoch) into ms, without
+    // verifying the signature — MCP verifies; this only reads expiry for a clean
+    // client-side error. Returns None if the token has no decodable numeric exp,
+    // in which case the token is used verbatim and MCP is the sole arbiter.
+    // Mirror of nova-sdk-js decodeJwtExpMs.
+    fn decode_jwt_exp_ms(token: &str) -> Option<u64> {
+        use base64::Engine;
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        // JWT payloads are base64url without padding; tolerate stray padding.
+        let seg = parts[1].trim_end_matches('=');
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(seg)
+            .ok()?;
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+        payload.get("exp").and_then(|v| v.as_u64()).map(|s| s * 1000)
+    }
+
     fn parse_expiry(expires_in: &str) -> u64 {
         // Parse "24h", "30m", "7d" etc.
         let chars: Vec<char> = expires_in.chars().collect();
@@ -592,6 +657,13 @@ impl NovaSdk {
     /// 
     /// Useful if you get auth errors and want to retry with a fresh token.
     pub async fn refresh_token(&self) -> Result<(), NovaError> {
+        // In injected mode there is nothing to refresh to: get_session_token
+        // returns the token verbatim (valid) or errors (expired). Either way we
+        // do NOT clear a cache we don't own or fall through to minting.
+        if self.injected_token.is_some() {
+            self.get_session_token().await?;
+            return Ok(());
+        }
         {
             let mut cache = self.token_cache.write().await;
             *cache = None;
@@ -1112,6 +1184,145 @@ mod tests {
         let result = NovaSdk::new(TEST_ACCOUNT_ID);
         assert!(result.is_ok()); // construction succeeds
         // actual enforcement happens in get_session_token() at call time
+    }
+
+    // =========================================================================
+    // Phase 0.6 — sessionToken injection (mirror of the JS hermetic suite)
+    //
+    // These assert get_session_token's injected path directly. It is PRIVATE, so
+    // the hermetic assertions can only live inline (a separate integration crate
+    // cannot reach it) — same placement rationale as the constructor tests above.
+    // All are offline by construction: a correct injected guard returns/errors
+    // before any network call. The live "MCP accepts an injected token" smoke is
+    // the gated integration test (tests/integration.rs), mirroring the JS live
+    // smoke.
+    // =========================================================================
+
+    fn jwt_b64url(s: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes())
+    }
+
+    fn make_jwt(payload_json: &str) -> String {
+        let header = jwt_b64url(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let body = jwt_b64url(payload_json);
+        format!("{}.{}.sig", header, body)
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn injected_no_exp() -> String {
+        make_jwt(r#"{"account_id":"alice.nova-sdk.near","type":"nova_session"}"#)
+    }
+    fn injected_future() -> String {
+        make_jwt(&format!(
+            r#"{{"account_id":"alice.nova-sdk.near","type":"nova_session","exp":{}}}"#,
+            now_secs() + 3600
+        ))
+    }
+    fn injected_expired() -> String {
+        make_jwt(&format!(
+            r#"{{"account_id":"alice.nova-sdk.near","type":"nova_session","exp":{}}}"#,
+            now_secs() - 3600
+        ))
+    }
+
+    const EXPIRED_MSG: &str = "Injected session token has expired";
+    const DUMMY_API_KEY: &str = "nova_sk_testkey1234567890123456789012345678901";
+
+    // Case 1: injected (no exp) → used verbatim.
+    #[tokio::test]
+    async fn test_injected_no_exp_used_verbatim() {
+        let token = injected_no_exp();
+        let config = NovaSdkConfig::default().with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let got = sdk.get_session_token().await.unwrap();
+        assert_eq!(got, token, "injected token must be returned verbatim");
+    }
+
+    // Case 2: injected (future exp) → used verbatim.
+    #[tokio::test]
+    async fn test_injected_future_exp_used_verbatim() {
+        let token = injected_future();
+        let config = NovaSdkConfig::default().with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let got = sdk.get_session_token().await.unwrap();
+        assert_eq!(got, token);
+    }
+
+    // Case 3: injected (past exp) → dedicated Token error.
+    #[tokio::test]
+    async fn test_injected_expired_errors() {
+        let token = injected_expired();
+        let config = NovaSdkConfig::default().with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let err = sdk.get_session_token().await.unwrap_err();
+        assert!(matches!(err, NovaError::Token(_)), "expected Token error, got {:?}", err);
+        assert!(err.to_string().contains(EXPIRED_MSG), "got: {}", err);
+    }
+
+    // Case 3b: expired injected token wins even when an api_key is present —
+    // it must NOT fall through to minting. The anti-fallthrough guard.
+    #[tokio::test]
+    async fn test_injected_expired_beats_apikey_no_fallthrough() {
+        let token = injected_expired();
+        let config = NovaSdkConfig::default()
+            .with_api_key(DUMMY_API_KEY)
+            .with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let err = sdk.get_session_token().await.unwrap_err();
+        assert!(
+            err.to_string().contains(EXPIRED_MSG),
+            "expired injected token must not fall through to minting; got: {}", err
+        );
+    }
+
+    // Case 5: both api_key and session_token → injected wins, verbatim.
+    #[tokio::test]
+    async fn test_injected_beats_apikey_when_valid() {
+        let token = injected_no_exp();
+        let config = NovaSdkConfig::default()
+            .with_api_key(DUMMY_API_KEY)
+            .with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let got = sdk.get_session_token().await.unwrap();
+        assert_eq!(got, token, "injected token must win over api_key");
+    }
+
+    // Case 6: neither → existing Auth "API key required" (unchanged).
+    #[tokio::test]
+    async fn test_neither_errors_api_key_required() {
+        let sdk = NovaSdk::new(TEST_ACCOUNT_ID).unwrap();
+        let err = sdk.get_session_token().await.unwrap_err();
+        assert!(matches!(err, NovaError::Auth(_)), "expected Auth error, got {:?}", err);
+        assert!(err.to_string().contains("API key required"));
+    }
+
+    // Case 7: refresh_token in injected+expired mode errors (no silent no-op).
+    #[tokio::test]
+    async fn test_refresh_token_injected_expired_errors() {
+        let token = injected_expired();
+        let config = NovaSdkConfig::default().with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        let err = sdk.refresh_token().await.unwrap_err();
+        assert!(err.to_string().contains(EXPIRED_MSG));
+    }
+
+    // Case 7b: refresh_token with a valid injected token is a no-op refresh;
+    // the token still resolves verbatim afterward.
+    #[tokio::test]
+    async fn test_refresh_token_injected_valid_noop() {
+        let token = injected_future();
+        let config = NovaSdkConfig::default().with_session_token(&token);
+        let sdk = NovaSdk::with_config(TEST_ACCOUNT_ID, config).unwrap();
+        sdk.refresh_token().await.unwrap();
+        let got = sdk.get_session_token().await.unwrap();
+        assert_eq!(got, token);
     }
 
     // =========================================================================

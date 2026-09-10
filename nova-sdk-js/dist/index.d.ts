@@ -5,6 +5,7 @@ export type { FileFormat, FileFormatV1, CompressionAlgo, EncodeOptions } from '.
 export { encryptV0, decryptV0 } from './legacy/v0.js';
 export interface NovaSdkConfig {
     apiKey?: string;
+    sessionToken?: string;
     authUrl?: string;
     rpcUrl?: string;
     contractId?: string;
@@ -45,6 +46,8 @@ export declare class NovaSdk {
     private tokenCache;
     private authUrl;
     private apiKey;
+    private injectedToken;
+    private injectedTokenExpMs;
     readonly accountId: string;
     readonly contractId: string;
     readonly mcpUrl: string;
@@ -78,6 +81,7 @@ export declare class NovaSdk {
      * Called automatically before each API request.
      */
     private getSessionToken;
+    private decodeJwtExpMs;
     private parseExpiry;
     /**
      * Force refresh the session token.

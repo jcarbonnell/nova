@@ -26,7 +26,14 @@ const DEFAULT_AUTH_URL = 'https://nova-sdk.com';
 export interface NovaSdkConfig {
   // API key for authentication (get yours at nova-sdk.com)
   apiKey?: string;
-  
+
+  // Pre-minted nova_session JWT. When present, the SDK uses it VERBATIM and
+  // never mints (the apiKey mint path is skipped even if apiKey is also set).
+  // For browser-session apps (e.g. the dashboard) whose server-side proxy mints
+  // from an Auth0 cookie and injects the token. An expired injected token
+  // surfaces a dedicated error rather than falling through to minting.
+  sessionToken?: string;
+
   // Infrastructure config
   authUrl?: string;
   
@@ -137,6 +144,8 @@ export class NovaSdk {
   private tokenCache: TokenCache | null = null;
   private authUrl: string;
   private apiKey: string | null = null;
+  private injectedToken: string | null = null;
+  private injectedTokenExpMs: number | null = null;
 
   public readonly accountId: string;
   public readonly contractId: string;
@@ -174,6 +183,13 @@ export class NovaSdk {
     this.accountId = accountId;
     this.authUrl = config.authUrl || DEFAULT_AUTH_URL;
     this.apiKey = config.apiKey || null;
+    this.injectedToken = config.sessionToken || null;
+    // Decode exp ONCE at construction (seconds → ms). Comparison happens at call
+    // time in getSessionToken, so a token valid now but expired later still
+    // surfaces cleanly. A token with no decodable exp is used verbatim.
+    this.injectedTokenExpMs = this.injectedToken
+      ? this.decodeJwtExpMs(this.injectedToken)
+      : null;
     this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
     this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
     this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
@@ -202,6 +218,18 @@ export class NovaSdk {
    * Called automatically before each API request.
    */
   private async getSessionToken(): Promise<string> {
+    // Injected-token mode: use the caller-supplied nova_session VERBATIM and
+    // never mint. Checked BEFORE apiKey so an injected token wins when both are
+    // present. Expiry is checked here (call time), not at construction.
+    if (this.injectedToken) {
+      if (this.injectedTokenExpMs !== null && this.injectedTokenExpMs <= Date.now()) {
+        throw new NovaError(
+          'Injected session token has expired; construct a new NovaSdk with a fresh sessionToken'
+        );
+      }
+      return this.injectedToken;
+    }
+
     // Return cached token if still valid (5 min buffer for safety)
     if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 5 * 60 * 1000) {
       return this.tokenCache.token;
@@ -266,6 +294,22 @@ export class NovaSdk {
     }
   }
 
+  // Decode a JWT's `exp` claim (RFC 7519: seconds since epoch) into ms, without
+  // verifying the signature — MCP verifies; this only reads expiry for a clean
+  // client-side error. Returns null if the token has no decodable numeric exp,
+  // in which case the token is used verbatim and MCP is the sole arbiter.
+  private decodeJwtExpMs(token: string): number | null {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+      const payloadB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
+      return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+    } catch {
+      return null;
+    }
+  }
+
   private parseExpiry(expiresIn: string): number {
     const match = expiresIn.match(/^(\d+)([hmd])$/);
     if (!match) return 23 * 60 * 60 * 1000; // Default 23h
@@ -286,6 +330,13 @@ export class NovaSdk {
    * Useful if you get auth errors and want to retry with a fresh token.
    */
   async refreshToken(): Promise<void> {
+    // In injected mode there is nothing to refresh to: getSessionToken returns
+    // the token verbatim (valid) or throws the dedicated expired error (expired).
+    // Either way we do NOT clear a cache we don't own or fall through to minting.
+    if (this.injectedToken) {
+      await this.getSessionToken();
+      return;
+    }
     this.tokenCache = null;
     await this.getSessionToken();
   }
