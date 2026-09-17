@@ -6,6 +6,18 @@ NOVA fills critical gaps in AI ecosystems —no native encrypted data persistenc
 
 **Dual-Network Support**: Use mainnet for production [nova-sdk.com](https://nova-sdk.com) or testnet for development [testnet.nova-sdk.com](https://testnet.nova-sdk.com). Testnet uses mocked storage for free testing; mainnet stores files on FastFS (NEAR-native).
 
+## The NOVA security model
+
+> **No NOVA-operated server — first-party or third-party — ever holds your plaintext or your unwrapped keys, and every access to your data is provable.**
+
+NOVA is built to *prove* its guarantees, not merely assert them. Three anchors make the security model verifiable:
+
+- **Hardware attestation.** Group keys are derived and used only inside a Trusted Execution Environment (TEE) that attests — cryptographically, in hardware — that it is running the expected, unmodified code. No operator can quietly read or divert keys, because the enclave proves what code touched them.
+- **On-chain integrity.** Every file's hash is recorded on-chain at upload. Anyone can confirm that the bytes they retrieve are exactly what was committed — corruption is detectable, not something you take on faith.
+- **On-chain audit.** Every access is an immutable on-chain record. A third party — a regulator, an auditor, a counterparty — can verify who accessed what, without trusting NOVA.
+
+Together these make NOVA a verifiable data layer: a user, or their auditor, can independently prove their data was neither corrupted nor leaked. Everything in the sections below is a consequence of this model.
+
 ## Why Use NOVA?
 
 - **Privacy-First**: Encrypt files with group keys managed off-chain in TEEs, ensuring only authorized users or AI agents access data—keys never exposed on-chain.
@@ -305,7 +317,7 @@ Comprehensive documentation is available on GitBook:
 
 1. **Private Keys** - Never publish NEAR private keys to version control
 2. **Key Storage** - Keys managed in TEEs; never handle plaintext in code
-3. **Storage Privacy** - stored content is addressable by reference; client-side encryption is essential
+3. **Storage Privacy** - stored content is addressable by reference, so NOVA always encrypts client-side before storage; ciphertext is all that reaches FastFS
 4. **Access Control** - Always verify user authorization before operations
 5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
 6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to FastFS or MCP server
