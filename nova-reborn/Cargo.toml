@@ -1,0 +1,34 @@
+[package]
+name = "nova-reborn"
+version = "0.1.0"
+edition = "2021"
+description = "NOVA's IronClaw Reborn (near:agent@0.4.1) tool extension. Exposes NOVA's capabilities as sandboxed tools — store/retrieve files, list and join groups, and (dashboard-disabled) owner operations — calling the existing NOVA MCP API with the API key host-injected. Successor to nova-submit (near:agent@0.3.0)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jcarbonnell/nova"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+base64 = "0.22"
+# RustCrypto AES-256-GCM — audited, compiles cleanly to wasm32-wasip2.
+aes-gcm = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+# F59: Reborn 1.4.1 links WASI preview 2 with a secure default RNG, so a fresh
+# random per-upload nonce is now available (nova-submit had to derive one from
+# upload_id because 0.3.0's host exposed no RNG). getrandom 0.3 targets wasip2.
+getrandom = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+
+[workspace]

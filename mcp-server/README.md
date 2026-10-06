@@ -7,7 +7,7 @@ The hosted Model Context Protocol (MCP) server that powers NOVA. It is the signi
 ## What it is
 
 - A **hosted** FastMCP (Python, FastMCP v3+) server, deployed in a Phala TDX Confidential VM (CVM) alongside the Shade Agent — no centralized third-party hosting.
-- Dual-network: mainnet (`nova-sdk.near`) and testnet (`nova-sdk-6.testnet`), selected per request from the caller's account.
+- Dual-network: mainnet (`nova-sdk.near`) and testnet (`nova-sdk-7.testnet`), selected per request from the caller's account.
 - The signing proxy: clients never hold NEAR private keys. The server verifies a session token, retrieves the caller's key material from the Shade Agent's TEE (behind an internal auth gate), and signs the on-chain transaction on their behalf.
 
 **Base URL (mainnet):**

@@ -189,7 +189,7 @@ impl NovaSdkConfig {
             session_token: None,
             auth_url: DEFAULT_AUTH_URL.to_string(),
             rpc_url: "https://rpc.testnet.near.org".to_string(),
-            contract_id: "nova-sdk-6.testnet".to_string(),
+            contract_id: "nova-sdk-7.testnet".to_string(),
             mcp_url: DEFAULT_MCP_URL.to_string(),
         }
     }
@@ -1146,7 +1146,7 @@ mod tests {
     use super::*;
     use std::env;
 
-    const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
+    const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-7.testnet";
 
     // =========================================================================
     // Constructor Tests

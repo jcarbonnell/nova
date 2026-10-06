@@ -208,16 +208,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 🧪 Testnet Usage
 
-⚠️ **Testnet Mode**: file uploads are mocked on testnet - files are stored in-memory and not persisted. Blockchain operations (group registration, member management) are real and use faucet tokens on nova-sdk-6.testnet.
+⚠️ **Testnet Mode**: file uploads are mocked on testnet - files are stored in-memory and not persisted. Blockchain operations (group registration, member management) are real and use faucet tokens on nova-sdk-7.testnet.
 
 For development, use **testnet** explicitly:
 
 **JavaScript:**
 ```typescript
-const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
+const sdk = new NovaSdk('alice.nova-sdk-7.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-6.testnet',
+  contractId: 'nova-sdk-7.testnet',
 });
 ```
 
@@ -226,7 +226,7 @@ const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
 
-let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-7.testnet", config)?;
 ```
 
 

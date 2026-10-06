@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "nova.store_file input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account_id", "group_id", "filename", "content", "sha256"],
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "description": "The agent's NOVA account ID, e.g. agent1.nova-sdk-7.testnet. Must match the host-injected API key."
+    },
+    "group_id": {
+      "type": "string",
+      "description": "Target NOVA group. The account must already be a member; store_file does not join."
+    },
+    "filename": {
+      "type": "string",
+      "description": "Stored filename, e.g. graph.json."
+    },
+    "content": {
+      "type": "string",
+      "description": "The full file content to encrypt and upload (UTF-8 text)."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "64 lowercase hex chars: SHA-256 of the UTF-8 bytes of content, computed by the caller. Verified before any network call."
+    }
+  }
+}

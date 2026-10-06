@@ -1,7 +1,7 @@
 // nova-sdk-rs v3 Integration Tests
 use nova_sdk_rs::{NovaSdk, NovaError};
 
-const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-6.testnet";
+const TEST_ACCOUNT_ID: &str = "alice-nova.nova-sdk-7.testnet";
 
 fn make_test_sdk(account_id: &str) -> NovaSdk {
     let config = nova_sdk_rs::NovaSdkConfig::default()

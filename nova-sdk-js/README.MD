@@ -36,10 +36,10 @@ npm install nova-sdk-js
 - **Retrieve file**: ~0.013 NEAR
 
 ```typescript
-const sdk = new NovaSdk('yourname.nova-sdk-6.testnet', {
+const sdk = new NovaSdk('yourname.nova-sdk-7.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-6.testnet',
+  contractId: 'nova-sdk-7.testnet',
 });
 ```
 
@@ -87,10 +87,10 @@ const sdk = new NovaSdk('alice.nova-sdk.near', {
 });
 
 // Testnet configuration
-const sdk = new NovaSdk('alice.nova-sdk-6.testnet', {
+const sdk = new NovaSdk('alice.nova-sdk-7.testnet', {
   apiKey: process.env.NOVA_API_KEY,
   rpcUrl: 'https://rpc.testnet.near.org',
-  contractId: 'nova-sdk-6.testnet',
+  contractId: 'nova-sdk-7.testnet',
 });
 
 // Custom MCP server (advanced)

@@ -1,0 +1,10 @@
+/Users/juliencarbonnell/near/nova/nova-reborn/target/wasm32-wasip2/release/deps/getrandom-419cb3cccde44d4e.d: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/error.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/util.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/wasi.rs
+
+/Users/juliencarbonnell/near/nova/nova-reborn/target/wasm32-wasip2/release/deps/libgetrandom-419cb3cccde44d4e.rlib: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/error.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/util.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/wasi.rs
+
+/Users/juliencarbonnell/near/nova/nova-reborn/target/wasm32-wasip2/release/deps/libgetrandom-419cb3cccde44d4e.rmeta: /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/lib.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/error.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/util.rs /Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/wasi.rs
+
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/lib.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/error.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/util.rs:
+/Users/juliencarbonnell/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.2.17/src/wasi.rs:

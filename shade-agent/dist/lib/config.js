@@ -18,7 +18,7 @@ export const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.n
 // Names match docker-compose. The pre-config code had FOUR names for these two
 // values (NOVA_CONTRACT_ID/NOVA_MAINNET_CONTRACT, ..._TESTNET_CONTRACT_ID/...).
 export const NOVA_MAINNET_CONTRACT = process.env.NOVA_MAINNET_CONTRACT || 'nova-sdk.near';
-export const NOVA_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT || 'nova-sdk-6.testnet';
+export const NOVA_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT || 'nova-sdk-7.testnet';
 // Written by bootstrapAgent() AFTER module load (7.5) — must be a getter.
 export function shadeAgentAccountId() {
     return process.env.SHADE_AGENT_ACCOUNT_ID;

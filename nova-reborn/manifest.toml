@@ -1,0 +1,70 @@
+# nova-reborn — Reborn extension manifest (reborn.extension_manifest.v3)
+#
+# ⚠️ CONSTRUCTED FROM THE CLEANROOM SPEC (F58), NOT FROM THE REAL TEMPLATE.
+# The spec names `crates/extensions/packages/github/` as the working template
+# for the v3 manifest, the `[[tools.credentials]]` block, and the `[auth.<vendor>]`
+# block. I did not have that file. EVERY field below marked ⚠️ must be checked
+# against the github package before trusting this manifest. The shape is my best
+# reading of the spec; field names/nesting may differ.
+
+# ⚠️ manifest schema version — spec says "reborn.extension_manifest.v3".
+# Confirm the exact key the loader expects (could be `manifest_version = 3`,
+# `schema = "reborn.extension_manifest.v3"`, etc.).
+manifest_version = "reborn.extension_manifest.v3"
+
+[extension]
+# Extension id is `nova` by the dashboard's requirement (it sets per-tool states
+# by id — F43/F45). The CRATE is nova-reborn; the EXTENSION id stays nova unless
+# the dashboard renames it (you noted it may become nova-reborn there too — if so,
+# change this id to match, and the dashboard's tool-state config with it).
+id = "nova"
+version = "0.1.0"
+description = "NOVA capabilities for IronClaw Reborn: store/retrieve encrypted files and manage groups on NEAR, calling the NOVA MCP API with the API key host-injected."
+# ⚠️ trust value for a third-party extension (spec §6.2 open point). The github
+# extension uses `first_party_requested`. Unknown what a third-party NOVA
+# extension should declare. Placeholder — CHECK.
+trust = "first_party_requested"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth: the NOVA API key, host-injected (F58 / D7). Never a tool parameter,
+# never in output. method = api_key per the spec.
+# ⚠️ the [auth.<vendor>] block shape is inferred — check the github template for
+# exact keys (secret flag, how the setup UI names it, etc.).
+# ─────────────────────────────────────────────────────────────────────────────
+[auth.nova]
+method = "api_key"
+secret = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network targets (spec §6.3 open point). Two hosts, as nova-submit allowed:
+# nova-sdk.com for the session-token exchange, and the MCP host for /tools/*.
+# ⚠️ unknown whether a credential's `audience` host is implicitly allowed or
+# needs an explicit entry here; wildcards are supported. CHECK.
+# ─────────────────────────────────────────────────────────────────────────────
+[[network_targets]]
+host = "nova-sdk.com"
+path_prefix = "/api/"
+
+[[network_targets]]
+host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network"
+path_prefix = "/tools/"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tools. Slice 1 declares only store_file. The others (retrieve_file,
+# list_group_files, list_owned_groups, list_member_groups, join_group, and the
+# three owner ops) are added in slice 4. Tool ids are nova.<method>, stable.
+#
+# credentials: the X-API-Key injection, bound to the session-token host
+# (audience = nova-sdk.com). ⚠️ `audience` semantics and the injection block
+# shape (`type`/`name`/`prefix`) are from the spec description — CHECK the
+# github template; `prefix` may be required even if empty for a raw header.
+# effects: network + use_secret for all NOVA calls; external_write for uploads
+# (§3.4).
+# ─────────────────────────────────────────────────────────────────────────────
+[[tools]]
+id = "nova.store_file"
+effects = ["network", "use_secret", "external_write"]
+
+[[tools.credentials]]
+audience = "nova-sdk.com"
+injection = { type = "header", name = "X-API-Key", prefix = "" }

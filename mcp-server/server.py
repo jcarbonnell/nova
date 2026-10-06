@@ -35,9 +35,9 @@ CONFIG = {
         "is_testnet": False,
     },
     "testnet": {
-        "contract_id": os.getenv("TESTNET_CONTRACT_ID", "nova-sdk-6.testnet"),
+        "contract_id": os.getenv("TESTNET_CONTRACT_ID", "nova-sdk-7.testnet"),
         "rpc_url": os.getenv("TESTNET_RPC_URL", "https://rpc.testnet.near.org"),
-        "account_suffix": os.getenv("TESTNET_ACCOUNT_SUFFIX", ".nova-sdk-6.testnet"),
+        "account_suffix": os.getenv("TESTNET_ACCOUNT_SUFFIX", ".nova-sdk-7.testnet"),
         "is_testnet": True,
     }
 }

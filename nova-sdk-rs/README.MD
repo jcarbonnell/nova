@@ -43,7 +43,7 @@ For development, use testnet configuration:
 ```rust
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
-let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-7.testnet", config)?;
 ```
 
 > **Note:** On testnet, file storage is mocked (in-memory). Blockchain operations use real testnet with faucet tokens.
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 
     // For testnet development:
-    // let sdk = NovaSdk::testnet("alice.nova-sdk-6.testnet")?;
+    // let sdk = NovaSdk::testnet("alice.nova-sdk-7.testnet")?;
 
     // Verify connection
     println!("Network: {} | Contract: {}", sdk.network_id(), sdk.contract_id());
@@ -195,7 +195,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk.near", config)?;
 // Testnet
 let config = NovaSdkConfig::testnet()
     .with_api_key(&std::env::var("NOVA_API_KEY")?);
-let sdk = NovaSdk::with_config("alice.nova-sdk-6.testnet", config)?;
+let sdk = NovaSdk::with_config("alice.nova-sdk-7.testnet", config)?;
 
 // Force session token refresh if needed
 sdk.refresh_token().await?;
