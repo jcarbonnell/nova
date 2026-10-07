@@ -208,6 +208,131 @@ results.append(run(
     expect_accept=True, expect_account=VICTIM,
 ))
 
+# API-key path (nova-reborn): resolve_user + X-API-Key, Shade stubbed.
+# The REAL resolve_user / _user_from_api_key run; only the network is faked.
+# ════════════════════════════════════════════════════════════════════════════
+import asyncio   # noqa: E402
+import logging   # noqa: E402
+
+print("\n── API-key path ──")
+
+VICTIM_KEY = "nova_sk_" + "V" * 43
+ATTACKER_KEY = "nova_sk_" + "A" * 43
+STORED = {VICTIM: VICTIM_KEY, ATTACKER: ATTACKER_KEY}  # what Shade has on file
+shade_calls = []
+shade_mode = {"m": "normal"}
+
+
+async def fake_shade(api_key, account_id):
+    shade_calls.append((api_key, account_id))
+    m = shade_mode["m"]
+    if m == "down":
+        raise ConnectionError("shade unreachable")
+    if m == "no_key":
+        return 401, {"error": "No API key configured", "code": "NO_API_KEY_CONFIGURED"}
+    if m == "lying":  # valid:true but for a different account — must still reject
+        return 200, {"valid": True, "account_id": ATTACKER, "network": "mainnet"}
+    stored = STORED.get(account_id)
+    if stored is None:
+        return 401, {"error": "No API key configured", "code": "NO_API_KEY_CONFIGURED"}
+    return 200, {"valid": stored == api_key, "account_id": account_id, "network": "mainnet"}
+
+
+server._shade_verify_api_key = fake_shade
+
+# Capture RAW log messages (unfiltered handler) to prove the code never logs the key.
+captured = []
+
+
+class _Capture(logging.Handler):
+    def emit(self, record):
+        captured.append(record.getMessage())
+
+
+logging.getLogger().addHandler(_Capture())
+
+
+def runk(name, headers, expect_accept, expect_account=None, expect_shade=None, mode="normal"):
+    shade_calls.clear()
+    shade_mode["m"] = mode
+    try:
+        user = asyncio.run(server.resolve_user(request=FakeRequest(headers)))
+        accepted, detail = True, user.get("near_account_id")
+    except Exception as e:
+        accepted, detail = False, str(e)
+    ok = accepted == expect_accept
+    if ok and expect_accept and expect_account is not None:
+        ok = detail == expect_account
+    if ok and expect_shade is not None:
+        ok = (len(shade_calls) > 0) == expect_shade
+    verdict = "PASS" if ok else "FAIL"
+    action = "ACCEPTED" if accepted else "REJECTED"
+    print(f"[{verdict}] {name}\n         → {action}: {detail}  (shade calls: {len(shade_calls)})")
+    return ok
+
+
+results.append(runk("K1  valid key + matching x-account-id",
+    {"x-api-key": VICTIM_KEY, "x-account-id": VICTIM},
+    expect_accept=True, expect_account=VICTIM, expect_shade=True))
+
+results.append(runk("K2  attacker's key claiming the victim's account",
+    {"x-api-key": ATTACKER_KEY, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=True))
+
+results.append(runk("K3  victim's key claiming the attacker's account",
+    {"x-api-key": VICTIM_KEY, "x-account-id": ATTACKER},
+    expect_accept=False, expect_shade=True))
+
+results.append(runk("K4  unknown key",
+    {"x-api-key": "nova_sk_" + "Z" * 43, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=True))
+
+results.append(runk("K5  key WITHOUT x-account-id (Shade must not be called)",
+    {"x-api-key": VICTIM_KEY},
+    expect_accept=False, expect_shade=False))
+
+results.append(runk("K6  malformed key, no nova_sk_ prefix (Shade must not be called)",
+    {"x-api-key": "not-a-nova-key", "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=False))
+
+results.append(runk("K7  Shade unreachable → fail closed",
+    {"x-api-key": VICTIM_KEY, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=True, mode="down"))
+
+results.append(runk("K8  Shade 401 no_key_configured → reject",
+    {"x-api-key": VICTIM_KEY, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=True, mode="no_key"))
+
+results.append(runk("K9  Shade says valid but for ANOTHER account → reject",
+    {"x-api-key": VICTIM_KEY, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=True, mode="lying"))
+
+results.append(runk("K10 INVALID Bearer + valid key → reject, NO fallback to key path",
+    {"authorization": f"Bearer {mint(secret='wrong-secret')}",
+     "x-api-key": VICTIM_KEY, "x-account-id": VICTIM},
+    expect_accept=False, expect_shade=False))
+
+results.append(runk("K11 VALID Bearer + key → JWT identity wins, Shade not called",
+    {"authorization": f"Bearer {mint(account_id=VICTIM)}",
+     "x-api-key": ATTACKER_KEY, "x-account-id": VICTIM},
+    expect_accept=True, expect_account=VICTIM, expect_shade=False))
+
+results.append(runk("K12 bare x-account-id + x-user-email via resolve_user (T4 through new entry)",
+    {"x-account-id": VICTIM, "x-user-email": "anything@example.com"},
+    expect_accept=False, expect_shade=False))
+
+leaked = [m for m in captured if "nova_sk_" in m]
+k13 = not leaked
+print(f"[{'PASS' if k13 else 'FAIL'}] K13 no NOVA API key in any log message"
+      f"{'' if k13 else f' — LEAKED in: {leaked[:2]}'}")
+results.append(k13)
+
+rec = logging.LogRecord("t", logging.INFO, __file__, 0, f"oops {VICTIM_KEY} here", None, None)
+server.RedactSecrets().filter(rec)
+k14 = "nova_sk_[REDACTED]" in rec.getMessage() and VICTIM_KEY not in rec.getMessage()
+print(f"[{'PASS' if k14 else 'FAIL'}] K14 RedactSecrets scrubs nova_sk_ keys → {rec.getMessage()}")
+results.append(k14)
+
 print("\n" + "=" * 66)
 if all(results):
     print(f"ALL {len(results)} TESTS PASSED — no unauthenticated path to an identity.")

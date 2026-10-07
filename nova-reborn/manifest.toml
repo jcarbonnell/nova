@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "nova"
 name = "NOVA"
-version = "0.1.1"
+version = "0.1.2"
 description = "NOVA capabilities for IronClaw Reborn: store/retrieve encrypted files and manage groups on NEAR, calling the NOVA MCP API. The NOVA API key is host-injected on the session-token exchange; the minted session token is carried by the tool to the MCP host."
 # Imported bundles may not claim first-party trust (ironclaw_extension_host:
 # imported_extension_package_rejects_first_party_trust_claims).

@@ -60,6 +60,7 @@ class RedactSecrets(logging.Filter):
         (re.compile(r'([?&]apiKey=)[^&\s"\']+', re.I), r'\1[REDACTED]'),
         (re.compile(r'(Bearer\s+)[A-Za-z0-9._\-]+', re.I), r'\1[REDACTED]'),
         (re.compile(r'(ed25519:)[A-Za-z0-9+/=]{60,}'), r'\1[REDACTED]'),
+        (re.compile(r'nova_sk_[A-Za-z0-9_\-]+'), 'nova_sk_[REDACTED]'),
     ]
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -188,6 +189,99 @@ def get_current_user(
         "session_token": hashlib.sha256(token.encode()).hexdigest(),
     }
 
+# ────────────────────────────────────────────────────────────────────────────
+# API-key authentication (nova-reborn / host-injected credential path)
+# ────────────────────────────────────────────────────────────────────────────
+# Reborn's egress scanner scrubs session JWTs from response bodies, so a WASM
+# guest cannot hold a nova_session. Instead the host injects the NOVA API key as
+# X-API-Key on requests to this MCP, and the guest names its account in
+# x-account-id. We verify the pair with Shade exactly as the frontend's
+# session-token Path 0 does, then trust only Shade's answer.
+#
+# This is NOT the pre-Fix-A header trust: x-account-id is a CLAIM that the key
+# must prove (Shade hash-checks the key against that account's stored hash).
+# Fails closed on every non-success, including Shade being unreachable.
+#
+# The JWT path is untouched: a Bearer, if present, always takes precedence, and
+# an invalid Bearer never falls back to the key path.
+
+API_KEY_PREFIX = "nova_sk_"
+
+
+async def _shade_verify_api_key(api_key: str, account_id: str) -> tuple[int, Any]:
+    """Thin transport to Shade /rpc/user-keys/verify-api-key → (status, json|None).
+    Kept separate so the harness can stub the network and test the real logic."""
+    if not SHADE_API_URL:
+        raise RuntimeError("SHADE_API_URL not configured")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{SHADE_API_URL}/rpc/user-keys/verify-api-key",
+            json={"api_key": api_key, "account_id": account_id},
+            headers={"Content-Type": "application/json", "X-Internal-Auth": INTERNAL_API_SECRET},
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    return resp.status_code, data
+
+
+async def _user_from_api_key(api_key: str, claimed_account: str) -> dict:
+    claimed = (claimed_account or "").strip()
+    account_hash = hashlib.sha256(claimed.encode()).hexdigest()[:12] if claimed else "none"
+
+    if not claimed:
+        raise ValueError("Auth required: x-account-id must accompany the X-API-Key credential")
+    if not api_key.startswith(API_KEY_PREFIX):
+        logger.warning(f"API-key auth rejected (malformed) account={account_hash}")
+        raise ValueError("Auth failed: malformed credential")
+
+    try:
+        status, data = await _shade_verify_api_key(api_key, claimed)
+    except Exception as e:
+        logger.warning(f"API-key verification unavailable ({type(e).__name__}) account={account_hash}")
+        raise ValueError("Auth failed: credential verification unavailable")
+
+    # Only 200 + valid strictly True is success. 200 {valid:false} is a mismatch.
+    if status != 200 or not isinstance(data, dict) or data.get("valid") is not True:
+        logger.warning(f"API-key auth rejected (status={status}) account={account_hash}")
+        raise ValueError("Auth failed: invalid credential")
+
+    verified = data.get("account_id")
+    if verified != claimed:
+        logger.warning(f"API-key auth rejected (account mismatch) account={account_hash}")
+        raise ValueError("Auth failed: account mismatch")
+
+    logger.info(f"API-key auth ok account={account_hash}")
+    return {
+        "email": None,
+        "wallet_id": None,
+        "near_account_id": verified,
+        "access_token": None,
+        "session_token": hashlib.sha256(f"apikey|{verified}".encode()).hexdigest(),
+        "auth_method": "api_key",
+    }
+
+
+async def resolve_user(ctx: Context | None = None, request: Request | None = None) -> dict:
+    """Single auth entry point for tools and REST.
+    Bearer present → JWT path (unchanged). Else X-API-Key → Shade-verified key
+    path. Else → JWT path, which rejects (no unauthenticated identity)."""
+    if ctx is not None:
+        headers = {k.lower(): v for k, v in get_http_headers().items()}
+        bearer = ctx.token or ""
+    elif request is not None:
+        headers = {k.lower(): v for k, v in dict(request.headers).items()}
+        bearer = headers.get("authorization", "").replace("Bearer ", "")
+    else:
+        raise ValueError("Must provide either ctx or request")
+
+    api_key = headers.get("x-api-key", "")
+    if bearer or not api_key:
+        return get_current_user(ctx=ctx, request=request)
+    return await _user_from_api_key(api_key, headers.get("x-account-id", ""))
+
+
 def require_auth(func):
     """Auth decorator that preserves original function signature for MCP."""
     
@@ -197,7 +291,7 @@ def require_auth(func):
     @wraps(func)
     async def wrapper(ctx: Context, **kwargs):  # Use **kwargs to accept named params
         # Extract user from context
-        user = get_current_user(ctx=ctx)
+        user = await resolve_user(ctx=ctx)
         if not user.get("near_account_id"):
             raise ValueError("No NEAR account configured")
         
@@ -231,7 +325,7 @@ def expose_as_rest(path: str, methods: list[str] = ["POST"]):
                 body = {}
 
             try:
-                user = get_current_user(request=request)
+                user = await resolve_user(request=request)
             except Exception as e:
                 logger.warning(f"REST {path} auth rejected: {e}")
                 return JSONResponse({"error": str(e)}, status_code=401)

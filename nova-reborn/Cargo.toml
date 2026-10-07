@@ -1,6 +1,6 @@
 [package]
 name = "nova-reborn"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "NOVA's IronClaw Reborn (near:agent@0.4.1) tool extension. Exposes NOVA's capabilities as sandboxed tools — store/retrieve files, list and join groups, and (dashboard-disabled) owner operations — calling the existing NOVA MCP API with the API key host-injected. Successor to nova-submit (near:agent@0.3.0)."
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,10 @@ serde_json = "1"
 schemars = "1"
 base64 = "0.22"
 # RustCrypto AES-256-GCM — audited, compiles cleanly to wasm32-wasip2.
-aes-gcm = "0.10"
+# default-features off: we never use aes-gcm's own nonce generation, so this
+# keeps getrandom 0.2 (preview1-era) out of the dependency graph. Nonces come
+# from getrandom 0.3 below.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 sha2 = "0.10"
 hex = "0.4"
 # F59: Reborn 1.4.1 links WASI preview 2 with a secure default RNG, so a fresh
