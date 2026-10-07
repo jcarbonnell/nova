@@ -1,6 +1,6 @@
 [package]
 name = "nova-reborn"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "NOVA's IronClaw Reborn (near:agent@0.4.1) tool extension. Exposes NOVA's capabilities as sandboxed tools — store/retrieve files, list and join groups, and (dashboard-disabled) owner operations — calling the existing NOVA MCP API with the API key host-injected. Successor to nova-submit (near:agent@0.3.0)."
 license = "MIT OR Apache-2.0"
@@ -27,6 +27,9 @@ hex = "0.4"
 # random per-upload nonce is now available (nova-submit had to derive one from
 # upload_id because 0.3.0's host exposed no RNG). getrandom 0.3 targets wasip2.
 getrandom = "0.3"
+# zlib inflate for v1 files (format.compression = "deflate"). Pure Rust, compiles
+# to wasm32-wasip2; byte-compatible with the browser's DecompressionStream('deflate').
+miniz_oxide = "0.8"
 
 [profile.release]
 opt-level = "s"

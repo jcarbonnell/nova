@@ -13,7 +13,7 @@ provide; if they differ it fails immediately with `hash_mismatch` and sends no
 network request. Compute `sha256` as the SHA-256 of the UTF-8 bytes of `content`.
 
 Parameters:
-- `account_id` — your NOVA account (must match the configured API key).
+- `account_id` — your NOVA account (must match the account configured in the extension setup).
 - `group_id` — a group you are already a member of.
 - `filename` — the name to record for the upload.
 - `content` — the full UTF-8 text to store.

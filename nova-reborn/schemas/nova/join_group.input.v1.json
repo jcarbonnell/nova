@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "nova.join_group input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account_id", "group_id"],
+  "properties": {
+    "account_id": { "type": "string", "description": "The agent's NOVA account ID; must match the account configured in the extension setup." },
+    "group_id": { "type": "string", "description": "The NOVA group." }
+  }
+}

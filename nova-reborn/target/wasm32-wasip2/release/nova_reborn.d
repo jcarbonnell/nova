@@ -1,1 +1,1 @@
-/Users/juliencarbonnell/near/nova/nova-reborn/target/wasm32-wasip2/release/nova_reborn.wasm: /Users/juliencarbonnell/near/nova/nova-reborn/src/lib.rs /Users/juliencarbonnell/near/nova/nova-reborn/wit/tool.wit
+/Users/juliencarbonnell/near/nova/nova-reborn/target/wasm32-wasip2/release/nova_reborn.wasm: /Users/juliencarbonnell/near/nova/nova-reborn/src/lib.rs /Users/juliencarbonnell/near/nova/nova-reborn/src/markers.rs /Users/juliencarbonnell/near/nova/nova-reborn/wit/tool.wit

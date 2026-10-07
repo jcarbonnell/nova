@@ -1026,23 +1026,38 @@ async def auth_status(ctx: Context, user: dict, group_id: str = "test_group") ->
     
     return result
 
-@expose_as_rest("/tools/get_owned_groups")
-@require_auth
-async def get_owned_groups(ctx: Context, user: dict) -> list:
+async def _list_account_groups(user: dict, reader_view: str, signed_method: str) -> list:
+    """Owned/member group listing for the verified account.
+    Mainnet: the owner-gated *_of reader views (no user key needed; works for
+    wallet users). Testnet: the reader views and reader key exist only on the
+    MAINNET contract, so querying them for a testnet account silently returns []
+    from the wrong contract. Use the caller-signed read on the account's own
+    network instead (custodial accounts; 0.0001 NEAR fee). Deferred: deploy the
+    *_of views + a reader key on the testnet contract."""
     account_id = user["near_account_id"]
     if not account_id:
         raise ValueError("No verified account in session")
-    result = await read_owner_gated_view("get_owned_groups_of", account_id)
+    if get_config(account_id)["is_testnet"]:
+        result = await call_contract(user, signed_method, {}, signed_method)
+        if isinstance(result, str):
+            try:
+                return json.loads(result) or []
+            except ValueError:
+                logger.warning(f"{signed_method}: non-JSON contract result on testnet")
+                raise RuntimeError(f"{signed_method}: unexpected contract result")
+        return result or []
+    result = await read_owner_gated_view(reader_view, account_id)
     return result or []
+
+@expose_as_rest("/tools/get_owned_groups")
+@require_auth
+async def get_owned_groups(ctx: Context, user: dict) -> list:
+    return await _list_account_groups(user, "get_owned_groups_of", "get_owned_groups")
 
 @expose_as_rest("/tools/get_member_groups")
 @require_auth
 async def get_member_groups(ctx: Context, user: dict) -> list:
-    account_id = user["near_account_id"]
-    if not account_id:
-        raise ValueError("No verified account in session")
-    result = await read_owner_gated_view("get_member_groups_of", account_id)
-    return result or []
+    return await _list_account_groups(user, "get_member_groups_of", "get_member_groups")
 
 @expose_as_rest("/tools/get_group_members")
 @require_auth
@@ -1092,7 +1107,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.3", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.4", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

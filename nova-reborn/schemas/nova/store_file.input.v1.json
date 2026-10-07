@@ -7,7 +7,7 @@
   "properties": {
     "account_id": {
       "type": "string",
-      "description": "The agent's NOVA account ID, e.g. agent1.nova-sdk-7.testnet. Must match the host-injected API key."
+      "description": "The agent's NOVA account ID, e.g. agent1.nova-sdk-7.testnet. Must match the account configured in the extension setup."
     },
     "group_id": {
       "type": "string",

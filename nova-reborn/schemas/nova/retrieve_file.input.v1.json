@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "nova.retrieve_file input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account_id", "group_id", "cid"],
+  "properties": {
+    "account_id": { "type": "string", "description": "The agent's NOVA account ID; must match the account configured in the extension setup." },
+    "group_id": { "type": "string", "description": "The NOVA group holding the file. The account must be a member." },
+    "cid": { "type": "string", "description": "The file's storage location, as returned by store_file or listed by list_group_files." },
+    "encoding": { "type": "string", "enum": ["utf8", "base64"], "description": "How to return the content: utf8 (default, for text) or base64 (for binary files)." }
+  }
+}

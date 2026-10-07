@@ -1,39 +1,183 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "nova"
 name = "NOVA"
-version = "0.1.2"
-description = "NOVA capabilities for IronClaw Reborn: store/retrieve encrypted files and manage groups on NEAR, calling the NOVA MCP API. The NOVA API key is host-injected on the session-token exchange; the minted session token is carried by the tool to the MCP host."
-# Imported bundles may not claim first-party trust (ironclaw_extension_host:
-# imported_extension_package_rejects_first_party_trust_claims).
+version = "0.2.0"
+description = "NOVA capabilities for IronClaw Reborn: store/retrieve encrypted files and manage groups on NEAR, calling the NOVA MCP API. The NOVA credential is host-injected on every request to the MCP host; the guest never holds it."
+# Imported bundles may not claim first-party trust.
 trust = "third_party"
 
 [runtime]
 kind = "wasm"
 module = "wasm/nova_reborn.wasm"
 
-# NOVA auth is two-leg:
-#   Leg 1: the NOVA API key is host-injected as X-API-Key on the session-token
-#          request to nova-sdk.com (the [[tools.credentials]] block below; the
-#          audience host is allowed implicitly).
-#   Leg 2: the tool carries the minted session JWT as its own Bearer header to
-#          the MCP host (network target below, no credential injection).
+# Auth is single-leg: the host injects the NOVA credential as X-API-Key on every
+# request to the MCP host (each tool's [[tools.credentials]] audience). The guest
+# never holds it; it names its account in x-account-id and the MCP verifies the
+# pair with Shade. The dispatch key is the capability id (nova.<method>).
+
+# ── agent tools ──────────────────────────────────────────────────────────────
+
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "nova.store_file"
-description = "Encrypt a UTF-8 text file with AES-256-GCM and upload it to a NOVA group on NEAR, under the agent's own NOVA account. Verifies content against the provided sha256 before any network call."
+description = "Encrypt a UTF-8 text file with AES-256-GCM and upload it to a NOVA group on NEAR, under the agent's own NOVA account. Verifies content against the provided sha256 before any network call. Costs a small NEAR upload fee."
 effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/store_file.input.v1.json"
 prompt_doc_ref = "prompts/nova/store_file.md"
-network_targets = [
-  { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" },
-]
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "nova-sdk.com" }
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.retrieve_file"
+description = "Retrieve and decrypt a file from a NOVA group the agent belongs to. Returns the content (UTF-8 text, or base64 on request) and its SHA-256. A small NEAR read fee applies on private groups."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/nova/retrieve_file.input.v1.json"
+prompt_doc_ref = "prompts/nova/retrieve_file.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.list_group_files"
+description = "List the files recorded in a NOVA group: uploader, file hash, storage location, timestamp, and deletion status. Free on open groups; a small NEAR read fee applies on private groups."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/nova/list_group_files.input.v1.json"
+prompt_doc_ref = "prompts/nova/list_group_files.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.list_owned_groups"
+description = "List the NOVA groups the agent's account owns. Free."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/nova/list_owned_groups.input.v1.json"
+prompt_doc_ref = "prompts/nova/list_owned_groups.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.list_member_groups"
+description = "List the NOVA groups the agent's account is a member of (including owned groups). Free."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/nova/list_member_groups.input.v1.json"
+prompt_doc_ref = "prompts/nova/list_member_groups.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.join_group"
+description = "Join an open NOVA group (one whose owner opened a join window). Succeeds without change if already a member. Costs a small NEAR join fee."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nova/join_group.input.v1.json"
+prompt_doc_ref = "prompts/nova/join_group.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+# ── owner tools (the dashboard keeps these disabled for fleet agents) ────────
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.register_group"
+description = "Create a new NOVA group owned by the agent's account. Costs about 0.65 NEAR (fee plus storage)."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nova/register_group.input.v1.json"
+prompt_doc_ref = "prompts/nova/register_group.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.add_group_member"
+description = "Add a member to a NOVA group the agent's account owns. Owner only. Costs a small NEAR fee."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nova/add_group_member.input.v1.json"
+prompt_doc_ref = "prompts/nova/add_group_member.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+injection = { type = "header", name = "X-API-Key", prefix = "" }
+placeholder_env = "NOVA_API_KEY"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "nova.revoke_group_member"
+description = "Remove a member from a NOVA group the agent's account owns and rotate the group's encryption key, so the removed member cannot read files uploaded afterwards. Owner only. Costs a small NEAR fee."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nova/revoke_group_member.input.v1.json"
+prompt_doc_ref = "prompts/nova/revoke_group_member.md"
+network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+
+[[tools.credentials]]
+handle = "nova_api_key"
+vendor = "nova"
+audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
