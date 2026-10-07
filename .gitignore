@@ -62,6 +62,10 @@ shade-agent/near-rpc.json
 # nova-submit wasm tool
 nova-submit-tool/target/
 
+# nova-reborn wasm tool
+nova-reborn/target/
+nova-reborn/*.zip
+
 # agent plugins
 nova-ai-memory/node_modules/
 nova-ai-memory/.env
