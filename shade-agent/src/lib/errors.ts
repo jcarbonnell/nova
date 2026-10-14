@@ -15,7 +15,7 @@
 //   this JSON, so it is unaffected either way.
 
 /** The status codes actually used by NOVA's routes. */
-export type ApiStatus = 400 | 401 | 403 | 404 | 429 | 500 | 501;
+export type ApiStatus = 400 | 401 | 403 | 404 | 429 | 500 | 501 | 503;
 
 export class ApiError extends Error {
   constructor(

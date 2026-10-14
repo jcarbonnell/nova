@@ -118,14 +118,30 @@ else:
 # Account helpers
 # ───────────────────────────
     
+# NEAR implicit account: 64 lowercase hex = the ed25519 public key itself.
+# Agent Connect wallets (and any key-derived account) look like this. It has no
+# dot, so before v0.4.5 it was treated as a bare custodial username and got
+# '.nova-sdk.near' appended — an invalid (>64 char) account that add_group_member
+# and revoke_group_member would have targeted instead of the real one. A suffixed
+# 64-hex name can never be a valid NEAR account, so recognising it is unambiguous.
+# Deferred: ETH-implicit ('0x' + 40 hex) is NOT recognised here — a 42-char
+# custodial username of that shape would be ambiguous (see roadmap).
+IMPLICIT_ACCOUNT_RE = re.compile(r'^[0-9a-f]{64}$')
+NEAR_ACCOUNT_MAX_LEN = 64
+
 def normalize_account_id(account_id: str) -> str:
     account_id = account_id.strip().lower()
     if '.' in account_id:
         return account_id
+    if IMPLICIT_ACCOUNT_RE.match(account_id):
+        return account_id
     if not re.match(r'^[a-z0-9_-]{2,64}$', account_id):
         raise ValueError(f"Invalid username format: {account_id}")
     suffix = get_config(account_id)["account_suffix"]
-    return f"{account_id}{suffix}"
+    full = f"{account_id}{suffix}"
+    if len(full) > NEAR_ACCOUNT_MAX_LEN:
+        raise ValueError(f"Username too long for a NEAR account: {account_id}")
+    return full
 
 
 # ────────────────────────────────────────────────
@@ -1107,7 +1123,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.4", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.5", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

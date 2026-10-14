@@ -439,7 +439,26 @@ export const WalletNonceOutput = z.object({
  * (UNAUTHORIZED_NONCE_REPLAY / UNAUTHORIZED), shaped to { error, code } by
  * rpc/base.ts's mapErrors.
  */
-export const WalletVerifyOutput = z.object({
-  account_id: z.string(),
-  public_key: z.string(),
+export const WalletVerifyOutput = z.object({ account_id: z.string(), public_key: z.string() });
+
+// Agent Connect identity sign-in (phase-2 bridge). The client never sends the
+// signed message: Shade verifies against the one it stored for `challenge`.
+// Bounds are generous shape guards only; the verifier does the exact checks.
+export const AgentIdentityChallengeSchema = z.object({});
+export const AgentIdentityVerifySchema = z.object({
+  challenge: z.string().regex(/^[0-9a-f]{64}$/, 'challenge must be 32-byte lowercase hex'),
+  signature: z.object({
+    near_account_id: z.string().min(2).max(64),
+    public_key: z.string().min(1).max(128),
+    signature: z.string().min(1).max(256),
+    nonce: z.string().min(1).max(64),
+    recipient: z.string().min(1).max(64),
+  }),
 });
+export const AgentIdentityChallengeOutput = z.object({
+  message: z.string(),
+  challenge: z.string(),
+  audience: z.string(),
+  expires_at_ms: z.number(),
+});
+export const AgentIdentityVerifyOutput = z.object({ account_id: z.string(), public_key: z.string() });

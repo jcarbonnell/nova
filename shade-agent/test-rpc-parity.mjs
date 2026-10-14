@@ -217,6 +217,57 @@ console.log('\n── 4. THE ONE DELIBERATE DIVERGENCE: verify-api-key ───
     typeof l.body?.error === 'string' && typeof r.body?.error === 'string');
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+console.log('\n── 5. RPC-ONLY PROCEDURES: gate outermost + wire format ────────────\n');
+// wallet/* and agent-identity/* have no legacy twin, so section 1 never covered
+// them. Same invariant: malformed body + NO secret -> 403, never 400.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const RPC_ONLY = ['/rpc/wallet/nonce', '/rpc/wallet/verify',
+                  '/rpc/agent-identity/challenge', '/rpc/agent-identity/verify'];
+for (const p of RPC_ONLY) {
+  const r = await read(await post(p, { garbage: true }));
+  check(`${p}: malformed body + NO secret -> 403 (not 400)`, r.status === 403, `got ${r.status}`);
+}
+
+{
+  const r = await read(await post('/rpc/agent-identity/challenge', {}, GATE));
+  const m = typeof r.body?.message === 'string' ? JSON.parse(r.body.message) : null;
+  check('agent-identity/challenge -> 200 with the 7-field canonical envelope',
+    r.status === 200 && m && Object.keys(m).length === 7 && m.challenge === r.body.challenge
+      && m.audience === r.body.audience && m.expires_at_ms === r.body.expires_at_ms
+      && !/\s/.test(r.body.message),
+    `${r.status} ${JSON.stringify(r.body)}`);
+  check('  audience defaults to nova-sdk.near', r.body?.audience === 'nova-sdk.near', r.body?.audience);
+}
+
+{
+  const r = await read(await post('/rpc/agent-identity/verify', { challenge: 'XYZ', signature: {} }, GATE));
+  check('agent-identity/verify malformed -> 400 VALIDATION_FAILED (string error)',
+    r.status === 400 && r.body?.code === 'VALIDATION_FAILED' && typeof r.body?.error === 'string',
+    `${r.status} ${JSON.stringify(r.body)}`);
+}
+
+{
+  // Well-formed but never issued: refused BEFORE any key lookup -> network-free.
+  const payload = {
+    challenge: 'ab'.repeat(32),
+    signature: {
+      near_account_id: 'alice.near',
+      public_key: 'ed25519:11111111111111111111111111111111',
+      signature: 'cd'.repeat(64),
+      nonce: Buffer.alloc(32).toString('base64'),
+      recipient: 'nova-sdk.near',
+    },
+  };
+  const r = await read(await post('/rpc/agent-identity/verify', payload, GATE));
+  check('agent-identity/verify unknown challenge -> 401 UNAUTHORIZED_NONCE_REPLAY',
+    r.status === 401 && r.body?.code === 'UNAUTHORIZED_NONCE_REPLAY' && typeof r.body?.error === 'string',
+    `${r.status} ${JSON.stringify(r.body)}`);
+  check('  refusal body carries no reason/details (logged server-side only)',
+    r.body?.details === undefined && !/unknown/i.test(r.body?.error ?? ''), JSON.stringify(r.body));
+}
+
 console.log('\n' + '='.repeat(74));
 if (fail === 0) {
   console.log(`ALL ${pass} CHECKS PASSED — gate outermost on both surfaces, wire format intact, parity holds.`);

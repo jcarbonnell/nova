@@ -18,7 +18,7 @@
 // run offline and are exactly the branches most exposed to import perturbation.
 // The wallet happy-path is proven separately (test-wallet-siwn.mjs, 24/24).
 //
-// RUN: node --experimental-strip-types test/test-auth-regression.mjs
+// RUN: node test/test-auth-regression.mjs
 
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -30,7 +30,7 @@ function check(name, cond) {
   else { failed++; failures.push(name); console.log(`  ❌ ${name}`); }
 }
 
-const auth = await import('../src/lib/auth.js');
+const auth = await import('../dist/lib/auth.js');
 
 async function main() {
   console.log('\nauth.ts regression — sections 1–3 unperturbed by section 4\n');

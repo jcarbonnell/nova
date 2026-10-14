@@ -32,6 +32,11 @@ import {
   WalletNonceSchema, WalletVerifySchema, WalletNonceOutput, WalletVerifyOutput,
 } from '../lib/schemas.js';
 import { issueWalletNonce, verifyWalletSignin } from '../lib/auth.js';
+import {
+  AgentIdentityChallengeSchema, AgentIdentityVerifySchema,
+  AgentIdentityChallengeOutput, AgentIdentityVerifyOutput,
+} from '../lib/schemas.js';
+import * as agentIdentityService from '../lib/services/agent-identity.js';
 import * as fastfsService from '../lib/services/fastfs-storage.js';
 import * as retentionService from '../lib/services/retention.js';
 
@@ -210,6 +215,34 @@ const walletVerify = walletPub
   });
 
 // ────────────────────────────────────────────────
+// Agent Connect identity sign-in — phase-2 bridge, separate from wallet SIWN.
+// walletPub = gated + seedless: like SIWN, this touches no KV and derives no
+// keys (in-memory challenge store + read-only RPC views).
+// ────────────────────────────────────────────────
+
+const agentIdentityChallenge = walletPub
+  .route({
+    method: 'POST',
+    path: '/agent-identity/challenge',
+    tags: INTERNAL,
+    summary: 'Issue an Agent API identity challenge (canonical 7-field envelope)',
+  })
+  .input(AgentIdentityChallengeSchema)
+  .output(AgentIdentityChallengeOutput)
+  .handler(() => agentIdentityService.issueAgentChallenge());
+
+const agentIdentityVerify = walletPub
+  .route({
+    method: 'POST',
+    path: '/agent-identity/verify',
+    tags: INTERNAL,
+    summary: 'Verify an Agent API identity signature; returns the authenticated account',
+  })
+  .input(AgentIdentityVerifySchema)
+  .output(AgentIdentityVerifyOutput)
+  .handler(({ input }) => agentIdentityService.verifyAgentIdentitySignin(input));
+
+// ────────────────────────────────────────────────
 // retention registry (§6.1) — gated + seeded (touches KV), like the others.
 // register is called registry-FIRST by MCP's set_group_retention (before the
 // on-chain set) so the registry can never miss a real window; deregister is
@@ -270,6 +303,7 @@ export const router = {
   keyManagement: { generateKey, getKey, rotateKey },
   fastfs: { prepareUpload: prepareFileUpload, finalizeUpload: finalizeFileUpload, retrieve: retrieveFile },
   wallet: { nonce: walletNonce, verify: walletVerify },
+  agentIdentity: { challenge: agentIdentityChallenge, verify: agentIdentityVerify },
   retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
 };
 

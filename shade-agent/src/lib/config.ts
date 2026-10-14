@@ -26,6 +26,13 @@ export const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.n
 export const NOVA_MAINNET_CONTRACT = process.env.NOVA_MAINNET_CONTRACT || 'nova-sdk.near';
 export const NOVA_TESTNET_CONTRACT = process.env.NOVA_TESTNET_CONTRACT || 'nova-sdk-7.testnet';
 
+// Agent Connect identity sign-in (phase-2 bridge): the NEAR account NOVA names as
+// `audience` / NEP-413 recipient in the challenges it issues. Agent owners must
+// list it in their policy's `sign.recipients`. Validated on first use (not at
+// load — see the no-throw rule above); always mainnet (the Agent API is).
+export const AGENT_IDENTITY_RECIPIENT =
+  process.env.AGENT_IDENTITY_RECIPIENT || 'nova-sdk.near';
+
 // Written by bootstrapAgent() AFTER module load (7.5) — must be a getter.
 export function shadeAgentAccountId(): string | undefined {
   return process.env.SHADE_AGENT_ACCOUNT_ID;
