@@ -398,5 +398,6 @@ export const AgentIdentityChallengeOutput = z.object({
     challenge: z.string(),
     audience: z.string(),
     expires_at_ms: z.number(),
+    nonce: z.string(), // NEP-413 nonce (base64, 32 bytes) for the Agent API's native/near/sign-message
 });
 export const AgentIdentityVerifyOutput = z.object({ account_id: z.string(), public_key: z.string() });

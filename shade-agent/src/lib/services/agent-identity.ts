@@ -40,7 +40,7 @@ function getLookup(): KeyLookup {
 }
 
 export function issueAgentChallenge(): {
-  message: string; challenge: string; audience: string; expires_at_ms: number;
+  message: string; challenge: string; audience: string; expires_at_ms: number; nonce: string;
 } {
   const issued = getStore().issue();
   if (!issued) {
@@ -52,6 +52,7 @@ export function issueAgentChallenge(): {
     challenge: issued.challenge.challenge,
     audience: issued.challenge.audience,
     expires_at_ms: issued.challenge.expires_at_ms,
+    nonce: issued.nonce, // NEP-413 nonce for native/near/sign-message (base64, 32 bytes)
   };
 }
 

@@ -225,7 +225,7 @@ const agentIdentityChallenge = walletPub
     method: 'POST',
     path: '/agent-identity/challenge',
     tags: INTERNAL,
-    summary: 'Issue an Agent API identity challenge (canonical 7-field envelope)',
+    summary: 'Issue an Agent API identity challenge (canonical 7-field envelope + NEP-413 nonce)',
   })
   .input(AgentIdentityChallengeSchema)
   .output(AgentIdentityChallengeOutput)

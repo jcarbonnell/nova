@@ -70,3 +70,12 @@ nova-reborn/*.zip
 nova-ai-memory/node_modules/
 nova-ai-memory/.env
 .claude/
+
+# Agent Connect test scripts (paid-handoff): secrets + local state
+paid-handoff/.env*
+paid-handoff/.grant-token
+paid-handoff/.nova-agent-session
+paid-handoff/aa-state.json
+paid-handoff/observation-*.json
+paid-handoff/native-sign-fixture.json
+paid-handoff/.venv/

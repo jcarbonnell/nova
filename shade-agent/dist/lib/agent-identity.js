@@ -1,18 +1,27 @@
 // shade-agent/src/lib/agent-identity.ts
 //
-// Agent identity sign-in: verifies an identity signature produced by the NEAR
-// Intents Agent API (Agent Connect, `api.sign`) against a challenge NOVA issued.
+// Agent identity sign-in: verifies a NEP-413 signature produced by the NEAR
+// Intents Agent API (Agent Connect) through `native/near/sign-message`
+// (policy `native.near.sign_message`), against a challenge NOVA issued.
+//
+// v2 (2026-10-21): the Agent API replaced identity signing (`sign` policy +
+// `POST /v1/agents/{id}/sign`, API-chosen nonce, hex signature) with native
+// accounts (skills repo commit ab818a7, "native accounts replace identity
+// signing"). The relying party now supplies the 32-byte nonce and the API
+// returns a base64 signature. Reference: examples repo support/identity.ts
+// (loginRequest / verifyLogin). The old hex path is REMOVED, not kept beside.
 // Phase-2 identity bridge; parallel to — and fully separate from — browser wallet
 // SIWN (§5.11-A). Nothing here touches auth.ts or wallet-nonce.ts.
 //
 // HOW IT DIFFERS FROM BROWSER SIWN (and why it is a separate verifier)
-//   - Freshness lives in the MESSAGE (`challenge`, issued + stored here), not in
-//     the NEP-413 nonce. The API picks the NEP-413 nonce itself; we only require
-//     it to be 32 bytes. Replay protection therefore keys on `challenge`.
+//   - Freshness lives in BOTH the message (`challenge`, issued + stored here) and
+//     the NEP-413 nonce, which NOVA also issues and stores with the challenge. The
+//     returned nonce must equal the stored one (as the reference verifyLogin
+//     requires). Replay protection keys on `challenge`.
 //   - The message is a fixed 7-field canonical JSON envelope that WE build and
 //     store. The client never supplies it: verify() signs-checks the STORED
 //     message, so a re-spelled or tampered envelope cannot reach the crypto.
-//   - Signature is hex (not base64), nonce is base64; field names follow the API
+//   - Signature and nonce are base64; field names follow the API
 //     (near_account_id / public_key / signature / nonce / recipient).
 //   - Key control accepts an implicit (64-hex) account that does not exist on
 //     chain yet, when its id IS the signing key — exactly as the API's reference
@@ -102,8 +111,9 @@ export class AgentChallengeStore {
             expires_at_ms: issuedAt + this.lifetimeMs,
         };
         const message = canonicalJson(challenge);
-        this.records.set(hex, { message, expiresAt: challenge.expires_at_ms, consumed: false });
-        return { challenge, message };
+        const nonce = randomBytes(32).toString('base64');
+        this.records.set(hex, { message, nonce, expiresAt: challenge.expires_at_ms, consumed: false });
+        return { challenge, message, nonce };
     }
     /** Non-mutating. Call BEFORE verification. Expired = now >= expires_at_ms (as the API). */
     check(hex) {
@@ -114,7 +124,7 @@ export class AgentChallengeStore {
             return { ok: false, reason: 'consumed' };
         if (this.now() >= r.expiresAt)
             return { ok: false, reason: 'expired' };
-        return { ok: true, message: r.message };
+        return { ok: true, message: r.message, nonce: r.nonce };
     }
     /** Call ONLY after full success. Re-checks freshness. Consumed records are kept until expiry so a replay reports 'consumed'. */
     consume(hex) {
@@ -129,7 +139,7 @@ export class AgentChallengeStore {
     }
 }
 const HEX64 = /^[0-9a-f]{64}$/;
-const SIG_HEX = /^[0-9a-fA-F]{128}$/;
+const SIG_B64 = /^[A-Za-z0-9+/]{86}==$/; // 64 bytes, canonical base64 (the API's wire pattern)
 /** Strict base64 → exactly 32 bytes, or null. Rejects non-canonical spellings. */
 function decodeNonce(b64) {
     if (typeof b64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64))
@@ -162,16 +172,20 @@ export async function verifyAgentIdentity(deps, input) {
     }
     if (pk.keyType !== 0 || pk.data.length !== 32)
         return deny('public_key');
-    if (!SIG_HEX.test(sig.signature))
+    if (!SIG_B64.test(sig.signature) || Buffer.from(sig.signature, 'base64').toString('base64') !== sig.signature) {
         return deny('signature_format');
+    }
     const nonce = decodeNonce(sig.nonce);
     if (!nonce)
         return deny('nonce_format');
-    // 4. signature over the STORED message (near-kit, pure crypto, no key lookup)
+    // the nonce must be the one NOVA issued with this challenge
+    if (sig.nonce !== c.nonce)
+        return deny('nonce_mismatch');
+    // 4. signature over the STORED message + STORED nonce (near-kit, pure crypto, no key lookup)
     const sigOk = await verifyNep413Signature({
         accountId: sig.near_account_id,
         publicKey: sig.public_key,
-        signature: Buffer.from(sig.signature, 'hex').toString('base64'),
+        signature: sig.signature,
     }, { message: c.message, recipient: store.audience, nonce }, { nonceValidation: 'none' });
     if (!sigOk)
         return deny('signature');

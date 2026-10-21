@@ -1,4 +1,4 @@
-// NOVA contract v0.3.5 - per-file keys w/ delete file semantics + retention-policy config.
+// NOVA contract v0.3.7 - group-id validation (storage-prefix collision fix) + reader-gated member read path.
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -151,6 +151,19 @@ enum StorageKey {
     RetentionWindows,
 }
 
+/// v0.3.7: group ids are 1–64 chars of [A-Za-z0-9._-]. Group ids are used RAW as
+/// a storage prefix (group_members) and inside text prefixes ("group_tx:{id}"),
+/// next to "owned:{account}" / "member:{account}". Without this rule a group named
+/// e.g. "member:bob.near" overwrote another account's group list. No colon, no
+/// control bytes ⇒ no id can spell another collection's prefix. Enforced only at
+/// creation: existing groups (any id) stay fully usable.
+fn assert_valid_group_id(group_id: &str) {
+    let ok = !group_id.is_empty()
+        && group_id.len() <= 64
+        && group_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    assert!(ok, "Invalid group_id: use 1-64 characters from [A-Za-z0-9._-]");
+}
+
 #[derive(Serialize)]
 #[serde(tag = "event_type", content = "data")]
 enum NovaEvent {
@@ -202,54 +215,13 @@ impl Contract {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        // CURRENT deployed state = v0.3.4, the 16 fields below (owner … tx_meta),
-        // in this exact order and types. This upgrade adds ONE field
-        // (retention_windows) → top-level borsh layout changes → migrate REQUIRED
-        // (§10). retention_windows starts empty (no group auto-expires until an
-        // owner sets a window). EVERYTHING from v0.3.4 — crucially tx_meta (the
-        // Step 4 deletion records) and joinable_groups/join_windows — is PRESERVED.
-        #[derive(near_sdk::borsh::BorshDeserialize)]
-        #[borsh(crate = "near_sdk::borsh")]
-        struct OldContract {
-            owner: AccountId,
-            shade_contract_id: AccountId,
-            fee_recipient: AccountId,
-            fees: LookupMap<String, u128>,
-            groups: LookupMap<String, Group>,
-            group_members: LookupMap<String, StoreVec<AccountId>>,
-            transactions: IterableMap<String, Transaction>,
-            shade_code_hash: Option<String>,
-            workers: LookupMap<AccountId, String>,
-            used_nonces: LookupMap<String, bool>,
-            owned_groups: LookupMap<AccountId, StoreVec<String>>,
-            member_groups: LookupMap<AccountId, StoreVec<String>>,
-            group_transactions: LookupMap<String, StoreVec<String>>,
-            joinable_groups: LookupMap<String, bool>,
-            join_windows: LookupMap<String, JoinWindow>,
-            tx_meta: LookupMap<String, TxMeta>,
-        }
-
-        let old: OldContract = env::state_read().expect("failed to read old state");
-
-        Self {
-            owner: old.owner,
-            shade_contract_id: old.shade_contract_id,
-            fee_recipient: old.fee_recipient,
-            fees: old.fees,
-            groups: old.groups,
-            group_members: old.group_members,
-            transactions: old.transactions,
-            shade_code_hash: old.shade_code_hash,
-            workers: old.workers,
-            used_nonces: old.used_nonces,
-            owned_groups: old.owned_groups,
-            member_groups: old.member_groups,
-            group_transactions: old.group_transactions,
-            joinable_groups: old.joinable_groups,
-            join_windows: old.join_windows,
-            tx_meta: old.tx_meta,
-            retention_windows: LookupMap::new(StorageKey::RetentionWindows),
-        }
+                // v0.3.7 adds NO state field: the deployed layout is the current 17-field
+        // Contract (owner … retention_windows), so this is an identity read and
+        // the upgrade is code-only (no migrate call needed). Kept as the template
+        // for the next layout change: copy the 17 fields into an OldContract,
+        // read it, and construct Self with the new field(s) appended LAST, with
+        // new StorageKey variants appended LAST (§10).
+        env::state_read::<Self>().expect("failed to read current (17-field) state")
     }
 
     // Owner-only method to update fee recipient
@@ -304,6 +276,7 @@ impl Contract {
 
     #[payable]
     pub fn register_group(&mut self, group_id: String, joinable: Option<bool>) {
+        assert_valid_group_id(&group_id);
         let attached = env::attached_deposit().as_yoctonear();
         self.collect_fee("register_group", attached);
 
@@ -661,6 +634,31 @@ impl Contract {
             .unwrap_or_default()
     }
 
+    /// Reader-gated member read path (v0.3.7). Same rows as
+    /// `get_transactions_for_group`, for a session that cannot sign as the member
+    /// (wallet-tier and Agent Connect identity sessions hold no custodial key).
+    /// Gate: caller must be `self.owner` (MCP's reader key, nova-sdk.near) AND
+    /// `account_id` must be a current member. MCP passes only the account it
+    /// verified from a nova_session — same trust model as the other `*_of` views.
+    pub fn get_transactions_for_group_of(&self, group_id: String, account_id: AccountId) -> Vec<serde_json::Value> {
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner,
+            "Unauthorized: reader-gated view (owner only)"
+        );
+        assert!(self.groups.contains_key(&group_id), "Group not found");
+        assert!(self.is_authorized(group_id.clone(), account_id), "Unauthorized: not a member");
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        if let Some(tx_ids) = self.group_transactions.get(&group_id) {
+            for tx_id in tx_ids.iter() {
+                if let Some(tx) = self.transactions.get(tx_id.as_str()) {
+                    out.push(self.tx_view(tx_id.as_str(), tx));
+                }
+            }
+        }
+        out
+    }
+
     // Core idempotent tombstone — NO auth (callers authorize). Returns true iff
     // this call NEWLY tombstoned. Preserves backend/timestamp for FastFS; for a
     // legacy (no-meta) tx it synthesises an Ipfs meta to hold the record.
@@ -841,6 +839,14 @@ impl Contract {
         self.collect_fee("record_transaction", attached);
         
         assert!(self.groups.contains_key(&group_id), "Group not found");
+        // v0.3.7: the record's uploader must be the caller. Before, ANY account
+        // could append a record to ANY group naming ANY member as uploader
+        // (forged attribution + polluted file index). The contract owner
+        // (nova-sdk.near, NOVA's operator) may record on a member's behalf: the
+        // relay path for sessions that hold no custodial key (wallet / Agent
+        // Connect identity). user_id must still be a current member.
+        let caller = env::predecessor_account_id();
+        assert!(caller == user_id || caller == self.owner, "Unauthorized: uploader must be the caller");
         assert!(self.is_authorized(group_id.clone(), user_id.clone()), "User not authorized");
 
         let gid = group_id.clone();
@@ -2187,3 +2193,7 @@ mod tests {
         contract.get_member_groups_of(attacker); // panics before returning anything
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/v037.rs"]
+mod tests_v037;
