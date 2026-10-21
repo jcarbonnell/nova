@@ -411,8 +411,9 @@ async def get_user_signer(user: dict) -> Account:
 async def get_reader_signer() -> Account:
     """Signer for owner-gated account views, as nova-sdk.near via the scoped
     reader FC key. Mainnet only (the views live on the mainnet contract). The
-    FC key can only call get_owned_groups_of / get_member_groups_of, so a full
-    MCP compromise reads two group lists and nothing else."""
+    FC key can only call get_owned_groups_of / get_member_groups_of /
+    get_transactions_for_group_of (v0.4.6, contract v0.3.7), so a full MCP
+    compromise reads group lists and members' file indexes, and nothing else."""
     if not READER_PRIVATE_KEY:
         raise ValueError("READER_PRIVATE_KEY not configured — reader views unavailable")
     config = CONFIG["mainnet"]
@@ -421,15 +422,16 @@ async def get_reader_signer() -> Account:
     return acc
 
 
-async def read_owner_gated_view(method_name: str, account_id: str) -> Any:
+async def read_owner_gated_view(method_name: str, account_id: str, extra_args: dict | None = None) -> Any:
     """Call an owner-gated account view (signed as the reader) and return its
     decoded result. These are function-call *transactions* (they assert on
-    predecessor, so a pure view is ProhibitedInView), gas-only, no deposit."""
+    predecessor, so a pure view is ProhibitedInView), gas-only, no deposit.
+    `account_id` is ALWAYS the session-verified account, never a client value."""
     acc = await get_reader_signer()
     result = await acc.function_call(
         contract_id=READER_ACCOUNT_ID,
         method_name=method_name,
-        args={"account_id": account_id},
+        args={**(extra_args or {}), "account_id": account_id},
         amount=0,
         gas=30_000_000_000_000,
     )
@@ -634,6 +636,17 @@ mcp = FastMCP(
     name="nova-mcp",
     middleware=cors_middleware,
 )
+
+# ─────────────
+# Session tiers
+# ─────────────
+
+def has_custodial_key(user: dict) -> bool:
+    """False for wallet-tier sessions (browser SIWN and Agent Connect identity:
+    subject `wallet|<account>`): NOVA holds no key for them, so nothing can be
+    signed AS them. API-key and email sessions are custodial."""
+    return not user.get("wallet_id")
+
 
 # ─────────────
 # MCP Tools + REST exposure
@@ -869,6 +882,16 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
 async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str) -> dict:
     cleanup_expired_uploads()
 
+    # v0.4.6: refuse BEFORE minting a key or writing anything. finalize_upload
+    # stores ciphertext on FastFS and THEN records it on-chain signed as the user;
+    # a wallet-tier session has no custodial key, so the record failed AFTER the
+    # write, leaving an orphan file (no record, invisible to retention).
+    if not has_custodial_key(user):
+        raise ValueError(
+            "Uploads are not supported for wallet/agent sessions yet: upload from the "
+            "group owner's custodial account (API key) and share the file location."
+        )
+
     # FastFS + per-file keys (§5.1/§5.2): Shade fixes the FastFS relative path and
     # mints a RANDOM per-file key wrapped under the group key. The client encrypts
     # with THIS key (not the group key), and echoes file_ref back at finalize so we
@@ -914,6 +937,9 @@ async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str)
 @require_auth
 async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str, format: dict | None = None) -> dict:
     cleanup_expired_uploads()
+
+    if not has_custodial_key(user):  # defence in depth (prepare_upload already refuses)
+        raise ValueError("Uploads are not supported for wallet/agent sessions yet")
 
     if upload_id not in PENDING_UPLOADS:
         raise ValueError("Invalid or expired upload_id")
@@ -1094,6 +1120,13 @@ async def get_group_transactions(ctx: Context, user: dict, group_id: str) -> lis
     joinable = await view_contract(user, "is_group_joinable", {"group_id": group_id})
     if joinable:
         result = await view_contract(user, "get_transactions_for_group_public", {"group_id": group_id})
+    elif not has_custodial_key(user) and not get_config(user["near_account_id"])["is_testnet"]:
+        # v0.4.6: wallet/agent sessions cannot sign. Reader-gated view (contract
+        # v0.3.7): the contract checks the caller is the reader AND that the
+        # SESSION-VERIFIED account is a current member. Mainnet only (testnet has
+        # no reader key yet → falls through to the signed path, which refuses).
+        result = await read_owner_gated_view(
+            "get_transactions_for_group_of", user["near_account_id"], {"group_id": group_id})
     else:
         result = await call_contract(user, "get_transactions_for_group", {"group_id": group_id}, "get_transactions_for_group")
     if isinstance(result, str):
@@ -1123,7 +1156,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.5", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.6", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

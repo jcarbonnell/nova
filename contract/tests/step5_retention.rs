@@ -60,6 +60,7 @@ async fn record_fastfs(actor: &Account, contract_id: &near_workspaces::AccountId
 // ── 1. UPGRADE v0.3.4 → v0.3.5: everything (incl. tx_meta) survives ──────────
 
 #[tokio::test]
+#[ignore = "historical: gated the v0.3.4→v0.3.5 upgrade (shipped 2026-08-04); since v0.3.7, migrate() reads the current 17-field layout"]
 async fn upgrade_v034_to_v035_preserves_all() -> R {
     let worker = near_workspaces::sandbox().await?;
     let old_wasm = std::fs::read(OLD_WASM_FIXTURE)
