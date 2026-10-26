@@ -303,13 +303,37 @@ class NovaSdk {
         });
         return result.message || `Group '${groupId}' registered successfully`;
     }
-    // Add a member to a group. Caller must be owner.
-    async addGroupMember(groupId, memberId) {
-        const result = await this.callMcpTool('add_group_member', {
+    /**
+     * Add a member to a group. Caller must be the owner.
+     *
+     * options.accessMinutes (1..525600) sells a WINDOW, not a copy: NOVA revokes the
+     * member about a minute after expiry (signed as the owner, inside the TEE) and
+     * rotates the group key. Calling again for an existing member sets/extends the
+     * window. Requires a custodial owner (API key or email account); wallet sessions
+     * are refused by MCP.
+     */
+    async addGroupMember(groupId, memberId, options = {}) {
+        const args = { group_id: groupId, member_id: memberId };
+        if (options.accessMinutes !== undefined) {
+            const m = options.accessMinutes;
+            if (!Number.isInteger(m) || m < 1 || m > 525_600) {
+                throw new errors_js_2.NovaError('accessMinutes must be an integer between 1 and 525600');
+            }
+            args.access_minutes = m;
+        }
+        // MCP returns a plain string (e.g. "Added … with access until …").
+        const result = await this.callMcpTool('add_group_member', args);
+        if (typeof result === 'string')
+            return result;
+        return result?.message || `Added ${memberId} to group '${groupId}'`;
+    }
+    /** Read a member's access window (group owner only). null when the member has none. */
+    async getMemberWindow(groupId, memberId) {
+        const result = await this.callMcpTool('get_member_window', {
             group_id: groupId,
             member_id: memberId,
         });
-        return result.message || `Added ${memberId} to group '${groupId}'`;
+        return result?.window ?? null;
     }
     // Set (or clear, with null) a group's retention window in days (§6.1). Owner only.
     // null ⇒ no auto-expiry (the default). Files past the window become eligible for

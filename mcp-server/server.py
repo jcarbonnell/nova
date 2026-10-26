@@ -77,7 +77,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.7 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.8 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -682,6 +682,30 @@ def has_custodial_key(user: dict) -> bool:
     return not user.get("wallet_id")
 
 
+# §6.1 Piece 4 — access windows. Mirrors Shade's AccessWindowSetSchema (1..525_600).
+ACCESS_MINUTES_MAX = 525_600  # one year
+
+
+async def _shade_internal(path: str, body: dict, timeout: float = 15.0) -> httpx.Response:
+    """POST to a gated Shade route with MCP's internal secret. Returns the response;
+    each caller decides what a non-200 means (fail hard vs best-effort)."""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(
+            f"{SHADE_API_URL}{path}",
+            json=body,
+            headers={"Content-Type": "application/json", "X-Internal-Auth": INTERNAL_API_SECRET},
+        )
+
+
+def _validate_access_minutes(access_minutes) -> int:
+    # bool is an int subclass in Python: reject it explicitly.
+    if isinstance(access_minutes, bool) or not isinstance(access_minutes, int):
+        raise ValueError("access_minutes must be an integer number of minutes")
+    if not (1 <= access_minutes <= ACCESS_MINUTES_MAX):
+        raise ValueError(f"access_minutes must be between 1 and {ACCESS_MINUTES_MAX}")
+    return access_minutes
+
+
 # ─────────────
 # MCP Tools + REST exposure
 # ─────────────
@@ -715,14 +739,76 @@ async def register_group(ctx: Context, user: dict, group_id: str) -> str:
 
 @expose_as_rest("/tools/add_group_member")
 @require_auth
-async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: str) -> str:
+async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: str,
+                           access_minutes: int | None = None) -> str:
+    # §6.1 Piece 4 — optional ACCESS WINDOW ("sell a window, not a copy"). With
+    # access_minutes, Shade's scheduler revokes the member about a minute after
+    # expiry (signed as this owner, inside the TEE) and rotates the group key.
+    #
+    # ORDERING — the window list must never miss a sold window, and a re-added
+    # member must never inherit an old expiry:
+    #   new member + window        → record the window FIRST (abort if that fails),
+    #                                then add on-chain; if the add fails, best-effort
+    #                                clear (the entry would target a non-member).
+    #   new member, no window      → clear any old window FIRST (abort if that
+    #                                fails), then add on-chain.
+    #   already a member + window  → no add (it would panic): set/extend the window.
+    #   already a member, no window → unchanged (contract panics "User already a
+    #                                member"); the existing window is NOT touched.
+    # Wallet/agent sessions cannot use windows: the scheduler signs as the owner
+    # with NOVA's custodial key, which they don't have (Deliverable 2 lifts this).
     member_id = normalize_account_id(member_id)
-    await call_contract(
-        user=user,
-        method_name="add_group_member",
-        args={"group_id": group_id, "user_id": member_id},
-        fee_action="add_group_member"
-    )
+    config = get_config(user["near_account_id"])
+    window_ref = {"group_id": group_id, "member_id": member_id, "contract_id": config["contract_id"]}
+
+    if access_minutes is not None:
+        access_minutes = _validate_access_minutes(access_minutes)
+        if not has_custodial_key(user):
+            raise PermissionError(
+                "Access windows need a custodial group owner (API key or email account); "
+                "wallet-owned groups are not supported yet"
+            )
+
+    try:
+        already_member = bool(await view_contract(
+            user, "is_authorized", {"group_id": group_id, "user_id": member_id}))
+    except Exception as e:
+        raise RuntimeError(f"Could not check current membership for {member_id}: {e}")
+
+    expires_at = None
+    if access_minutes is not None:
+        resp = await _shade_internal("/rpc/access-windows/set", {**window_ref, "access_minutes": access_minutes})
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Access-window write failed ({resp.status_code}); aborting before on-chain add - {resp.text[:200]}"
+            )
+        expires_at = resp.json().get("expires_at")
+        if already_member:
+            return f"{member_id} is already a member of '{group_id}'; access window set until {expires_at}"
+    elif not already_member:
+        resp = await _shade_internal("/rpc/access-windows/clear", window_ref)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Could not clear a previous access window ({resp.status_code}); aborting before on-chain add - {resp.text[:200]}"
+            )
+
+    try:
+        await call_contract(
+            user=user,
+            method_name="add_group_member",
+            args={"group_id": group_id, "user_id": member_id},
+            fee_action="add_group_member",
+        )
+    except Exception as e:
+        if access_minutes is not None and "already a member" not in str(e).lower():
+            try:
+                await _shade_internal("/rpc/access-windows/clear", window_ref)
+            except Exception as ce:
+                logger.warning(f"add_group_member: best-effort window clear failed for {group_id}: {ce}")
+        raise
+
+    if access_minutes is not None:
+        return f"Added {member_id} to group '{group_id}' with access until {expires_at}"
     return f"Added {member_id} to group '{group_id}'"
 
 @expose_as_rest("/tools/set_group_retention")
@@ -909,7 +995,40 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
                 f"Revoked on-chain, but key rotation failed: {resp.status_code} - {resp.text[:200]}"
             )
 
+    # §6.1 Piece 4 — drop any access window for this member (best-effort). The
+    # revoke already happened; a stale entry is harmless (the sweep sees a
+    # non-member, rotates once more, and removes it).
+    try:
+        cresp = await _shade_internal(
+            "/rpc/access-windows/clear",
+            {"group_id": group_id, "member_id": member_id, "contract_id": config["contract_id"]},
+        )
+        if cresp.status_code != 200:
+            logger.warning(f"revoke_group_member: window clear returned {cresp.status_code} (non-fatal)")
+    except Exception as e:
+        logger.warning(f"revoke_group_member: window clear failed (non-fatal): {e}")
+
     return f"Revoked {member_id} from group '{group_id}' (key rotated)"
+
+@expose_as_rest("/tools/get_member_window")
+@require_auth
+async def get_member_window(ctx: Context, user: dict, group_id: str, member_id: str) -> dict:
+    # §6.1 Piece 4 — OWNER-ONLY read of a member's access window. Owner operations
+    # are never available to wallet/agent sessions.
+    if not has_custodial_key(user):
+        raise PermissionError("Owner operations are not available to wallet/agent sessions")
+    member_id = normalize_account_id(member_id)
+    config = get_config(user["near_account_id"])
+    owner = await view_contract(user, "get_group_owner", {"group_id": group_id})
+    if owner != user["near_account_id"]:
+        raise PermissionError("Only the group owner can read access windows")
+    resp = await _shade_internal(
+        "/rpc/access-windows/get",
+        {"group_id": group_id, "member_id": member_id, "contract_id": config["contract_id"]},
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Access-window read failed ({resp.status_code})")
+    return {"group_id": group_id, "member_id": member_id, "window": resp.json().get("window")}
 
 @expose_as_rest("/tools/prepare_upload")
 @require_auth
@@ -1190,7 +1309,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.7", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.8", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

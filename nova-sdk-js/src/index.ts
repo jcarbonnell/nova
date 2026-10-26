@@ -80,6 +80,17 @@ export interface RetrieveResult {
   group_id: string;
 }
 
+export interface AddGroupMemberOptions {
+  /** Access window in minutes (1..525600). Omit for permanent membership. */
+  accessMinutes?: number;
+}
+
+export interface MemberWindow {
+  expires_at: string;      // ISO 8601
+  expires_at_ms: number;
+  set_at: string;          // ISO 8601
+}
+
 export interface AuthStatusResult {
   authenticated: boolean;
   near_account_id?: string;
@@ -444,13 +455,41 @@ export class NovaSdk {
     return result.message || `Group '${groupId}' registered successfully`;
   }
 
-  // Add a member to a group. Caller must be owner.
-  async addGroupMember(groupId: string, memberId: string): Promise<string> {
-    const result = await this.callMcpTool<{ message?: string }>('add_group_member', {
+  /**
+   * Add a member to a group. Caller must be the owner.
+   *
+   * options.accessMinutes (1..525600) sells a WINDOW, not a copy: NOVA revokes the
+   * member about a minute after expiry (signed as the owner, inside the TEE) and
+   * rotates the group key. Calling again for an existing member sets/extends the
+   * window. Requires a custodial owner (API key or email account); wallet sessions
+   * are refused by MCP.
+   */
+  async addGroupMember(
+    groupId: string,
+    memberId: string,
+    options: AddGroupMemberOptions = {},
+  ): Promise<string> {
+    const args: Record<string, unknown> = { group_id: groupId, member_id: memberId };
+    if (options.accessMinutes !== undefined) {
+      const m = options.accessMinutes;
+      if (!Number.isInteger(m) || m < 1 || m > 525_600) {
+        throw new NovaError('accessMinutes must be an integer between 1 and 525600');
+      }
+      args.access_minutes = m;
+    }
+    // MCP returns a plain string (e.g. "Added … with access until …").
+    const result = await this.callMcpTool<string | { message?: string }>('add_group_member', args);
+    if (typeof result === 'string') return result;
+    return result?.message || `Added ${memberId} to group '${groupId}'`;
+  }
+
+  /** Read a member's access window (group owner only). null when the member has none. */
+  async getMemberWindow(groupId: string, memberId: string): Promise<MemberWindow | null> {
+    const result = await this.callMcpTool<{ window: MemberWindow | null }>('get_member_window', {
       group_id: groupId,
       member_id: memberId,
     });
-    return result.message || `Added ${memberId} to group '${groupId}'`;
+    return result?.window ?? null;
   }
 
   // Set (or clear, with null) a group's retention window in days (§6.1). Owner only.

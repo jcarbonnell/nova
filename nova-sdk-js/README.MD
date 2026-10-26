@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.2.3
+**Version:** 1.3.0
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -17,6 +17,7 @@ A JavaScript/TypeScript SDK for NOVA's secure, decentralized file-sharing primit
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🔑 **Per-File Keys** - Each file encrypted with its own key; deletion crypto-shreds it (permanently undecryptable)
 - ⏳ **Retention** - Optional per-group retention windows for time-based deletion
+- ⏱️ **Access Windows** - Time-limited membership: NOVA revokes the member at expiry and rotates the group key ("sell a window, not a copy")
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 - 📦 **TypeScript Support** - Full type definitions included
 
@@ -33,7 +34,7 @@ npm install nova-sdk-js
 **Typical costs (mainnet):**
 - **Register group**: ~0.64 NEAR
 - **Upload file**: ~0.039 NEAR (claim token + record transaction; FastFS has no storage fee)
-- **Retrieve file**: ~0.013 NEAR
+- **Retrieve file**: ~0.0000129 NEAR
 
 ```typescript
 const sdk = new NovaSdk('yourname.nova-sdk-7.testnet', {
@@ -129,6 +130,15 @@ await sdk.registerGroup('team-files');
 // Add members
 await sdk.addGroupMember('team-files', 'bob.nova-sdk.near');
 await sdk.addGroupMember('team-files', 'carol.nova-sdk.near');
+
+// Time-limited access: NOVA revokes dave ~1 minute after 60 minutes and rotates
+// the group key. Calling again for an existing member sets/extends the window.
+// Requires a custodial owner (API-key or email account).
+await sdk.addGroupMember('team-files', 'dave.nova-sdk.near', { accessMinutes: 60 });
+
+// Read a member's window (owner only); null = permanent member / no window
+const window = await sdk.getMemberWindow('team-files', 'dave.nova-sdk.near');
+console.log(window?.expires_at);
 
 // Check authorization
 const isAuthorized = await sdk.isAuthorized('team-files', 'bob.nova-sdk.near');
@@ -251,8 +261,8 @@ try {
 Some operations require NEAR token deposits (paid from user's NOVA account):
 
 - `registerGroup()` - ~0.64 NEAR
-- `addGroupMember()` - ~0.013 NEAR
-- `revokeGroupMember()` - ~0.001 NEAR
+- `addGroupMember()` - ~0.0000129 NEAR
+- `revokeGroupMember()` - ~0.000001 NEAR
 - `upload()` - ~0.039 NEAR (claim token + record Tx)
 - `retrieve()` - ~0.013 NEAR (claim only)
 
@@ -272,7 +282,9 @@ new NovaSdk(accountId: string, config?: NovaSdkConfig)
 | `upload(groupId, data, filename)` | Upload encrypted file |
 | `retrieve(groupId, cid)` | Retrieve and decrypt file |
 | `registerGroup(groupId)` | Create new group |
-| `addGroupMember(groupId, memberId)` | Add member to group (owner only) |
+| `addGroupMember(groupId, memberId, { accessMinutes? })` | Add member to group (owner only); optional time-limited access (1–525600 min) |
+| `getMemberWindow(groupId, memberId)` | Read a member's access window (owner only); `null` if none |
+| `setGroupRetention(groupId, days \| null)` | Set or clear the group's retention window (owner only) |
 | `joinGroup(groupId)` | Self-join an open group (e.g. hackathon submission groups) |
 | `revokeGroupMember(groupId, memberId)` | Remove member (rotates key) |
 | `authStatus(groupId?)` | Check authentication status |
@@ -300,7 +312,6 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 - [FastFS](https://fastfs.io)
 - [IPFS](https://ipfs.io) (legacy reads)
 - [Pinata](https://pinata.cloud) (legacy reads)
-- [FastFS](https://fastfs.io)
 - [Phala TEE](https://phala.com/)
 - [NEAR JavaScript API](https://docs.near.org/tools/near-api-js/quick-reference)
 

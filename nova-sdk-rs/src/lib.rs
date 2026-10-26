@@ -1,4 +1,4 @@
-// nova-sdk-rs v1.2.4 - NOVA SDK for Rust
+// nova-sdk-rs v1.3.0 - NOVA SDK in Rust
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
 use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
@@ -47,6 +47,8 @@ pub enum NovaError {
     Compression(String),
     #[error("Unsupported file format version: {0}")]
     UnsupportedFormat(u32),
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 impl From<reqwest::Error> for NovaError {
@@ -95,6 +97,24 @@ pub struct RetrieveResult {
     pub group_id: String,
 }
 
+/// Max access window: one year, in minutes (mirrors MCP / Shade).
+pub const ACCESS_MINUTES_MAX: u32 = 525_600;
+
+/// Options for [`NovaSdk::add_group_member_with_options`].
+#[derive(Debug, Clone, Default)]
+pub struct AddGroupMemberOptions {
+    /// Access window in minutes (1..=525_600). `None` ⇒ permanent membership.
+    pub access_minutes: Option<u32>,
+}
+
+/// A member's access window, as returned by [`NovaSdk::get_member_window`].
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct MemberWindow {
+    pub expires_at: String,   // ISO 8601
+    pub expires_at_ms: u64,
+    pub set_at: String,       // ISO 8601
+}
+
 #[derive(Deserialize, Debug)]
 pub struct AuthStatusResult {
     pub authenticated: bool,
@@ -134,8 +154,22 @@ struct PrepareRetrieveResponse {
 }
 
 #[derive(Deserialize, Debug)]
-struct McpMessageResponse {
-    message: Option<String>,
+struct MemberWindowResponse {
+    window: Option<MemberWindow>,
+}
+
+/// MCP tools return a BARE STRING inside `{ result }` (current MCP), or an object
+/// with `message` (older MCP). Deserializing a string into a struct fails, which
+/// made register/add/revoke/retention return Err after a SUCCESSFUL on-chain call.
+fn mcp_message(v: serde_json::Value, default: String) -> String {
+    match v {
+        serde_json::Value::String(s) => s,
+        other => other
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or(default),
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -826,18 +860,55 @@ impl NovaSdk {
     /// Register a new group. Caller becomes owner.
     pub async fn register_group(&self, group_id: &str) -> Result<String, NovaError> {
         let args = json!({ "group_id": group_id });
-        let response: McpMessageResponse = self.call_mcp_tool("register_group", args).await?;
-        Ok(response.message.unwrap_or_else(|| format!("Group '{}' registered successfully", group_id)))
+        let v: serde_json::Value = self.call_mcp_tool("register_group", args).await?;
+        Ok(mcp_message(v, format!("Group '{}' registered successfully", group_id)))
     }
 
-    /// Add a member to a group (owner only).
+    /// Add a member to a group (owner only). Permanent membership.
     pub async fn add_group_member(&self, group_id: &str, member_id: &str) -> Result<String, NovaError> {
-        let args = json!({
+        self.add_group_member_with_options(group_id, member_id, AddGroupMemberOptions::default())
+            .await
+    }
+
+    /// Add a member to a group (owner only), optionally with an ACCESS WINDOW.
+    ///
+    /// `access_minutes` (1..=525_600) sells a window, not a copy: NOVA revokes the
+    /// member about a minute after expiry (signed as the owner, inside the TEE) and
+    /// rotates the group key. Calling again for an existing member sets/extends the
+    /// window. Requires a custodial owner (API key or email account); wallet
+    /// sessions are refused by MCP. Mirror of nova-sdk-js `addGroupMember(…, { accessMinutes })`.
+    pub async fn add_group_member_with_options(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        options: AddGroupMemberOptions,
+    ) -> Result<String, NovaError> {
+        let mut args = json!({
             "group_id": group_id,
             "member_id": member_id
         });
-        let response: McpMessageResponse = self.call_mcp_tool("add_group_member", args).await?;
-        Ok(response.message.unwrap_or_else(|| format!("Added {} to group '{}'", member_id, group_id)))
+        if let Some(m) = options.access_minutes {
+            // Validated BEFORE any network call (no token mint, no MCP request).
+            if !(1..=ACCESS_MINUTES_MAX).contains(&m) {
+                return Err(NovaError::InvalidArgument(format!(
+                    "access_minutes must be between 1 and {}", ACCESS_MINUTES_MAX
+                )));
+            }
+            args["access_minutes"] = json!(m);
+        }
+        let v: serde_json::Value = self.call_mcp_tool("add_group_member", args).await?;
+        Ok(mcp_message(v, format!("Added {} to group '{}'", member_id, group_id)))
+    }
+
+    /// Read a member's access window (group owner only). `None` when the member has none.
+    pub async fn get_member_window(
+        &self,
+        group_id: &str,
+        member_id: &str,
+    ) -> Result<Option<MemberWindow>, NovaError> {
+        let args = json!({ "group_id": group_id, "member_id": member_id });
+        let r: MemberWindowResponse = self.call_mcp_tool("get_member_window", args).await?;
+        Ok(r.window)
     }
 
     /// Set (or clear, with None) a group's retention window in days (§6.1). Owner only.
@@ -847,8 +918,8 @@ impl NovaSdk {
             "group_id": group_id,
             "retention_days": retention_days
         });
-        let response: McpMessageResponse = self.call_mcp_tool("set_group_retention", args).await?;
-        Ok(response.message.unwrap_or_else(|| match retention_days {
+        let v: serde_json::Value = self.call_mcp_tool("set_group_retention", args).await?;
+        Ok(mcp_message(v, match retention_days {
             Some(d) => format!("Set retention for group '{}' to {} days", group_id, d),
             None => format!("Cleared retention for group '{}'", group_id),
         }))
@@ -873,8 +944,8 @@ impl NovaSdk {
             "group_id": group_id,
             "member_id": member_id
         });
-        let response: McpMessageResponse = self.call_mcp_tool("revoke_group_member", args).await?;
-        Ok(response.message.unwrap_or_else(|| format!("Revoked {} from group '{}'", member_id, group_id)))
+        let v: serde_json::Value = self.call_mcp_tool("revoke_group_member", args).await?;
+        Ok(mcp_message(v, format!("Revoked {} from group '{}'", member_id, group_id)))
     }
 
     /// Upload a file with end-to-end encryption.
@@ -2032,5 +2103,27 @@ mod format_tests {
             .map(|i| u8::from_str_radix(&fixture_hex[i..i + 2], 16).unwrap())
             .collect();
         assert_eq!(deflate_decompress(&blob, "deflate").unwrap(), plaintext);
+    }
+
+    #[test]
+    fn mcp_message_accepts_bare_string_and_object() {
+        assert_eq!(mcp_message(json!("Added x"), "d".into()), "Added x");
+        assert_eq!(mcp_message(json!({"message": "m"}), "d".into()), "m");
+        assert_eq!(mcp_message(json!({}), "d".into()), "d");
+    }
+
+    #[tokio::test]
+    async fn add_group_member_rejects_invalid_access_minutes_before_network() {
+        // No api_key and an unreachable MCP: any network attempt would yield a
+        // different error. InvalidArgument proves validation runs first.
+        let cfg = NovaSdkConfig { mcp_url: "http://127.0.0.1:9".into(), ..NovaSdkConfig::default() };
+        let sdk = NovaSdk::with_config("alice.nova-sdk.near", cfg).unwrap();
+        for bad in [0u32, ACCESS_MINUTES_MAX + 1] {
+            let r = sdk
+                .add_group_member_with_options("g", "bob.nova-sdk.near",
+                    AddGroupMemberOptions { access_minutes: Some(bad) })
+                .await;
+            assert!(matches!(r, Err(NovaError::InvalidArgument(_))), "bad={bad}: {r:?}");
+        }
     }
 }

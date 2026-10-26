@@ -36,6 +36,15 @@ export interface RetrieveResult {
     ipfs_hash: string;
     group_id: string;
 }
+export interface AddGroupMemberOptions {
+    /** Access window in minutes (1..525600). Omit for permanent membership. */
+    accessMinutes?: number;
+}
+export interface MemberWindow {
+    expires_at: string;
+    expires_at_ms: number;
+    set_at: string;
+}
 export interface AuthStatusResult {
     authenticated: boolean;
     near_account_id?: string;
@@ -104,7 +113,18 @@ export declare class NovaSdk {
     getMemberGroups(): Promise<string[]>;
     getGroupMembers(groupId: string): Promise<string[]>;
     registerGroup(groupId: string): Promise<string>;
-    addGroupMember(groupId: string, memberId: string): Promise<string>;
+    /**
+     * Add a member to a group. Caller must be the owner.
+     *
+     * options.accessMinutes (1..525600) sells a WINDOW, not a copy: NOVA revokes the
+     * member about a minute after expiry (signed as the owner, inside the TEE) and
+     * rotates the group key. Calling again for an existing member sets/extends the
+     * window. Requires a custodial owner (API key or email account); wallet sessions
+     * are refused by MCP.
+     */
+    addGroupMember(groupId: string, memberId: string, options?: AddGroupMemberOptions): Promise<string>;
+    /** Read a member's access window (group owner only). null when the member has none. */
+    getMemberWindow(groupId: string, memberId: string): Promise<MemberWindow | null>;
     setGroupRetention(groupId: string, retentionDays: number | null): Promise<string>;
     /**
      * Self-join an OPEN group (hackathon submission groups). The caller joins

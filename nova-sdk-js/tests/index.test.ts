@@ -131,6 +131,63 @@ describe('NovaSdk v3', () => {
       expect(result).toContain('Added bob-nova');
     });
 
+    test('addGroupMember with accessMinutes sends access_minutes and returns the MCP string', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { result: "Added bob-nova.nova-sdk.near to group 'test-group' with access until 2026-10-26T12:00:00.000Z" },
+      });
+
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+      const result = await sdk.addGroupMember('test-group', 'bob-nova.nova-sdk.near', { accessMinutes: 60 });
+
+      expect(result).toContain('with access until');
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/add_group_member',
+        { group_id: 'test-group', member_id: 'bob-nova.nova-sdk.near', access_minutes: 60 },
+        expect.anything(),
+      );
+    });
+
+    test('addGroupMember without options sends NO access_minutes field', async () => {
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { result: "Added bob-nova.nova-sdk.near to group 'test-group'" },
+      });
+
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+      await sdk.addGroupMember('test-group', 'bob-nova.nova-sdk.near');
+
+      const call = mockAxiosPost.mock.calls.find(c => String(c[0]).endsWith('/tools/add_group_member'));
+      expect(call?.[1]).toEqual({ group_id: 'test-group', member_id: 'bob-nova.nova-sdk.near' });
+    });
+
+    test.each([0, 525_601, 1.5, -1, Number.NaN])(
+      'addGroupMember rejects accessMinutes=%p before any network call',
+      async (bad) => {
+        const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+        await expect(
+          sdk.addGroupMember('test-group', 'bob-nova.nova-sdk.near', { accessMinutes: bad }),
+        ).rejects.toThrow('accessMinutes must be an integer between 1 and 525600');
+        expect(mockAxiosPost).not.toHaveBeenCalled(); // not even the session-token mint
+      },
+    );
+
+    test('getMemberWindow returns the window, or null', async () => {
+      const win = { expires_at: '2026-10-26T12:00:00.000Z', expires_at_ms: 1793016000000, set_at: '2026-10-26T11:00:00.000Z' };
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { result: { group_id: 'test-group', member_id: 'bob-nova.nova-sdk.near', window: win } },
+      });
+      mockAxiosPost.mockResolvedValueOnce({
+        status: 200,
+        data: { result: { group_id: 'test-group', member_id: 'carol.nova-sdk.near', window: null } },
+      });
+
+      const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
+      expect(await sdk.getMemberWindow('test-group', 'bob-nova.nova-sdk.near')).toEqual(win);
+      expect(await sdk.getMemberWindow('test-group', 'carol.nova-sdk.near')).toBeNull();
+    });
+
     test('joinGroup joins when not already a member', async () => {
       const sdk = new NovaSdk(testAccountId, { apiKey: mockApiKey });
 
