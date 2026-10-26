@@ -31,6 +31,7 @@ import { cors } from "hono/cors";
 import { ShadeClient } from "@neardefi/shade-agent-js";
 
 import { mountRpc } from "./rpc/mount.js";
+import { startScheduler } from "./lib/services/scheduler-live.js";
 import { log } from "./lib/logger.js";
 
 import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT } from "./lib/config.js";
@@ -308,6 +309,12 @@ console.log(`   - POST /rpc/user-keys/verify-api-key`);
 console.log(`   - POST /rpc/key-management/generate_key`);
 console.log(`   - POST /rpc/key-management/get_key`);
 console.log(`   - POST /rpc/key-management/rotate_key`);
+
+// §6.1 Piece 4 — scheduler (window sweep + daily retention). Starts right after
+// serve(), INDEPENDENT of agent registration: neither job uses the agent account
+// (owner keys / the nova-sdk.near KV signer), and a stalled whitelist must not
+// leave buyers with access. No-op unless SCHEDULER_ENABLED === 'true'.
+startScheduler();
 
 // Fire and forget. Never awaited — that is the entire point of 7.5.
 // A throw inside is already handled (phase => "error"); this catch is a

@@ -510,3 +510,20 @@ export const AccessWindowGetOutput = z.object({
     })
     .nullable(),
 });
+
+// ────────────────────────────────────────────────
+// §6.1 Piece 4 — scheduler status (S3.3). Diagnostic, read-only.
+// Nested sections are records so the status shape can grow without schema churn.
+// ────────────────────────────────────────────────
+
+export const SchedulerStatusSchema = z.object({});
+
+export const SchedulerStatusOutput = z.object({
+  enabled: z.boolean(),
+  running: z.boolean(),
+  started_at: z.string().nullable(),
+  initialized: z.boolean(),
+  window_sweep: z.record(z.string(), z.unknown()),
+  retention_daily: z.record(z.string(), z.unknown()),
+  failures: z.array(z.record(z.string(), z.unknown())),
+});

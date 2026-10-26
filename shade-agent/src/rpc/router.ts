@@ -26,6 +26,7 @@ import {
   RetentionExecuteSchema, RetentionExecuteOutput,
   AccessWindowSetSchema, AccessWindowRefSchema,
   AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput,
+  SchedulerStatusSchema, SchedulerStatusOutput,
 } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
@@ -42,6 +43,7 @@ import * as agentIdentityService from '../lib/services/agent-identity.js';
 import * as fastfsService from '../lib/services/fastfs-storage.js';
 import * as retentionService from '../lib/services/retention.js';
 import * as accessWindowsService from '../lib/services/access-windows.js';
+import { getSchedulerStatus } from '../lib/services/scheduler-live.js';
 
 const INTERNAL = ['internal'];
 
@@ -344,6 +346,20 @@ const accessWindowGet = pub
   .output(AccessWindowGetOutput)
   .handler(({ input }) => accessWindowsService.getAccessWindow(input));
 
+// Scheduler status (§6.1 Piece 4). Gated but SEEDLESS (walletPub = gate + error
+// mapping, no withMasterSeed): it reads in-memory state only, and a diagnostic
+// must keep answering even if the seed failed to load.
+const schedulerStatus = walletPub
+  .route({
+    method: 'POST',
+    path: '/scheduler/status',
+    tags: INTERNAL,
+    summary: 'Scheduler status: last runs, overdue and stuck windows (read-only)',
+  })
+  .input(SchedulerStatusSchema)
+  .output(SchedulerStatusOutput)
+  .handler(() => getSchedulerStatus());
+
 export const router = {
   userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
   keyManagement: { generateKey, getKey, rotateKey },
@@ -352,6 +368,7 @@ export const router = {
   agentIdentity: { challenge: agentIdentityChallenge, verify: agentIdentityVerify },
   retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
   accessWindows: { set: accessWindowSet, clear: accessWindowClear, get: accessWindowGet },
+  scheduler: { status: schedulerStatus },
 };
 
 export type Router = typeof router;

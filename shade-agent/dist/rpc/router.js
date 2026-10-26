@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub, storeLimited, walletPub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, AccessWindowSetSchema, AccessWindowRefSchema, AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, AccessWindowSetSchema, AccessWindowRefSchema, AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput, SchedulerStatusSchema, SchedulerStatusOutput, } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -24,6 +24,7 @@ import * as agentIdentityService from '../lib/services/agent-identity.js';
 import * as fastfsService from '../lib/services/fastfs-storage.js';
 import * as retentionService from '../lib/services/retention.js';
 import * as accessWindowsService from '../lib/services/access-windows.js';
+import { getSchedulerStatus } from '../lib/services/scheduler-live.js';
 const INTERNAL = ['internal'];
 // ────────────────────────────────────────────────
 // user-keys
@@ -288,6 +289,19 @@ const accessWindowGet = pub
     .input(AccessWindowRefSchema)
     .output(AccessWindowGetOutput)
     .handler(({ input }) => accessWindowsService.getAccessWindow(input));
+// Scheduler status (§6.1 Piece 4). Gated but SEEDLESS (walletPub = gate + error
+// mapping, no withMasterSeed): it reads in-memory state only, and a diagnostic
+// must keep answering even if the seed failed to load.
+const schedulerStatus = walletPub
+    .route({
+    method: 'POST',
+    path: '/scheduler/status',
+    tags: INTERNAL,
+    summary: 'Scheduler status: last runs, overdue and stuck windows (read-only)',
+})
+    .input(SchedulerStatusSchema)
+    .output(SchedulerStatusOutput)
+    .handler(() => getSchedulerStatus());
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
     keyManagement: { generateKey, getKey, rotateKey },
@@ -296,4 +310,5 @@ export const router = {
     agentIdentity: { challenge: agentIdentityChallenge, verify: agentIdentityVerify },
     retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
     accessWindows: { set: accessWindowSet, clear: accessWindowClear, get: accessWindowGet },
+    scheduler: { status: schedulerStatus },
 };
