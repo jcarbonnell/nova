@@ -17,6 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 import base64
 from py_near.account import Account
+from py_near.exceptions.provider import InvalidNonce
 import httpx
 import jwt
 
@@ -76,7 +77,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.3 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.7 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -445,6 +446,27 @@ async def read_owner_gated_view(method_name: str, account_id: str, extra_args: d
             raise RuntimeError(result.status["Failure"])
     return []
 
+def _resync_nonce(acc: Account, ak_nonce) -> None:
+    """py-near 1.1.59 (pinned) reads an access key's nonce from chain ONCE per
+    process — class-level Account._access_key_nonce, keyed by private key, read only
+    while the entry is 0 — then counts locally, even on failed attempts. Any OTHER
+    signer for the same key (Shade's access-window sweep, §6.1 Piece 4 S2, signs as
+    custodial owners) leaves MCP's count behind for good, and every later call for
+    that user fails InvalidNonce until MCP restarts.
+    On InvalidNonce the tx was REJECTED before execution, so resyncing to the
+    chain's ak_nonce and retrying ONCE cannot double-execute.
+    Relies on py-near internals: re-check on any py-near upgrade (1.2.x already
+    computes max(cached, fetched)+1 per tx)."""
+    pk = acc._signers[0]
+    try:
+        ak = int(ak_nonce)
+    except (TypeError, ValueError):
+        ak = 0
+    if ak > 0:
+        Account._access_key_nonce[pk] = max(Account._access_key_nonce[pk], ak)
+    else:
+        Account._access_key_nonce[pk] = 0  # no usable ak_nonce → force a fresh chain read
+
 async def call_contract(
     user: dict,
     method_name: str,
@@ -462,13 +484,25 @@ async def call_contract(
     total_attach = fee + extra_attach + 50_000_000_000_000
     logger.info(f"call_contract: method={method_name} fee_action={fee_action} fee={fee} total_attach={total_attach}")
 
-    result = await acc.function_call(
-        contract_id=config["contract_id"],
-        method_name=method_name,
-        args=args,
-        amount=total_attach,
-        gas=gas
-    )
+    async def _submit():
+        return await acc.function_call(
+            contract_id=config["contract_id"],
+            method_name=method_name,
+            args=args,
+            amount=total_attach,
+            gas=gas
+        )
+
+    try:
+        result = await _submit()
+    except InvalidNonce as e:
+        _resync_nonce(acc, getattr(e, "ak_nonce", None))
+        logger.warning(
+            f"call_contract: InvalidNonce method={method_name} "
+            f"tx_nonce={getattr(e, 'tx_nonce', None)} ak_nonce={getattr(e, 'ak_nonce', None)}; "
+            f"resynced, retrying once"
+        )
+        result = await _submit()
 
     if hasattr(result, 'status') and isinstance(result.status, dict):
         if "SuccessValue" in result.status and result.status["SuccessValue"]:
@@ -1156,7 +1190,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.6", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.7", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

@@ -24,7 +24,7 @@
 import type { z } from 'zod';
 
 import { encryptBlob, decryptBlob } from '../crypto.js';
-import { getBlobFromKV, storeBlobToKV, rpcCallWithRetry, signAndBroadcastFunctionCall } from '../kv.js';
+import { getBlobFromKVStrict, storeBlobToKV, rpcCallWithRetry, signAndBroadcastFunctionCall } from '../kv.js';
 import { log } from '../logger.js';
 import { ApiError } from '../errors.js';
 import type { RetentionRegisterSchema, RetentionExecuteSchema } from '../schemas.js';
@@ -41,9 +41,16 @@ type RetentionExecuteInput = z.infer<typeof RetentionExecuteSchema>;
 // without mutating the production singleton; unset in production ⇒ the constant.
 const REGISTRY_KEY = process.env.RETENTION_REGISTRY_KEY || 'retention-registry';
 
-/** Read the registry array, or [] if it has never been written. */
+/**
+ * Read the registry array, or [] if it has never been written.
+ * STRICT read: an RPC failure THROWS. The lenient getBlobFromKV collapsed an RPC
+ * error to null → [] → the next register wrote [g] back, erasing every other
+ * entry — an UNDER-inclusion, the one direction the superset invariant forbids.
+ * Throwing makes MCP's registry-first set_group_retention abort instead, and
+ * makes scanRetention report an error rather than "nothing to delete".
+ */
 async function readRegistry(): Promise<string[]> {
-  const blob = await getBlobFromKV(REGISTRY_KEY);
+  const blob = await getBlobFromKVStrict(REGISTRY_KEY);
   if (!blob) return [];
   const arr = JSON.parse(Buffer.from(decryptBlob(blob)).toString('utf8'));
   return Array.isArray(arr) ? arr : [];

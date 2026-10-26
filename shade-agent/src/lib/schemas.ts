@@ -463,3 +463,50 @@ export const AgentIdentityChallengeOutput = z.object({
   nonce: z.string(), // NEP-413 nonce (base64, 32 bytes) for the Agent API's native/near/sign-message
 });
 export const AgentIdentityVerifyOutput = z.object({ account_id: z.string(), public_key: z.string() });
+
+// ────────────────────────────────────────────────
+// §6.1 Piece 4 — ACCESS WINDOWS (mirror lib/services/access-windows.ts)
+// ────────────────────────────────────────────────
+// access_minutes: integer 1..525_600 (one year). member_id arrives already
+// normalized by MCP (normalize_account_id) — the sweep's is_authorized check
+// must use the exact on-chain id, so Shade does not re-normalize.
+
+export const AccessWindowSetSchema = z.object({
+  group_id: z.string().min(1),
+  member_id: z.string().min(1),
+  access_minutes: z.number().int().min(1).max(525_600),
+  contract_id: z.string().optional(),
+});
+
+export const AccessWindowRefSchema = z.object({
+  group_id: z.string().min(1),
+  member_id: z.string().min(1),
+  contract_id: z.string().optional(),
+});
+
+export const AccessWindowSetOutput = z.object({
+  set: z.boolean(),
+  group_id: z.string(),
+  member_id: z.string(),
+  contract_id: z.string(),
+  expires_at: z.string(),
+  expires_at_ms: z.number(),
+});
+
+export const AccessWindowClearOutput = z.object({
+  cleared: z.boolean(),
+  was_present: z.boolean(),
+});
+
+export const AccessWindowGetOutput = z.object({
+  group_id: z.string(),
+  member_id: z.string(),
+  contract_id: z.string(),
+  window: z
+    .object({
+      expires_at: z.string(),
+      expires_at_ms: z.number(),
+      set_at: z.string(),
+    })
+    .nullable(),
+});

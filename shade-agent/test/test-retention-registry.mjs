@@ -135,6 +135,39 @@ if (haveRealSeed) {
     });
   });
 
+  // S1.2: a transient RPC failure on the READ must abort the write — never be
+  // mistaken for an empty registry. Inject a failure on KV `get` queries ONLY
+  // (writes untouched), attempt a register, prove it threw and g2 survived.
+  // Patching axios.post works because kv.ts looks it up at call time on the same
+  // module instance (both resolve shade-agent/node_modules/axios).
+  // MUTATION: in readRegistry use `getBlobFromKVStrict(REGISTRY_KEY).catch(() => null)`
+  // (= the old lenient behaviour) → the read collapses to [], register writes [g3]
+  // alone, g2 is lost → this check fails.
+  await check('RPC failure on read aborts register (no write; existing entries survive)', async () => {
+    const axios = (await import('axios')).default;
+    const origPost = axios.post;
+    const g3 = `grp-${crypto.randomUUID()}`;
+    let threw = false;
+    axios.post = async (url, payload, cfg) => {
+      if (payload?.method === 'query' && payload?.params?.method_name === 'get') {
+        throw new Error('injected: KV read RPC failure');
+      }
+      return origPost.call(axios, url, payload, cfg);
+    };
+    try {
+      await svc.registerRetentionGroup({ group_id: g3 });
+    } catch {
+      threw = true;
+    } finally {
+      axios.post = origPost;
+    }
+    if (!threw) return false;
+    return settle(async () => {
+      const list = await svc.listRetentionGroups();
+      return list.includes(g2) && !list.includes(g3);
+    }, 5_000);
+  });
+
   // Superset-invariant intent: a corrupt/garbage blob must not crash the driver's
   // read — readRegistry returns [] on a non-array. Simulate by writing junk to the
   // test key directly, then reading through the service.

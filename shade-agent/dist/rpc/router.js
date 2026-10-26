@@ -13,7 +13,7 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub, storeLimited, walletPub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, AccessWindowSetSchema, AccessWindowRefSchema, AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput, } from '../lib/schemas.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -23,6 +23,7 @@ import { AgentIdentityChallengeSchema, AgentIdentityVerifySchema, AgentIdentityC
 import * as agentIdentityService from '../lib/services/agent-identity.js';
 import * as fastfsService from '../lib/services/fastfs-storage.js';
 import * as retentionService from '../lib/services/retention.js';
+import * as accessWindowsService from '../lib/services/access-windows.js';
 const INTERNAL = ['internal'];
 // ────────────────────────────────────────────────
 // user-keys
@@ -248,6 +249,45 @@ const retentionExecute = pub
     .input(RetentionExecuteSchema)
     .output(RetentionExecuteOutput)
     .handler(({ input }) => retentionService.executeRetention(input));
+// ────────────────────────────────────────────────
+// access windows (§6.1 Piece 4) — gated + seeded (touches KV), like retention.
+// set is called window-FIRST by MCP's add_group_member (before the on-chain
+// add) so a sold window can never go unrecorded; clear runs on every add
+// without a window (a re-add never inherits an old expiry) and best-effort on
+// an early revoke. get is owner-gated at MCP (Shade trusts the gate, as for
+// every account_id-bearing route). The sweep's list/complete are internal-only:
+// deliberately NO route.
+// ────────────────────────────────────────────────
+const accessWindowSet = pub
+    .route({
+    method: 'POST',
+    path: '/access-windows/set',
+    tags: INTERNAL,
+    summary: 'Record a member access window (before the on-chain add). Upsert.',
+})
+    .input(AccessWindowSetSchema)
+    .output(AccessWindowSetOutput)
+    .handler(({ input }) => accessWindowsService.setAccessWindow(input));
+const accessWindowClear = pub
+    .route({
+    method: 'POST',
+    path: '/access-windows/clear',
+    tags: INTERNAL,
+    summary: 'Remove a member access window (idempotent)',
+})
+    .input(AccessWindowRefSchema)
+    .output(AccessWindowClearOutput)
+    .handler(({ input }) => accessWindowsService.clearAccessWindow(input));
+const accessWindowGet = pub
+    .route({
+    method: 'POST',
+    path: '/access-windows/get',
+    tags: INTERNAL,
+    summary: "Read one member's access window, or null",
+})
+    .input(AccessWindowRefSchema)
+    .output(AccessWindowGetOutput)
+    .handler(({ input }) => accessWindowsService.getAccessWindow(input));
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
     keyManagement: { generateKey, getKey, rotateKey },
@@ -255,4 +295,5 @@ export const router = {
     wallet: { nonce: walletNonce, verify: walletVerify },
     agentIdentity: { challenge: agentIdentityChallenge, verify: agentIdentityVerify },
     retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
+    accessWindows: { set: accessWindowSet, clear: accessWindowClear, get: accessWindowGet },
 };

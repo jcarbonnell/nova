@@ -98,6 +98,49 @@ export async function getBlobFromKV(key) {
         return null;
     }
 }
+/**
+ * STRICT KV read, for READ-MODIFY-WRITE callers (access-window list, retention
+ * registry). Same query as getBlobFromKV, but an RPC failure THROWS instead of
+ * collapsing to null.
+ *
+ * WHY: getBlobFromKV's null-on-error is fine for lookups, but a read-modify-write
+ * that mistakes a transient RPC error for "empty" then WRITES the near-empty
+ * result back — silently erasing every other entry. Here, null ⇔ the key
+ * genuinely does not exist (or holds an empty value); anything else throws.
+ */
+export async function getBlobFromKVStrict(key) {
+    const t0 = Date.now();
+    try {
+        const result = await rpcCallWithRetry(KV_RPC_URL, {
+            jsonrpc: '2.0',
+            id: 'kv-get-strict',
+            method: 'query',
+            params: {
+                request_type: 'call_function',
+                finality: 'final',
+                account_id: KV_CONTRACT,
+                method_name: 'get',
+                args_base64: Buffer.from(JSON.stringify({ key })).toString('base64'),
+            },
+        });
+        if (!result?.result || result.result.length === 0) {
+            log('info', 'kv_get_strict', { key_id_hash: key.slice(0, 12), found: false, duration_ms: Date.now() - t0 });
+            return null;
+        }
+        const parsed = JSON.parse(Buffer.from(result.result).toString('utf8'));
+        const found = !!parsed && parsed.length > 0;
+        log('info', 'kv_get_strict', { key_id_hash: key.slice(0, 12), found, duration_ms: Date.now() - t0 });
+        return found ? parsed : null;
+    }
+    catch (err) {
+        log('warn', 'kv_get_strict_failed', {
+            key_id_hash: key.slice(0, 12),
+            duration_ms: Date.now() - t0,
+            message: err.message,
+        });
+        throw err; // the whole point: never masquerade as "not found"
+    }
+}
 // ────────────────────────────────────────────────
 // Borsh primitives for manual NEAR transaction serialization
 // ────────────────────────────────────────────────
@@ -148,6 +191,37 @@ export function encodeTransaction(signerId, publicKey, nonce, receiverId, blockH
         ...actions,
     ]);
 }
+// ────────────────────────────────────────────────
+// Per-signer serialization (S2.0)
+// ────────────────────────────────────────────────
+// A NEAR access key's nonce must strictly increase. Two txs signed CONCURRENTLY
+// by the same key both read nonce N and both sign N+1 → one fails InvalidNonce,
+// and rpcCallWithRetry rebroadcasts the SAME signed tx (same nonce), so the
+// retry can never succeed (observed in the S1.6 M2 run). Serializing
+// read-nonce → sign → broadcast_tx_commit per key removes the collision inside
+// this process. broadcast_tx_commit returns after execution, so the next
+// holder's 'optimistic' nonce read already reflects the previous tx.
+//
+// Scope: IN-PROCESS only. Another process signing with the SAME access key is
+// not covered (none today). Cost: writes by one key are strictly sequential,
+// ~2s each — they effectively were already, since concurrent ones collided.
+const signerLocks = new Map();
+export function withSignerLock(signerKey, fn) {
+    const prev = signerLocks.get(signerKey) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    signerLocks.set(signerKey, tail);
+    // Drop the entry once idle, so one-off signers (S2 owner keys) don't accumulate.
+    void tail.then(() => {
+        if (signerLocks.get(signerKey) === tail)
+            signerLocks.delete(signerKey);
+    });
+    return run;
+}
+/** Exposed for the S2.0 harness only: number of signers with a pending/held lock. */
+export function _signerLockCount() {
+    return signerLocks.size;
+}
 /**
  * Sign a FunctionCall as the KV-owner signer (nova-sdk.near, salt
  * 'kv-owner-signer-v1' — the ONLY live Shade signing identity; reused, never
@@ -167,42 +241,45 @@ export async function signAndBroadcastFunctionCall(receiverId, methodName, argsB
     const signerPriv = deriveKey('kv-owner-signer-v1', 32);
     const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
     const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
-    const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
-        jsonrpc: '2.0', id: 'access-key',
-        method: 'query',
-        params: {
-            // 'optimistic' (not 'final'): the nonce must be strictly greater than the
-            // key's last-used nonce. When two txs are signed by the same key back-to-
-            // back (e.g. generateFileKey's KV store, then the FastFS envelope), 'final'
-            // lags and returns a stale nonce → InvalidNonce{ak_nonce == tx_nonce}.
-            // 'optimistic' reflects the just-submitted tx so nonce+1 is fresh.
-            request_type: 'view_access_key',
-            finality: 'optimistic',
-            account_id: signerAccountId,
-            public_key: signerPubBs58,
-        },
+    // S2.0: nonce read → sign → broadcast is one critical section per access key.
+    return withSignerLock(`${signerAccountId}|${signerPubBs58}`, async () => {
+        const accessKeyResult = await rpcCallWithRetry(rpcUrl, {
+            jsonrpc: '2.0', id: 'access-key',
+            method: 'query',
+            params: {
+                // 'optimistic' (not 'final'): the nonce must be strictly greater than the
+                // key's last-used nonce. When two txs are signed by the same key back-to-
+                // back (e.g. generateFileKey's KV store, then the FastFS envelope), 'final'
+                // lags and returns a stale nonce → InvalidNonce{ak_nonce == tx_nonce}.
+                // 'optimistic' reflects the just-submitted tx so nonce+1 is fresh.
+                request_type: 'view_access_key',
+                finality: 'optimistic',
+                account_id: signerAccountId,
+                public_key: signerPubBs58,
+            },
+        });
+        if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
+            throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
+                `Please add the key with:\n` +
+                `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`);
+        }
+        const nonce = BigInt(accessKeyResult.nonce) + 1n;
+        const blockHash = bs58.decode(accessKeyResult.block_hash);
+        const action = encodeFunctionCallAction(methodName, argsBytes, gas, deposit);
+        const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, receiverId, blockHash, [action]);
+        const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
+        const signature = await ed25519.signAsync(txHash, signerPriv);
+        const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
+        const broadcastResult = await rpcCallWithRetry(rpcUrl, {
+            jsonrpc: '2.0', id: 'broadcast',
+            method: 'broadcast_tx_commit',
+            params: [signedTx.toString('base64')],
+        });
+        if (broadcastResult?.status?.Failure && !opts.tolerateFailure) {
+            throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
+        }
+        return broadcastResult;
     });
-    if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
-        throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
-            `Please add the key with:\n` +
-            `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`);
-    }
-    const nonce = BigInt(accessKeyResult.nonce) + 1n;
-    const blockHash = bs58.decode(accessKeyResult.block_hash);
-    const action = encodeFunctionCallAction(methodName, argsBytes, gas, deposit);
-    const txBytes = encodeTransaction(signerAccountId, signerPub, nonce, receiverId, blockHash, [action]);
-    const txHash = new Uint8Array(crypto.createHash('sha256').update(txBytes).digest());
-    const signature = await ed25519.signAsync(txHash, signerPriv);
-    const signedTx = Buffer.concat([txBytes, Buffer.from([0]), signature]);
-    const broadcastResult = await rpcCallWithRetry(rpcUrl, {
-        jsonrpc: '2.0', id: 'broadcast',
-        method: 'broadcast_tx_commit',
-        params: [signedTx.toString('base64')],
-    });
-    if (broadcastResult?.status?.Failure && !opts.tolerateFailure) {
-        throw new Error(`Contract execution failed: ${JSON.stringify(broadcastResult.status.Failure)}`);
-    }
-    return broadcastResult;
 }
 // ────────────────────────────────────────────────
 // KV write (signed NEAR transaction)
