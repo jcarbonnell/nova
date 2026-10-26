@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.2.3
+**Version:** 1.3.0
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -17,6 +17,7 @@ A Rust SDK for NOVA's secure, decentralized file-sharing primitive on NEAR. NOVA
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🔑 **Per-File Keys** - Each file encrypted with its own key; deletion crypto-shreds it (permanently undecryptable)
 - ⏳ **Retention** - Optional per-group retention windows for time-based deletion
+- ⏱️ **Access Windows** - Time-limited membership: NOVA revokes the member at expiry and rotates the group key ("sell a window, not a copy")
 - 🚀 **Composite Operations** - Simplified workflows for upload/retrieve
 
 ## Installation
@@ -25,7 +26,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.2.3"
+nova-sdk-rs = "1.3"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4"
 ```
@@ -46,7 +47,7 @@ let config = NovaSdkConfig::testnet()
 let sdk = NovaSdk::with_config("alice.nova-sdk-7.testnet", config)?;
 ```
 
-> **Note:** On testnet, file storage is mocked (in-memory). Blockchain operations use real testnet with faucet tokens.
+> **Note:** New uploads use FastFS on NEAR (no IPFS). Legacy files previously stored on IPFS remain retrievable. Blockchain operations on testnet use real testnet with faucet tokens.
 
 ## Quick Start
 
@@ -134,7 +135,7 @@ File metadata (location/hash) is recorded on-chain automatically during upload.
 
 ```rust
 // Query group transactions
-let txs = sdk.get_transactions_for_group("my_group").await;
+let txs = sdk.get_transactions_for_group("my_group").await?;
 for tx in txs {
     println!("File: {} | Location: {}", tx.file_hash, tx.ipfs_hash);
 }
@@ -210,8 +211,27 @@ sdk.auth_status(Some("my-group")).await?;
 // Register group
 sdk.register_group("my-group").await?;
 
-// Add member
+// Add member (permanent)
 sdk.add_group_member("my-group", "bob.near").await?;
+
+// Add member with a time-limited ACCESS WINDOW (1..=525_600 minutes). NOVA revokes
+// carol ~1 minute after expiry (signed as the owner, inside the TEE) and rotates the
+// group key. Calling again for an existing member sets/extends the window.
+// Requires a custodial owner (API-key or email account).
+use nova_sdk_rs::AddGroupMemberOptions;
+sdk.add_group_member_with_options(
+    "my-group",
+    "carol.near",
+    AddGroupMemberOptions { access_minutes: Some(60) },
+).await?;
+
+// Read a member's window (owner only); None = permanent member / no window
+if let Some(w) = sdk.get_member_window("my-group", "carol.near").await? {
+    println!("carol's access ends at {}", w.expires_at);
+}
+
+// Retention window for the group's files, in days (owner only); None clears it
+sdk.set_group_retention("my-group", Some(30)).await?;
 
 // Revoke member
 sdk.revoke_group_member("my-group", "bob.near").await?;
@@ -239,15 +259,6 @@ let result = sdk.upload(group_id, &data, filename).await?;
 let retrieved = sdk.retrieve(group_id, ipfs_hash).await?;
 ```
 
-**Deprecated methods** (still work, but emit warnings):
-```rust
-// Use upload() instead
-sdk.composite_upload(group_id, &data, filename).await?;
-
-// Use retrieve() instead  
-sdk.composite_retrieve(group_id, ipfs_hash).await?;
-```
-
 ## Error Handling
 
 The SDK uses a custom `NovaError` enum:
@@ -270,6 +281,10 @@ match sdk.upload("my_group", b"data", "file.txt").await {
     Err(NovaError::Http(msg)) => eprintln!("HTTP error: {}", msg),
     Err(NovaError::Encryption(msg)) => eprintln!("Encryption error: {}", msg),
     Err(NovaError::Decryption(msg)) => eprintln!("Decryption error: {}", msg),
+    Err(NovaError::Compression(msg)) => eprintln!("Compression error: {}", msg),
+    Err(NovaError::UnsupportedFormat(v)) => eprintln!("Unsupported file format version: {}", v),
+    Err(NovaError::InvalidArgument(msg)) => eprintln!("Invalid argument: {}", msg),
+}
 ```
 
 ## 🔐 Security Considerations
@@ -306,8 +321,8 @@ MIT [LICENSE](LICENSE) - Copyright (c) 2026 CivicTech OÜ
 
 - [NOVA Documentation](https://civictech-ou.gitbook.io/nova-docs/)
 - [NEAR Protocol](https://near.org)
-- [IPFS](https://ipfs.io)
-- [Pinata](https://pinata.cloud)
+- [IPFS](https://ipfs.io) (legacy reads)
+- [Pinata](https://pinata.cloud) (legacy reads)
 - [FastFS](https://fastfs.io)
 - [Shade Agent](https://docs.near.org/ai/introduction)
 - [Phala TEEs](https://phala.com/)
