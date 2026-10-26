@@ -32,6 +32,8 @@ Together these make NOVA a verifiable data layer: a user, or their auditor, can 
 - **Secure Storage**: Files are encrypted with per-file keys (wrapped under the group key) and stored on FastFS, optimized for AI dApps (e.g., datasets for fine-tuning). Deletion crypto-shreds a file's key and tombstones its record — real removal, not just unpinning.
 - **Access Workflow**: SDKs retrieve encryption keys from TEE via secure tokens, then perform client-side encryption/decryption —plaintext data never leaves your device or server.
 - **Revocation & Key Rotation**: Remove members and rotate the group key in the TEE so a revoked member cannot decrypt files uploaded after revocation.
+- **Access Windows**: Add a member for a limited time (`accessMinutes`). NOVA itself revokes them about a minute after expiry — signed as the group owner inside the TEE — and rotates the group key: sell a window, not a copy.
+- **Retention**: Set a per-group retention window in days; NOVA deletes expired files every night (crypto-shred, storage null-write, on-chain deletion record).
 - **Integrity & Trackability**: Log signed transactions (with file hashes) on-chain for non-corruption guarantees, leveraging NEAR’s ledger for verifiability.
 
 ## Group Key Security
@@ -96,7 +98,7 @@ For high-performance applications, blockchain integration, and system-level deve
 
 ```toml
 [dependencies]
-nova-sdk-rs = "1.2.3"
+nova-sdk-rs = "1.3"
 ```
 
 **Best for**: Smart contracts, CLI tools, high-performance services, native applications
@@ -274,6 +276,7 @@ let sdk = NovaSdk::with_config("alice.nova-sdk-7.testnet", config)?;
 - **Dataset Sharing**: Securely share training data between researchers
 - **Model Fine-Tuning**: Store and access sensitive data for AI agent training
 - **TEE Integration**: Encrypted inputs/outputs to confidential compute environments
+- **Paid Data Access**: Sell time-limited access to a dataset; access ends on schedule, enforced by NOVA (e.g. after an agent-to-agent payment)
 
 ### 🏢 Enterprise & Collaboration
 - **Document Sharing**: Secure file sharing within organizations
@@ -319,7 +322,7 @@ Comprehensive documentation is available on GitBook:
 2. **Key Storage** - Keys managed in TEEs; never handle plaintext in code
 3. **Storage Privacy** - stored content is addressable by reference, so NOVA always encrypts client-side before storage; ciphertext is all that reaches FastFS
 4. **Access Control** - Always verify user authorization before operations
-5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation
+5. **Key Rotation** - Revoked members cannot decrypt content uploaded after revocation; access windows end the same way, automatically, about a minute after expiry
 6. **Client-Side Encryption** - Files are encrypted locally using AES-256-GCM; plaintext never transmitted to FastFS or MCP server
 7. **Token Ephemerality** - Nonces and timestamps prevent replay; session tokens auto-refresh
 8. **API Key Security** - Store API keys in environment variables; never commit to version control
@@ -328,7 +331,7 @@ Comprehensive documentation is available on GitBook:
 ## Future Roadmap
 
 ### In Progress
-- **Off-chain retention driver**: Per-group retention windows and file deletion are live on-chain (`set_group_retention`, `get_expired_transactions`, `tombstone_transactions`); the scheduled off-chain driver that reads expired files and tombstones them is the last remaining backend piece.
+- **Write paths for self-custodial sessions**: wallet and agent sessions can sign in and read today; writes (upload, group admin) come next — wallet-signed transactions, and NOVA signing on behalf of a verified session. This also extends access windows to wallet-owned groups.
 - **Codex / ChatGPT plugin**: The Claude plugin (`nova-ai-memory`) is shipped. A Codex/ChatGPT equivalent is deferred — those surfaces require a hosted MCP endpoint consumed by a cloud agent, which is incompatible with NOVA's client-side encryption model (plaintext and keys never leave the user's machine). NOVA ships there unchanged if/when they support local, client-side-encrypting plugins in their public directories.
 - **Cold master-seed backup**: NOVA accounts and group keys persist on `nova-kv.near` and recover across TEE restarts via the master seed. Remaining risk is master seed loss — a cold backup mechanism for the encrypted master seed blob is on the roadmap.
 

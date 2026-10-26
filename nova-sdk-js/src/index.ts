@@ -34,6 +34,10 @@ export interface NovaSdkConfig {
   // surfaces a dedicated error rather than falling through to minting.
   sessionToken?: string;
 
+  // Self-custodial mode: contract writes are signed and paid by this wallet.
+  // Its accountId must equal the SDK accountId. Omit for NOVA-signed (custodial) mode.
+  walletSigner?: NovaWalletSigner;
+
   // Infrastructure config
   authUrl?: string;
   
@@ -91,6 +95,26 @@ export interface MemberWindow {
   set_at: string;          // ISO 8601
 }
 
+/** A contract call the SDK asks the user's wallet to sign and send (self-custodial mode). */
+export interface WalletFunctionCall {
+  receiverId: string;
+  methodName: string;
+  args: Record<string, unknown>;
+  gas: bigint;      // gas units
+  deposit: bigint;  // yoctoNEAR
+}
+
+/**
+ * Self-custodial signer: the user's own wallet signs and pays for every contract
+ * write. NOVA never holds this key. Implementations live in the app (e.g. a
+ * wallet-selector adapter in the dashboard); the SDK only needs this shape.
+ */
+export interface NovaWalletSigner {
+  readonly accountId: string;
+  /** Sign, send, and wait for the call; resolve with the transaction hash. Reject if the user declines. */
+  signAndSendFunctionCall(call: WalletFunctionCall): Promise<{ txHash: string }>;
+}
+
 export interface AuthStatusResult {
   authenticated: boolean;
   near_account_id?: string;
@@ -108,7 +132,11 @@ interface PrepareUploadResponse {
   key: string;
   group_id: string;
   filename: string;
+  location?: string;   // returned for wallet sessions: the FastFS location the wallet records before bytes are written
 }
+
+// One ceiling for wallet-signed calls; unused gas is refunded.
+const WALLET_CALL_GAS = 100_000_000_000_000n; // 100 Tgas
 
 interface FinalizeUploadResponse {
   location: string;
@@ -157,6 +185,7 @@ export class NovaSdk {
   private apiKey: string | null = null;
   private injectedToken: string | null = null;
   private injectedTokenExpMs: number | null = null;
+  private walletSigner: NovaWalletSigner | null = null;
 
   public readonly accountId: string;
   public readonly contractId: string;
@@ -201,6 +230,12 @@ export class NovaSdk {
     this.injectedTokenExpMs = this.injectedToken
       ? this.decodeJwtExpMs(this.injectedToken)
       : null;
+    this.walletSigner = config.walletSigner || null;
+    if (this.walletSigner && this.walletSigner.accountId !== accountId) {
+      throw new NovaError(
+        `walletSigner account (${this.walletSigner.accountId}) does not match SDK account (${accountId})`
+      );
+    }
     this.rpcUrl = config?.rpcUrl || DEFAULT_RPC_URL;
     this.contractId = config?.contractId || DEFAULT_CONTRACT_ID;
     this.mcpUrl = config?.mcpUrl || DEFAULT_MCP_URL;
@@ -352,6 +387,36 @@ export class NovaSdk {
     await this.getSessionToken();
   }
 
+  /** 'wallet' when contract writes are signed by the user's wallet, 'nova' otherwise. */
+  public get signerMode(): 'wallet' | 'nova' {
+    return this.walletSigner ? 'wallet' : 'nova';
+  }
+
+  // Wallet-signed contract write. Fee is read live from the contract (never
+  // hard-coded); feeAction null ⇒ zero-fee method. Returns the tx hash.
+  private async walletCall(
+    methodName: string,
+    args: Record<string, unknown>,
+    feeAction: string | null,
+  ): Promise<string> {
+    if (!this.walletSigner) throw new NovaError('walletCall without walletSigner');
+    const deposit = feeAction ? await this.estimateFee(feeAction) : 0n;
+    try {
+      const { txHash } = await this.walletSigner.signAndSendFunctionCall({
+        receiverId: this.contractId,
+        methodName,
+        args,
+        gas: WALLET_CALL_GAS,
+        deposit,
+      });
+      if (!txHash) throw new Error('wallet returned no transaction hash');
+      return txHash;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new NovaError(`Wallet transaction '${methodName}' failed or was rejected: ${msg}`, e as Error);
+    }
+  }
+
   // Network detection
   private detectNetwork(): string {
     if (this.contractId.endsWith('.testnet')) return 'testnet';
@@ -449,7 +514,12 @@ export class NovaSdk {
 
   // Register a new group. Caller becomes owner.
   async registerGroup(groupId: string): Promise<string> {
-    const result = await this.callMcpTool<{ message?: string }>('register_group', { 
+    // Wallet mode: the wallet registers on chain first; MCP then checks the
+    // on-chain owner equals this session and creates the group key in the TEE.
+    if (this.walletSigner) {
+      await this.walletCall('register_group', { group_id: groupId }, 'register_group');
+    }
+    const result = await this.callMcpTool<{ message?: string }>('register_group', {
       group_id: groupId 
     });
     return result.message || `Group '${groupId}' registered successfully`;
@@ -477,6 +547,18 @@ export class NovaSdk {
       }
       args.access_minutes = m;
     }
+    if (this.walletSigner) {
+      // Windows need NOVA to revoke as the owner at expiry; a wallet owner has
+      // not granted that (Deliverable 2 (B), grant_revoker). Refuse BEFORE signing.
+      if (options.accessMinutes !== undefined) {
+        throw new NovaError('accessMinutes is not available for wallet-owned groups yet');
+      }
+      await this.walletCall(
+        'add_group_member',
+        { group_id: groupId, user_id: memberId },
+        'add_group_member',
+      );
+    }
     // MCP returns a plain string (e.g. "Added … with access until …").
     const result = await this.callMcpTool<string | { message?: string }>('add_group_member', args);
     if (typeof result === 'string') return result;
@@ -496,10 +578,20 @@ export class NovaSdk {
   // null ⇒ no auto-expiry (the default). Files past the window become eligible for
   // retention-driven deletion; this configures the window only, it deletes nothing.
   async setGroupRetention(groupId: string, retentionDays: number | null): Promise<string> {
+    // MCP FIRST in both modes: the group enters the retention registry before the
+    // window exists on chain, so the midnight sweep can never miss it. In wallet
+    // mode MCP only registers; the wallet then sets the window (zero-fee method).
     const result = await this.callMcpTool<{ message?: string }>('set_group_retention', {
       group_id: groupId,
       retention_days: retentionDays,
     });
+    if (this.walletSigner) {
+      await this.walletCall(
+        'set_group_retention',
+        { group_id: groupId, retention_days: retentionDays },
+        null,
+      );
+    }
     return result.message || (
       retentionDays === null
         ? `Cleared retention for group '${groupId}'`
@@ -525,6 +617,11 @@ export class NovaSdk {
     } catch {
       // isAuthorized can throw if the group doesn't exist yet; let join surface it.
     }
+    if (this.walletSigner) {
+      // Joining has no NOVA-side effect; the wallet joins directly.
+      await this.walletCall('join_group', { group_id: groupId }, 'join_group');
+      return `Joined group '${groupId}'`;
+    }
     const result = await this.callMcpTool<{ message?: string } | string>('join_group', {
       group_id: groupId,
     });
@@ -534,6 +631,15 @@ export class NovaSdk {
 
   // Revoke a member from a group. Caller must be owner.
   async revokeGroupMember(groupId: string, memberId: string): Promise<string> {
+    // Wallet mode: revoke on chain first; MCP then checks the member is no longer
+    // authorized and rotates the group key (old key can't open new files).
+    if (this.walletSigner) {
+      await this.walletCall(
+        'revoke_group_member',
+        { group_id: groupId, user_id: memberId },
+        'revoke_group_member',
+      );
+    }
     const result = await this.callMcpTool<{ message?: string }>('revoke_group_member', {
       group_id: groupId,
       member_id: memberId,
@@ -576,15 +682,39 @@ export class NovaSdk {
     // Step 3: Compute hash of PLAINTEXT (the on-chain integrity anchor — unchanged).
     const fileHash = await computeSha256Async(data);
 
+    // Wallet mode, record-first: the wallet records the upload on chain at the
+    // location MCP issued; finalize then verifies that tx on chain before any
+    // bytes are written. A declined signature stops here: nothing is stored.
+    let txHash: string | undefined;
+    if (this.walletSigner) {
+      const location = prepareResult.location;
+      if (!location) {
+        throw new NovaError('MCP returned no upload location; wallet uploads need a newer MCP');
+      }
+      txHash = await this.walletCall(
+        'record_transaction',
+        {
+          group_id: groupId,
+          user_id: this.accountId,
+          file_hash: fileHash,
+          ipfs_hash: location,
+          backend: 'FastFS',
+        },
+        'record_transaction',
+      );
+    }
+
     // Step 4: Finalize upload via MCP tool
+    const finalizeArgs: Record<string, unknown> = {
+      upload_id,
+      encrypted_data: bytes_b64,
+      file_hash: fileHash,
+      format,
+    };
+    if (txHash) finalizeArgs.tx_hash = txHash;
     const finalizeResult = await this.callMcpTool<FinalizeUploadResponse>(
       'finalize_upload',
-      {
-        upload_id,
-        encrypted_data: bytes_b64,
-        file_hash: fileHash,
-        format,
-      }
+      finalizeArgs,
     );
 
     return {
