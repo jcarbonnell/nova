@@ -27,7 +27,7 @@
 
 import { encryptBlob, decryptBlob, sha256Hex } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
-import { newRelativePath, uploadAt, retrieve, parseFastfsLocation } from '../fastfs.js';
+import { newRelativePath, uploadAt, retrieve, parseFastfsLocation, encodeFastfsLocation } from '../fastfs.js';
 import { generateFileKey, getFileKey } from './key-management.js';
 import { ApiError } from '../errors.js';
 import { log } from '../logger.js';
@@ -70,7 +70,11 @@ export async function prepareFileUpload(input: PrepareFileUploadInput) {
     group_id, version, file_ref_hash: sha256Hex(file_ref).slice(0, 12),
   });
 
-  return { file_key, file_ref, version };
+  // D2 (A): the location is fully determined by file_ref (uploadAt returns exactly
+  // encodeFastfsLocation(file_ref)), so it can be handed out BEFORE the write.
+  // Wallet uploads record it on chain first; MCP then verifies that record and
+  // checks finalize's location equals this one. Custodial MCP ignores the field.
+  return { file_key, file_ref, version, location: encodeFastfsLocation(file_ref) };
 }
 
 // ────────────────────────────────────────────────

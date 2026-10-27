@@ -338,6 +338,7 @@ export const PrepareFileUploadOutput = z.object({
   file_key: z.string(),
   file_ref: z.string(),
   version: z.string(),
+  location: z.string(),
 });
 
 export const FinalizeFileUploadOutput = z.object({

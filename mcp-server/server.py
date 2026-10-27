@@ -1,5 +1,6 @@
 # NOVA-mcp refactored for Horizon (fastmcp v3+), w/ dual-network support and clean code (removed redundancy)
 import os
+import asyncio
 import json
 import hashlib
 import re
@@ -77,7 +78,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.8 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.11 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -676,10 +677,19 @@ mcp = FastMCP(
 # ─────────────
 
 def has_custodial_key(user: dict) -> bool:
-    """False for wallet-tier sessions (browser SIWN and Agent Connect identity:
-    subject `wallet|<account>`): NOVA holds no key for them, so nothing can be
-    signed AS them. API-key and email sessions are custodial."""
-    return not user.get("wallet_id")
+    """True only for accounts NOVA created and holds the key for: sub-accounts of
+    the NOVA account suffix (*.nova-sdk.near / *.nova-sdk-7.testnet). Only the
+    NOVA account can create those, so the suffix is proof of custody.
+
+    Decided by the VERIFIED account, not by how the session was minted: a wallet
+    account (alice.near, or an Agent Connect implicit account) that signs in
+    with an API key (sub 'apikey|…') is still self-custodial — NOVA holds no key
+    for it. Before v0.4.10 only sub 'wallet|…' counted, so such sessions took
+    the custodial paths (failed signer fetch; orphan file on upload)."""
+    if user.get("wallet_id"):
+        return False
+    account = (user.get("near_account_id") or "").strip().lower()
+    return bool(account) and account.endswith(get_config(account)["account_suffix"])
 
 
 # §6.1 Piece 4 — access windows. Mirrors Shade's AccessWindowSetSchema (1..525_600).
@@ -706,6 +716,103 @@ def _validate_access_minutes(access_minutes) -> int:
     return access_minutes
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Deliverable 2 (A) — wallet-signed writes (self-custodial sessions)
+# ──────────────────────────────────────────────────────────────────────────
+# A wallet session (subject wallet|<account>) signs and pays its OWN contract
+# writes; MCP never signs as it. Each tool's wallet branch only runs NOVA's
+# side effect (key creation, rotation, registry, FastFS write) after
+# re-reading chain state, or, for retention, the registry step BEFORE the
+# chain change. Nothing the client says is trusted: ownership and membership
+# come from the contract, and an upload's record tx is fetched from the chain
+# and matched field by field against what this upload_id was issued.
+#
+# Agents (Agent Connect wallets) also have wallet sessions, but cannot sign
+# contract calls, so they can never become on-chain owners: every owner-side
+# branch below is gated on get_group_owner == session account.
+
+CHAIN_SETTLE_SECONDS = 15.0   # a wallet tx the SDK just sent may not be `final` yet
+CHAIN_POLL_SECONDS = 1.0
+TX_HASH_RE = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+
+
+async def _await_view(user: dict, method: str, args: dict, want: Any, refusal: str) -> None:
+    """Poll a view (final finality) until it equals `want`, or refuse. Covers the
+    gap between the wallet returning and the block being final."""
+    deadline = time.monotonic() + CHAIN_SETTLE_SECONDS
+    while True:
+        if await view_contract(user, method, args) == want:
+            return
+        if time.monotonic() >= deadline:
+            raise PermissionError(refusal)
+        await asyncio.sleep(CHAIN_POLL_SECONDS)
+
+
+async def _require_onchain_owner(user: dict, group_id: str) -> None:
+    await _await_view(
+        user, "get_group_owner", {"group_id": group_id}, user["near_account_id"],
+        f"'{group_id}' is not owned on chain by this session's account",
+    )
+
+
+async def _rpc_tx_status(tx_hash: str, sender_id: str) -> dict:
+    """Thin transport to RPC `tx` (waits for FINAL). Separate so the harness can stub it."""
+    config = get_config(sender_id)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                config["rpc_url"],
+                json={
+                    "jsonrpc": "2.0", "id": "tx", "method": "tx",
+                    "params": {"tx_hash": tx_hash, "sender_account_id": sender_id, "wait_until": "FINAL"},
+                },
+            )
+        data = resp.json()
+    except Exception as e:
+        # An unknown (e.g. forged) hash makes the RPC wait until our timeout, and
+        # httpx timeouts stringify to "". Name the type only: the exception text
+        # can carry the RPC URL, which holds ?apiKey=.
+        raise RuntimeError(f"RPC tx lookup failed: {type(e).__name__}") from None
+    if data.get("error"):
+        raise RuntimeError(f"RPC tx lookup failed: {data['error']}")
+    if "result" not in data:
+        raise RuntimeError("RPC tx lookup failed: no result")
+    return data["result"]
+
+
+def _check_wallet_record_tx(result: dict, signer: str, contract_id: str, expected_args: dict) -> str:
+    """Verify an on-chain record_transaction is exactly the one this upload needs,
+    signed directly by the session account and successful. Returns its trans_id."""
+    tx = result.get("transaction") or {}
+    if tx.get("signer_id") != signer:
+        raise PermissionError("Upload record was not signed by this session's account")
+    if tx.get("receiver_id") != contract_id:
+        raise PermissionError("Upload record was not sent to the NOVA contract")
+    actions = tx.get("actions") or []
+    if len(actions) != 1 or not isinstance(actions[0], dict) or "FunctionCall" not in actions[0]:
+        raise PermissionError("Upload record must be a single function call")
+    fc = actions[0]["FunctionCall"] or {}
+    if fc.get("method_name") != "record_transaction":
+        raise PermissionError("Upload record is not a record_transaction call")
+    try:
+        args = json.loads(base64.b64decode(fc.get("args") or "").decode())
+    except Exception:
+        raise PermissionError("Upload record args are not JSON")
+    if args != expected_args:
+        raise PermissionError("Upload record does not match this upload")
+    status = result.get("status")
+    if not isinstance(status, dict) or "SuccessValue" not in status:
+        raise PermissionError("Upload record transaction did not succeed")
+    raw = status["SuccessValue"]
+    try:
+        trans_id = json.loads(base64.b64decode(raw).decode()) if raw else None
+    except Exception:
+        trans_id = None
+    if not isinstance(trans_id, str) or not trans_id:
+        raise RuntimeError("Upload record returned no trans_id")
+    return trans_id
+
+
 # ─────────────
 # MCP Tools + REST exposure
 # ─────────────
@@ -713,8 +820,33 @@ def _validate_access_minutes(access_minutes) -> int:
 @expose_as_rest("/tools/register_group")
 @require_auth
 async def register_group(ctx: Context, user: dict, group_id: str) -> str:
+    if not has_custodial_key(user):
+        # D2 (A): the wallet registered (and paid) on chain. Create the group key
+        # only once the chain says this session owns the group. Unlike the
+        # custodial path, a failed key creation is an error, not silently ignored.
+        await _require_onchain_owner(user, group_id)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{SHADE_API_URL}/rpc/key-management/generate_key",
+                json={
+                    "group_id": group_id,
+                    "owner": user["near_account_id"],
+                    "account_id": user["near_account_id"],
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Internal-Auth": INTERNAL_API_SECRET,
+                    "Authorization": f"Bearer wallet:{user.get('wallet_id') or user['near_account_id']}",
+                },
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Group registered on chain, but key creation failed: {resp.status_code} - {resp.text[:200]}"
+            )
+        return f"Group '{group_id}' registered successfully"
+
     await call_contract(user, "register_group", {"group_id": group_id}, "register_group")
-    
+
     config = get_config(user["near_account_id"])
     headers = {
         "Content-Type": "application/json",
@@ -768,6 +900,21 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
                 "Access windows need a custodial group owner (API key or email account); "
                 "wallet-owned groups are not supported yet"
             )
+
+    if not has_custodial_key(user):
+        # D2 (A): the wallet added the member on chain. Confirm owner + membership,
+        # then drop any stale window (none should exist: windows are refused for
+        # wallet owners above). Nothing is signed here.
+        await _require_onchain_owner(user, group_id)
+        await _await_view(
+            user, "is_authorized", {"group_id": group_id, "user_id": member_id}, True,
+            f"{member_id} is not a member of '{group_id}' on chain",
+        )
+        try:
+            await _shade_internal("/rpc/access-windows/clear", window_ref)
+        except Exception as e:
+            logger.warning(f"add_group_member (wallet): window clear failed (non-fatal): {e}")
+        return f"Added {member_id} to group '{group_id}'"
 
     try:
         already_member = bool(await view_contract(
@@ -829,6 +976,27 @@ async def set_group_retention(ctx: Context, user: dict, group_id: str, retention
     #           it must NOT block the clear.
     headers = {"Content-Type": "application/json", "X-Internal-Auth": INTERNAL_API_SECRET}
 
+    if not has_custodial_key(user):
+        # D2 (A): MCP runs BEFORE the wallet's on-chain call. SET → register only
+        # (same fail-hard rule). CLEAR → do NOT deregister: the wallet's clear may
+        # never land, and an unregistered on-chain window would never be swept.
+        # A stale entry is filtered by the driver (get_group_retention == None).
+        await _require_onchain_owner(user, group_id)
+        if retention_days is None:
+            return f"Ready to clear retention for '{group_id}': sign set_group_retention with your wallet"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{SHADE_API_URL}/rpc/retention/register",
+                json={"group_id": group_id},
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Retention registry write failed ({resp.status_code}); "
+                f"do not set retention on chain yet - {resp.text[:200]}"
+            )
+        return f"Registered '{group_id}' for retention: sign set_group_retention with your wallet"
+
     if retention_days is not None:
         # SET: registry-first, fail hard if the registry write fails.
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -876,6 +1044,8 @@ async def join_group(ctx: Context, user: dict, group_id: str) -> str:
     # Self-service join: the CALLER joins the group (predecessor == the member).
     # Contract enforces the group is joinable AND has an open window; this tool
     # does not (and must not) pass a member_id — you can only join yourself.
+    if not has_custodial_key(user):
+        raise PermissionError("Wallet sessions join with their own wallet (sign join_group directly)")
     await call_contract(
         user=user,
         method_name="join_group",
@@ -969,13 +1139,22 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
     member_id = normalize_account_id(member_id)
     config = get_config(user["near_account_id"])
 
-    # Step 1 — on-chain revoke, signed AS THE USER (the group owner)
-    await call_contract(
-        user=user,
-        method_name="revoke_group_member",
-        args={"group_id": group_id, "user_id": member_id},
-        fee_action="revoke_group_member",
-    )
+    if not has_custodial_key(user):
+        # D2 (A): the wallet revoked on chain. Rotate only once the chain says
+        # this session owns the group AND the member is gone.
+        await _require_onchain_owner(user, group_id)
+        await _await_view(
+            user, "is_authorized", {"group_id": group_id, "user_id": member_id}, False,
+            f"{member_id} is still a member of '{group_id}' on chain",
+        )
+    else:
+        # Step 1 — on-chain revoke, signed AS THE USER (the group owner)
+        await call_contract(
+            user=user,
+            method_name="revoke_group_member",
+            args={"group_id": group_id, "user_id": member_id},
+            fee_action="revoke_group_member",
+        )
 
     # Step 2 — rotate the group key so the revoked member can't decrypt future uploads.
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1013,10 +1192,9 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
 @expose_as_rest("/tools/get_member_window")
 @require_auth
 async def get_member_window(ctx: Context, user: dict, group_id: str, member_id: str) -> dict:
-    # §6.1 Piece 4 — OWNER-ONLY read of a member's access window. Owner operations
-    # are never available to wallet/agent sessions.
-    if not has_custodial_key(user):
-        raise PermissionError("Owner operations are not available to wallet/agent sessions")
+    # §6.1 Piece 4 — OWNER-ONLY read of a member's access window. Gated on the
+    # ON-CHAIN owner (below), so wallet owners (D2 A) may read; agents can never
+    # own a group (they cannot sign register_group), so this stays owner-only.
     member_id = normalize_account_id(member_id)
     config = get_config(user["near_account_id"])
     owner = await view_contract(user, "get_group_owner", {"group_id": group_id})
@@ -1035,15 +1213,10 @@ async def get_member_window(ctx: Context, user: dict, group_id: str, member_id: 
 async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str) -> dict:
     cleanup_expired_uploads()
 
-    # v0.4.6: refuse BEFORE minting a key or writing anything. finalize_upload
-    # stores ciphertext on FastFS and THEN records it on-chain signed as the user;
-    # a wallet-tier session has no custodial key, so the record failed AFTER the
-    # write, leaving an orphan file (no record, invisible to retention).
-    if not has_custodial_key(user):
-        raise ValueError(
-            "Uploads are not supported for wallet/agent sessions yet: upload from the "
-            "group owner's custodial account (API key) and share the file location."
-        )
+    # D2 (A): wallet sessions upload RECORD-FIRST. prepare returns the FastFS
+    # location; the wallet records it on chain; finalize verifies that tx before
+    # any byte is written (no orphan files: the v0.4.6 reason for refusing).
+    wallet = not has_custodial_key(user)
 
     # FastFS + per-file keys (§5.1/§5.2): Shade fixes the FastFS relative path and
     # mints a RANDOM per-file key wrapped under the group key. The client encrypts
@@ -1066,12 +1239,16 @@ async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str)
         prep = resp.json()
     file_key = prep["file_key"]
     file_ref = prep["file_ref"]
+    expected_location = prep.get("location") if wallet else None
+    if wallet and not expected_location:
+        raise RuntimeError("Shade did not return an upload location; wallet uploads are unavailable")
 
     upload_id = str(uuid4())
     PENDING_UPLOADS[upload_id] = {
         "group_id": group_id,
         "filename": filename,
         "file_ref": file_ref,
+        "expected_location": expected_location,
         "user_id": user["near_account_id"],
         "user_email": user.get("email"),
         "wallet_id": user.get("wallet_id"),
@@ -1079,20 +1256,29 @@ async def prepare_upload(ctx: Context, user: dict, group_id: str, filename: str)
         "expires_at": time.time() + UPLOAD_EXPIRY_SECONDS,
     }
 
-    return {
+    out = {
         "upload_id": upload_id,
         "key": file_key,
         "group_id": group_id,
         "filename": filename
     }
+    if wallet:
+        out["location"] = expected_location
+    return out
 
 @expose_as_rest("/tools/finalize_upload")
 @require_auth
-async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str, format: dict | None = None) -> dict:
+async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_data: str, file_hash: str,
+                          format: dict | None = None, tx_hash: str | None = None) -> dict:
     cleanup_expired_uploads()
 
-    if not has_custodial_key(user):  # defence in depth (prepare_upload already refuses)
-        raise ValueError("Uploads are not supported for wallet/agent sessions yet")
+    wallet = not has_custodial_key(user)
+    if wallet and not tx_hash:
+        raise ValueError("Wallet uploads need tx_hash: record the upload with your wallet first")
+    if not wallet and tx_hash:
+        raise ValueError("tx_hash is only accepted from wallet sessions")
+    if wallet and not TX_HASH_RE.match(tx_hash):
+        raise ValueError("tx_hash is not a valid transaction hash")
 
     if upload_id not in PENDING_UPLOADS:
         raise ValueError("Invalid or expired upload_id")
@@ -1104,6 +1290,9 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
 
     if ctx_data["user_id"] != user["near_account_id"]:
         raise ValueError("Account mismatch - you do not own this upload")
+
+    if wallet:
+        return await _finalize_wallet_upload(user, upload_id, ctx_data, encrypted_data, file_hash, format, tx_hash)
 
     # FastFS write (§5.2): Shade signs the __fastdata envelope (as the KV-owner
     # signer) at the file_ref fixed in prepare_upload, and persists the format
@@ -1148,6 +1337,65 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
         "cid": location,   # back-compat alias: existing SDK reads result.cid
         "trans_id": trans_id,
         "file_hash": file_hash
+    }
+
+async def _finalize_wallet_upload(user: dict, upload_id: str, ctx_data: dict, encrypted_data: str,
+                                  file_hash: str, format: dict | None, tx_hash: str) -> dict:
+    """D2 (A) record-first finalize: verify the wallet's record_transaction on
+    chain, THEN write the ciphertext to the location it recorded."""
+    config = get_config(user["near_account_id"])
+    expected_location = ctx_data.get("expected_location")
+    if not expected_location:
+        raise ValueError("This upload was not prepared for a wallet session")
+
+    result = await _rpc_tx_status(tx_hash, user["near_account_id"])
+    trans_id = _check_wallet_record_tx(
+        result,
+        signer=user["near_account_id"],
+        contract_id=config["contract_id"],
+        expected_args={
+            "group_id": ctx_data["group_id"],
+            "user_id": ctx_data["user_id"],
+            "file_hash": file_hash,
+            "ipfs_hash": expected_location,
+            "backend": "FastFS",
+        },
+    )
+
+    # One record, one write: claim the upload before the write so a concurrent
+    # finalize with the same tx can't write twice. Restored if the write fails,
+    # so the client can retry within the upload's expiry.
+    PENDING_UPLOADS.pop(upload_id, None)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{SHADE_API_URL}/rpc/fastfs/finalize_upload",
+                json={
+                    "group_id": ctx_data["group_id"],
+                    "file_ref": ctx_data["file_ref"],
+                    "encrypted_b64": encrypted_data,
+                    "format": format,
+                },
+                headers={"X-Internal-Auth": INTERNAL_API_SECRET},
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Shade finalize_upload failed: {resp.status_code} - {resp.text[:200]}")
+        location = resp.json()["location"]
+    except Exception:
+        PENDING_UPLOADS[upload_id] = ctx_data
+        raise
+
+    if location != expected_location:
+        # Should be impossible (Shade fixed the path at prepare). Loud: the record
+        # points at expected_location but the bytes are elsewhere.
+        logger.error(f"wallet upload {upload_id}: location mismatch (recorded != written)")
+        raise RuntimeError("Upload written to a different location than recorded on chain")
+
+    return {
+        "location": location,
+        "cid": location,
+        "trans_id": trans_id,
+        "file_hash": file_hash,
     }
 
 @expose_as_rest("/tools/prepare_retrieve")
@@ -1309,7 +1557,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.8", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.11", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
