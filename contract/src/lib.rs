@@ -1,4 +1,4 @@
-// NOVA contract v0.3.7 - group-id validation (storage-prefix collision fix) + reader-gated member read path.
+// NOVA contract v0.3.8 - reader-gated member list.
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -215,7 +215,7 @@ impl Contract {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-                // v0.3.7 adds NO state field: the deployed layout is the current 17-field
+        // v0.3.7 and v0.3.8 add NO state field: the deployed layout is the current 17-field
         // Contract (owner … retention_windows), so this is an identity read and
         // the upgrade is code-only (no migrate call needed). Kept as the template
         // for the next layout change: copy the 17 fields into an OldContract,
@@ -657,6 +657,23 @@ impl Contract {
             }
         }
         out
+    }
+
+    /// Reader-gated member list (v0.3.8). Same gate and trust model as
+    /// `get_transactions_for_group_of`: the caller must be `self.owner` (MCP's
+    /// reader key, nova-sdk.near) AND `account_id` must be a current member. Lets
+    /// wallet-tier and Agent Connect sessions, which hold no custodial key, list a
+    /// private group's members. MCP passes only the account it verified from a
+    /// nova_session. Reads predecessor ⇒ not callable as a free `near view`.
+    pub fn get_group_members_of(&self, group_id: String, account_id: AccountId) -> Vec<AccountId> {
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner,
+            "Unauthorized: reader-gated view (owner only)"
+        );
+        // is_authorized panics "Group not found" for an unknown group.
+        assert!(self.is_authorized(group_id.clone(), account_id), "Unauthorized: not a member");
+        self.group_members.get(&group_id).expect("Group not found").iter().cloned().collect()
     }
 
     // Core idempotent tombstone — NO auth (callers authorize). Returns true iff
@@ -2197,3 +2214,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests/unit/v037.rs"]
 mod tests_v037;
+
+#[cfg(test)]
+#[path = "../tests/unit/v038.rs"]
+mod tests_v038;

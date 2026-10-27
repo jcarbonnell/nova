@@ -385,6 +385,39 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     );
     println!("✅ get_owned_groups_of rejects a non-owner signer (enumeration gate holds)");
 
+    // ── get_group_members_of (v0.3.8, reader-gated member list) ────────────
+    let members_of: Vec<Value> = owner_account
+        .call(contract.id(), "get_group_members_of")
+        .args_json(json!({ "group_id": "test_group_nova", "account_id": owner_account.id().to_string() }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?
+        .json()?;
+    assert_eq!(members_of.len(), 1, "revoked member is gone; owner is the sole member");
+    assert_eq!(members_of[0], owner_account.id().to_string());
+    println!("✅ get_group_members_of returns a private group's members to the reader");
+
+    // SECURITY INVARIANT: a non-owner signer is refused.
+    let refused = attacker
+        .call(contract.id(), "get_group_members_of")
+        .args_json(json!({ "group_id": "test_group_nova", "account_id": attacker.id().to_string() }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?;
+    assert!(refused.is_failure(), "non-owner caller MUST be rejected");
+    assert!(format!("{:?}", refused.failures()).contains("reader-gated view (owner only)"));
+
+    // The reader is refused for the revoked account.
+    let refused = owner_account
+        .call(contract.id(), "get_group_members_of")
+        .args_json(json!({ "group_id": "test_group_nova", "account_id": member_account.id().to_string() }))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?;
+    assert!(refused.is_failure(), "revoked account MUST be refused");
+    assert!(format!("{:?}", refused.failures()).contains("not a member"));
+    println!("✅ get_group_members_of refuses a non-owner signer and a revoked account");
+
     println!("\n🎉 All tests passed with nonce-based tokens and real Shade agent integration!");
 
     Ok(())
