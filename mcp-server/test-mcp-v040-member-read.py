@@ -93,12 +93,8 @@ async def main():
     check("G6 testnet wallet session → no reader call (no reader key on testnet)", not reader_calls)
 
     print("\nU — uploads from wallet/agent sessions refused up front:")
-    http_posts.clear(); before = dict(S.PENDING_UPLOADS)
-    try: await pu(None, agent, group_id="payer-acme", filename="x"); refused = False
-    except ValueError as e: refused = "not supported" in str(e)
-    check("U1 agent prepare_upload → refused", refused)
-    check("U2 … before ANY Shade/FastFS call", http_posts == [])
-    check("U3 … and no pending upload created", S.PENDING_UPLOADS == before)
+    # U1–U3 retired: they asserted the v0.4.6 refusal of wallet/agent uploads, replaced in
+    # v0.4.10/v0.4.11 by D2 (A) record-first uploads (covered by the path-A harness).
     http_posts.clear()
     r = await pu(None, custodial, group_id="payer-acme", filename="x")
     check("U4 custodial prepare_upload → proceeds to Shade as before", any("fastfs/prepare_upload" in u for u in http_posts) and r["key"] == "k")

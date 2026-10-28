@@ -414,8 +414,9 @@ async def get_reader_signer() -> Account:
     """Signer for owner-gated account views, as nova-sdk.near via the scoped
     reader FC key. Mainnet only (the views live on the mainnet contract). The
     FC key can only call get_owned_groups_of / get_member_groups_of /
-    get_transactions_for_group_of (v0.4.6, contract v0.3.7), so a full MCP
-    compromise reads group lists and members' file indexes, and nothing else."""
+    get_transactions_for_group_of / get_group_members_of (v0.4.12, contract
+    v0.3.8), so a full MCP compromise reads group lists, members' file indexes
+    and member lists, and nothing else."""
     if not READER_PRIVATE_KEY:
         raise ValueError("READER_PRIVATE_KEY not configured — reader views unavailable")
     config = CONFIG["mainnet"]
@@ -1505,9 +1506,17 @@ async def get_member_groups(ctx: Context, user: dict) -> list:
 @expose_as_rest("/tools/get_group_members")
 @require_auth
 async def get_group_members(ctx: Context, user: dict, group_id: str) -> list:
+    # §5.6: joinable groups → free unsigned public view; private groups → signed path.
     joinable = await view_contract(user, "is_group_joinable", {"group_id": group_id})
     if joinable:
         result = await view_contract(user, "get_group_members_public", {"group_id": group_id})
+    elif not has_custodial_key(user) and not get_config(user["near_account_id"])["is_testnet"]:
+        # v0.4.12: wallet/agent sessions cannot sign. Reader-gated view (contract
+        # v0.3.8): the contract checks the caller is the reader AND that the
+        # SESSION-VERIFIED account is a current member. Mainnet only (same rule
+        # as get_group_transactions).
+        result = await read_owner_gated_view(
+            "get_group_members_of", user["near_account_id"], {"group_id": group_id})
     else:
         result = await call_contract(user, "get_group_members", {"group_id": group_id}, "get_group_members")
     if isinstance(result, str):
@@ -1557,7 +1566,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.11", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.12", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

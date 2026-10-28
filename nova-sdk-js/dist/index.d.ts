@@ -6,6 +6,7 @@ export { encryptV0, decryptV0 } from './legacy/v0.js';
 export interface NovaSdkConfig {
     apiKey?: string;
     sessionToken?: string;
+    walletSigner?: NovaWalletSigner;
     authUrl?: string;
     rpcUrl?: string;
     contractId?: string;
@@ -45,6 +46,26 @@ export interface MemberWindow {
     expires_at_ms: number;
     set_at: string;
 }
+/** A contract call the SDK asks the user's wallet to sign and send (self-custodial mode). */
+export interface WalletFunctionCall {
+    receiverId: string;
+    methodName: string;
+    args: Record<string, unknown>;
+    gas: bigint;
+    deposit: bigint;
+}
+/**
+ * Self-custodial signer: the user's own wallet signs and pays for every contract
+ * write. NOVA never holds this key. Implementations live in the app (e.g. a
+ * wallet-selector adapter in the dashboard); the SDK only needs this shape.
+ */
+export interface NovaWalletSigner {
+    readonly accountId: string;
+    /** Sign, send, and wait for the call; resolve with the transaction hash. Reject if the user declines. */
+    signAndSendFunctionCall(call: WalletFunctionCall): Promise<{
+        txHash: string;
+    }>;
+}
 export interface AuthStatusResult {
     authenticated: boolean;
     near_account_id?: string;
@@ -57,6 +78,7 @@ export declare class NovaSdk {
     private apiKey;
     private injectedToken;
     private injectedTokenExpMs;
+    private walletSigner;
     readonly accountId: string;
     readonly contractId: string;
     readonly mcpUrl: string;
@@ -97,6 +119,9 @@ export declare class NovaSdk {
      * Useful if you get auth errors and want to retry with a fresh token.
      */
     refreshToken(): Promise<void>;
+    /** 'wallet' when contract writes are signed by the user's wallet, 'nova' otherwise. */
+    get signerMode(): 'wallet' | 'nova';
+    private walletCall;
     private detectNetwork;
     private isValidMainnetContract;
     getNetworkInfo(): {
