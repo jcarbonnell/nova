@@ -13,7 +13,7 @@
 //              the earlier file → retention set 30 → cleared
 //
 // RUN (from nova-sdk-js/, after `npm run build`):
-//   read -rs NOVA_API_KEY && export NOVA_API_KEY      # ironclaw-hackathon.near API key
+//   read -rs IH_API_KEY && export IH_API_KEY      # ironclaw-hackathon.near API key
 //   node test-d2a-wallet-smoke.mjs
 // Optional: SMOKE_GROUP (default d2-wallet-fixture), SMOKE_MEMBER (default gmail-14.nova-sdk.near)
 
@@ -30,8 +30,8 @@ const MCP_URL = process.env.MCP_URL
 const ACCOUNT = 'ironclaw-hackathon.near';
 const GROUP = process.env.SMOKE_GROUP || 'd2-wallet-fixture';
 const MEMBER = process.env.SMOKE_MEMBER || 'gmail-14.nova-sdk.near';
-const API_KEY = process.env.NOVA_API_KEY;
-if (!API_KEY) { console.error('Set NOVA_API_KEY (ironclaw-hackathon.near API key) via read -rs.'); process.exit(1); }
+const API_KEY = process.env.IH_API_KEY;
+if (!API_KEY) { console.error('Set IH_API_KEY (ironclaw-hackathon.near API key) via read -rs.'); process.exit(1); }
 
 // ── wallet signer: near-cli signs with the account's own key, we only parse the tx id ──
 const walletLog = [];

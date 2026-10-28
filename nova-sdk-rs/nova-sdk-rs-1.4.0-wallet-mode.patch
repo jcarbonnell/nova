@@ -1,0 +1,831 @@
+--- a/src/lib.rs	2026-10-28 11:31:34.075686859 +0100
++++ b/src/lib.rs	2026-10-28 11:31:34.077167490 +0100
+@@ -1,9 +1,11 @@
+-// nova-sdk-rs v1.3.0 - NOVA SDK in Rust
++// nova-sdk-rs v1.4.0 - NOVA SDK in Rust
+ use near_jsonrpc_client::{methods, JsonRpcClient};
+ use near_jsonrpc_primitives::types::query::QueryResponseKind as JsonRpcQueryResponseKind;
+ use near_primitives::types::{AccountId, Balance, BlockReference, Finality};
+ use near_primitives::views::QueryRequest;
+ use thiserror::Error;
++use std::future::Future;
++use std::pin::Pin;
+ use std::str::FromStr;
+ use std::sync::Arc;
+ use tokio::sync::RwLock;
+@@ -49,6 +51,9 @@
+     UnsupportedFormat(u32),
+     #[error("Invalid argument: {0}")]
+     InvalidArgument(String),
++    /// Self-custodial mode: the wallet declined, failed, or does not match the SDK account.
++    #[error("Wallet error: {0}")]
++    Wallet(String),
+ }
+ 
+ impl From<reqwest::Error> for NovaError {
+@@ -115,6 +120,40 @@
+     pub set_at: String,       // ISO 8601
+ }
+ 
++/// A contract call the SDK asks the user's wallet to sign and send (self-custodial mode).
++#[derive(Debug, Clone, PartialEq)]
++pub struct WalletFunctionCall {
++    pub receiver_id: String,
++    pub method_name: String,
++    pub args: serde_json::Value,
++    pub gas: u64,      // gas units
++    pub deposit: u128, // yoctoNEAR
++}
++
++/// Self-custodial signer: the user's own wallet signs and pays for every contract
++/// write. NOVA never holds this key. The app implements it (a local key, a wallet
++/// bridge, an HSM); the SDK only needs this shape. Mirror of nova-sdk-js
++/// `NovaWalletSigner`.
++pub trait NovaWalletSigner: Send + Sync {
++    /// The wallet's account. Must equal the SDK account.
++    fn account_id(&self) -> &str;
++    /// Sign, send, and wait for the call; resolve with the transaction hash.
++    /// Return Err if the user declines or the transaction fails.
++    fn sign_and_send_function_call<'a>(
++        &'a self,
++        call: WalletFunctionCall,
++    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
++}
++
++impl std::fmt::Debug for dyn NovaWalletSigner {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "NovaWalletSigner({})", self.account_id())
++    }
++}
++
++/// One ceiling for wallet-signed calls; unused gas is refunded.
++pub const WALLET_CALL_GAS: u64 = 100_000_000_000_000; // 100 Tgas
++
+ #[derive(Deserialize, Debug)]
+ pub struct AuthStatusResult {
+     pub authenticated: bool,
+@@ -129,6 +168,10 @@
+     key: String,
+     group_id: String,
+     filename: String,
++    /// Returned for wallet sessions: the FastFS location the wallet records
++    /// before any bytes are written.
++    #[serde(default)]
++    location: Option<String>,
+ }
+ 
+ #[derive(Deserialize, Debug)]
+@@ -196,6 +239,9 @@
+     /// the token. An expired injected token surfaces NovaError::Token rather than
+     /// falling through to minting.
+     pub session_token: Option<String>,
++    /// Self-custodial mode: contract writes are signed and paid by this wallet.
++    /// Its account must equal the SDK account. None ⇒ NOVA-signed (custodial) mode.
++    pub wallet_signer: Option<Arc<dyn NovaWalletSigner>>,
+     pub auth_url: String,
+     pub rpc_url: String,
+     pub contract_id: String,
+@@ -207,6 +253,7 @@
+         Self {
+             api_key: None,
+             session_token: None,
++            wallet_signer: None,
+             auth_url: DEFAULT_AUTH_URL.to_string(),
+             rpc_url: DEFAULT_RPC_URL.to_string(),
+             contract_id: DEFAULT_CONTRACT_ID.to_string(),
+@@ -221,6 +268,7 @@
+         Self {
+             api_key: None,
+             session_token: None,
++            wallet_signer: None,
+             auth_url: DEFAULT_AUTH_URL.to_string(),
+             rpc_url: "https://rpc.testnet.near.org".to_string(),
+             contract_id: "nova-sdk-7.testnet".to_string(),
+@@ -244,6 +292,12 @@
+         self.session_token = Some(session_token.to_string());
+         self
+     }
++
++    /// Self-custodial mode: the given wallet signs and pays every contract write.
++    pub fn with_wallet_signer(mut self, signer: Arc<dyn NovaWalletSigner>) -> Self {
++        self.wallet_signer = Some(signer);
++        self
++    }
+ }
+ 
+ // encryption/decryption helpers
+@@ -471,6 +525,7 @@
+     token_cache: Arc<RwLock<Option<TokenCache>>>,
+     injected_token: Option<String>,
+     injected_token_exp_ms: Option<u64>,  // ms; None ⇒ no decodable exp
++    wallet_signer: Option<Arc<dyn NovaWalletSigner>>,
+ }
+ 
+ impl NovaSdk {
+@@ -492,6 +547,14 @@
+         if account_id.is_empty() {
+             return Err(NovaError::Auth("account_id required: get yours at nova-sdk.com".to_string()));
+         }
++        if let Some(ref signer) = config.wallet_signer {
++            if signer.account_id() != account_id {
++                return Err(NovaError::Wallet(format!(
++                    "wallet_signer account ({}) does not match SDK account ({})",
++                    signer.account_id(), account_id
++                )));
++            }
++        }
+ 
+         let contract_id = AccountId::from_str(&config.contract_id)
+             .map_err(|_| NovaError::ParseAccount)?;
+@@ -536,6 +599,7 @@
+             token_cache: Arc::new(RwLock::new(None)),
+             injected_token,
+             injected_token_exp_ms,
++            wallet_signer: config.wallet_signer,
+         })
+     }
+ 
+@@ -758,6 +822,44 @@
+         &self.auth_url
+     }
+ 
++    /// "wallet" when contract writes are signed by the user's wallet, "nova" otherwise.
++    pub fn signer_mode(&self) -> &'static str {
++        if self.wallet_signer.is_some() { "wallet" } else { "nova" }
++    }
++
++    // Wallet-signed contract write. Fee is read live from the contract (never
++    // hard-coded); fee_action None ⇒ zero-fee method. Returns the tx hash.
++    async fn wallet_call(
++        &self,
++        method_name: &str,
++        args: serde_json::Value,
++        fee_action: Option<&str>,
++    ) -> Result<String, NovaError> {
++        let signer = self
++            .wallet_signer
++            .as_ref()
++            .ok_or_else(|| NovaError::Wallet("wallet_call without wallet_signer".to_string()))?;
++        let deposit = match fee_action {
++            Some(action) => self.estimate_fee(action).await?,
++            None => 0,
++        };
++        let call = WalletFunctionCall {
++            receiver_id: self.contract_id.to_string(),
++            method_name: method_name.to_string(),
++            args,
++            gas: WALLET_CALL_GAS,
++            deposit,
++        };
++        let rejected = |why: String| NovaError::Wallet(format!(
++            "Wallet transaction '{}' failed or was rejected: {}", method_name, why
++        ));
++        match signer.sign_and_send_function_call(call).await {
++            Ok(tx_hash) if !tx_hash.is_empty() => Ok(tx_hash),
++            Ok(_) => Err(rejected("wallet returned no transaction hash".to_string())),
++            Err(e) => Err(rejected(e)),
++        }
++    }
++
+     // Get network info for debugging
+     pub fn get_network_info(&self) -> (String, String, String, String) {
+         (
+@@ -849,9 +951,10 @@
+     }
+ 
+     /// List the members of a group. Routed through MCP because the underlying
+-    /// contract read is authorization-gated; an unauthorized caller is rejected
+-    /// by the contract and surfaced here as a NovaError. Caller must be
+-    /// authorized on the group.
++    /// contract read is authorization-gated: custodial sessions use the signed
++    /// read, wallet/Agent Connect sessions the reader-gated view (MCP v0.4.12,
++    /// contract v0.3.8). Joinable groups use the free public view. A non-member
++    /// is refused by the contract and surfaced here as a NovaError.
+     pub async fn get_group_members(&self, group_id: &str) -> Result<Vec<String>, NovaError> {
+         let args = json!({ "group_id": group_id });
+         self.call_mcp_tool("get_group_members", args).await
+@@ -859,6 +962,12 @@
+ 
+     /// Register a new group. Caller becomes owner.
+     pub async fn register_group(&self, group_id: &str) -> Result<String, NovaError> {
++        // Wallet mode: the wallet registers on chain first; MCP then checks the
++        // on-chain owner equals this session and creates the group key in the TEE.
++        if self.wallet_signer.is_some() {
++            self.wallet_call("register_group", json!({ "group_id": group_id }), Some("register_group"))
++                .await?;
++        }
+         let args = json!({ "group_id": group_id });
+         let v: serde_json::Value = self.call_mcp_tool("register_group", args).await?;
+         Ok(mcp_message(v, format!("Group '{}' registered successfully", group_id)))
+@@ -875,8 +984,10 @@
+     /// `access_minutes` (1..=525_600) sells a window, not a copy: NOVA revokes the
+     /// member about a minute after expiry (signed as the owner, inside the TEE) and
+     /// rotates the group key. Calling again for an existing member sets/extends the
+-    /// window. Requires a custodial owner (API key or email account); wallet
+-    /// sessions are refused by MCP. Mirror of nova-sdk-js `addGroupMember(…, { accessMinutes })`.
++    /// window. Requires a custodial owner (API key or email account): in wallet
++    /// mode the SDK refuses access_minutes before anything is signed, until
++    /// wallet-owned groups get contract-enforced member expiry. Mirror of
++    /// nova-sdk-js `addGroupMember(…, { accessMinutes })`.
+     pub async fn add_group_member_with_options(
+         &self,
+         group_id: &str,
+@@ -896,6 +1007,21 @@
+             }
+             args["access_minutes"] = json!(m);
+         }
++        if self.wallet_signer.is_some() {
++            // Windows need NOVA to revoke as the owner at expiry; a wallet owner has
++            // not granted that. Refuse BEFORE signing.
++            if options.access_minutes.is_some() {
++                return Err(NovaError::InvalidArgument(
++                    "access_minutes is not available for wallet-owned groups yet".to_string(),
++                ));
++            }
++            self.wallet_call(
++                "add_group_member",
++                json!({ "group_id": group_id, "user_id": member_id }),
++                Some("add_group_member"),
++            )
++            .await?;
++        }
+         let v: serde_json::Value = self.call_mcp_tool("add_group_member", args).await?;
+         Ok(mcp_message(v, format!("Added {} to group '{}'", member_id, group_id)))
+     }
+@@ -914,11 +1040,17 @@
+     /// Set (or clear, with None) a group's retention window in days (§6.1). Owner only.
+     /// None ⇒ no auto-expiry (the default). Configures the window only — deletes nothing.
+     pub async fn set_group_retention(&self, group_id: &str, retention_days: Option<u32>) -> Result<String, NovaError> {
++        // MCP FIRST in both modes: the group enters the retention registry before the
++        // window exists on chain, so the midnight sweep can never miss it. In wallet
++        // mode MCP only registers; the wallet then sets the window (zero-fee method).
+         let args = json!({
+             "group_id": group_id,
+             "retention_days": retention_days
+         });
+-        let v: serde_json::Value = self.call_mcp_tool("set_group_retention", args).await?;
++        let v: serde_json::Value = self.call_mcp_tool("set_group_retention", args.clone()).await?;
++        if self.wallet_signer.is_some() {
++            self.wallet_call("set_group_retention", args, None).await?;
++        }
+         Ok(mcp_message(v, match retention_days {
+             Some(d) => format!("Set retention for group '{}' to {} days", group_id, d),
+             None => format!("Cleared retention for group '{}'", group_id),
+@@ -932,6 +1064,12 @@
+         if let Ok(true) = self.is_authorized(group_id, None).await {
+             return Ok(format!("Already a member of '{}'", group_id));
+         }
++        if self.wallet_signer.is_some() {
++            // Joining has no NOVA-side effect; the wallet joins directly.
++            self.wallet_call("join_group", json!({ "group_id": group_id }), Some("join_group"))
++                .await?;
++            return Ok(format!("Joined group '{}'", group_id));
++        }
+         let args = json!({ "group_id": group_id });
+         // MCP returns result as a bare string ("Joined group '...'"), not an object.
+         let msg: String = self.call_mcp_tool("join_group", args).await?;
+@@ -940,6 +1078,16 @@
+ 
+     /// Revoke a member from a group (owner only, triggers key rotation).
+     pub async fn revoke_group_member(&self, group_id: &str, member_id: &str) -> Result<String, NovaError> {
++        // Wallet mode: revoke on chain first; MCP then checks the member is no longer
++        // authorized and rotates the group key (old key can't open new files).
++        if self.wallet_signer.is_some() {
++            self.wallet_call(
++                "revoke_group_member",
++                json!({ "group_id": group_id, "user_id": member_id }),
++                Some("revoke_group_member"),
++            )
++            .await?;
++        }
+         let args = json!({
+             "group_id": group_id,
+             "member_id": member_id
+@@ -951,10 +1099,11 @@
+     /// Upload a file with end-to-end encryption.
+     ///
+     /// Flow:
+-    /// 1. SDK calls prepare_upload to get encryption key
+-    /// 2. SDK encrypts data locally (AES-256-GCM)
+-    /// 3. SDK calls finalize_upload with encrypted data
+-    /// 4. MCP uploads to IPFS and records on NEAR
++    /// 1. SDK calls prepare_upload to get the per-file key (and, in wallet mode, the FastFS location)
++    /// 2. SDK encrypts data locally (AES-256-GCM, v1 format) and hashes the plaintext
++    /// 3. Wallet mode only: the wallet signs record_transaction at that location (record-first)
++    /// 4. SDK calls finalize_upload; MCP writes the bytes to FastFS. Custodial: MCP
++    ///    records on NEAR. Wallet: MCP first verifies the wallet's record tx on chain.
+     ///
+     /// # Arguments
+     /// * `group_id` - The group to upload to
+@@ -979,6 +1128,7 @@
+ 
+         let upload_id = prepare_result.upload_id;
+         let key = prepare_result.key;
++        let location = prepare_result.location;
+ 
+         // Step 2: Encode to the v1 format (optional deflate + v0 AES-GCM) with the
+         // per-file key. format is persisted by Shade and returned at retrieve.
+@@ -987,13 +1137,40 @@
+         // Step 3: Compute hash of PLAINTEXT (on-chain integrity anchor — unchanged).
+         let file_hash = Self::compute_hash(data);
+ 
++        // Wallet mode, record-first: the wallet records the upload on chain at the
++        // location MCP issued; finalize then verifies that tx on chain before any
++        // bytes are written. A declined signature stops here: nothing is stored.
++        let mut tx_hash: Option<String> = None;
++        if self.wallet_signer.is_some() {
++            let location = location.filter(|l| !l.is_empty()).ok_or_else(|| {
++                NovaError::Mcp("MCP returned no upload location; wallet uploads need a newer MCP".to_string())
++            })?;
++            tx_hash = Some(
++                self.wallet_call(
++                    "record_transaction",
++                    json!({
++                        "group_id": group_id,
++                        "user_id": self.account_id,
++                        "file_hash": file_hash,
++                        "ipfs_hash": location,
++                        "backend": "FastFS",
++                    }),
++                    Some("record_transaction"),
++                )
++                .await?,
++            );
++        }
++
+         // Step 4: Finalize upload
+-        let body = json!({
++        let mut body = json!({
+             "upload_id": upload_id,
+             "encrypted_data": bytes_b64,
+             "file_hash": file_hash,
+             "format": format,
+         });
++        if let Some(ref h) = tx_hash {
++            body["tx_hash"] = json!(h);
++        }
+         let finalize_result: FinalizeUploadResponse =
+             self.call_mcp_tool("finalize_upload", body).await?;
+ 
+@@ -1188,13 +1365,14 @@
+ 
+     /// get transactions for a group.
+     ///
+-    /// Routed through MCP (not direct RPC). The contract's get_transactions_for_group
+-    /// is #[payable] + gated (is_authorized || owner), so a free view call panics
+-    /// ("Attach at least … for fee"). MCP's get_group_transactions branches on
+-    /// joinability: a joinable group uses the free public view; a private group
+-    /// uses the signed, fee'd path (~0.0013 NEAR) and returns the list only to an
+-    /// authorized member. The `user_id` param is dropped — MCP derives identity from
+-    /// the verified session, so a caller can't query as another account.
++    /// Routed through MCP (not direct RPC): the contract read is gated, so a free
++    /// view call cannot return a private group's index. MCP branches on the group
++    /// and the session: a joinable group uses the free public view; a private group
++    /// uses the signed, fee'd path (~0.0013 NEAR) for custodial sessions, and the
++    /// free reader-gated view for wallet/Agent Connect sessions (MCP v0.4.6+).
++    /// Either way the list is returned only to a current member. There is no
++    /// `user_id` param: MCP derives identity from the verified session, so a
++    /// caller can't query as another account.
+     pub async fn get_transactions_for_group(
+         &self,
+         group_id: &str,
+@@ -2126,4 +2304,437 @@
+             assert!(matches!(r, Err(NovaError::InvalidArgument(_))), "bad={bad}: {r:?}");
+         }
+     }
+-}
+\ No newline at end of file
++}
++// ════════════════════════════════════════════════════════════════════════════
++// Deliverable 2 (A): self-custodial wallet-signer mode. Mirror of nova-sdk-js
++// tests/wallet-signer.test.ts. Offline: one local mock server answers both MCP
++// (/tools/*) and NEAR RPC (contract views), and a mock signer stands in for the
++// wallet. Every test asserts ONE ordered event log: `view:<method>`,
++// `wallet:<method>`, `mcp:<tool>`.
++// ════════════════════════════════════════════════════════════════════════════
++#[cfg(test)]
++mod wallet_tests {
++    use super::*;
++    use base64::Engine;
++    use std::collections::HashMap;
++    use std::sync::atomic::{AtomicBool, Ordering};
++    use std::sync::Mutex;
++    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++    const ACCOUNT: &str = "alice.near";
++    const KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
++    const LOCATION: &str = "nova-sdk.near/fastfs.near/test-group/abc123";
++
++    fn fee(action: &str) -> u128 {
++        match action {
++            "register_group" => 640_000_000_000_000_000_000_000,
++            "add_group_member" => 12_900_000_000_000_000_000,
++            "revoke_group_member" => 1_000_000_000_000_000_000,
++            "record_transaction" => 25_600_000_000_000_000_000,
++            "join_group" => 1_000_000_000_000_000_000,
++            _ => 0,
++        }
++    }
++
++    #[derive(Clone)]
++    struct Mock {
++        url: String,
++        events: Arc<Mutex<Vec<String>>>,
++        bodies: Arc<Mutex<HashMap<String, serde_json::Value>>>,
++        responses: Arc<Mutex<HashMap<String, serde_json::Value>>>,
++        authorized: Arc<AtomicBool>,
++    }
++
++    impl Mock {
++        fn events(&self) -> Vec<String> { self.events.lock().unwrap().clone() }
++        fn mcp_events(&self) -> Vec<String> {
++            self.events().into_iter().filter(|e| e.starts_with("mcp:")).collect()
++        }
++        fn body(&self, tool: &str) -> serde_json::Value {
++            self.bodies.lock().unwrap().get(tool).cloned().unwrap_or(serde_json::Value::Null)
++        }
++    }
++
++    fn default_responses() -> HashMap<String, serde_json::Value> {
++        let mut r = HashMap::new();
++        r.insert("register_group".into(), json!({ "result": "Group 'test-group' registered successfully" }));
++        r.insert("add_group_member".into(), json!({ "result": "Added bob.near to group 'test-group'" }));
++        r.insert("revoke_group_member".into(), json!({ "result": "Revoked bob.near from group 'test-group'" }));
++        r.insert("set_group_retention".into(), json!({ "result": "Set retention for group 'test-group' to 30 days" }));
++        r.insert("join_group".into(), json!({ "result": "Joined group 'open-group'" }));
++        r.insert("prepare_upload".into(), json!({ "result": {
++            "upload_id": "up-1", "key": KEY_B64, "group_id": "test-group",
++            "filename": "hello.txt", "location": LOCATION } }));
++        r.insert("finalize_upload".into(), json!({ "result": {
++            "location": LOCATION, "cid": LOCATION, "trans_id": "trans-1", "file_hash": "f".repeat(64) } }));
++        r
++    }
++
++    async fn read_request(sock: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
++        let mut buf = Vec::new();
++        let mut chunk = [0u8; 4096];
++        loop {
++            let n = sock.read(&mut chunk).await.unwrap();
++            if n == 0 { break; }
++            buf.extend_from_slice(&chunk[..n]);
++            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
++                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
++                let len = head.lines()
++                    .find_map(|l| {
++                        let l = l.to_ascii_lowercase();
++                        l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())
++                    })
++                    .unwrap_or(0);
++                while buf.len() < pos + 4 + len {
++                    let n = sock.read(&mut chunk).await.unwrap();
++                    if n == 0 { break; }
++                    buf.extend_from_slice(&chunk[..n]);
++                }
++                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
++                return (path, buf[pos + 4..pos + 4 + len].to_vec());
++            }
++        }
++        ("/".into(), Vec::new())
++    }
++
++    fn rpc_result(id: &serde_json::Value, bytes: Vec<u8>) -> serde_json::Value {
++        json!({ "jsonrpc": "2.0", "id": id, "result": {
++            "result": bytes, "logs": [], "block_height": 1,
++            "block_hash": "11111111111111111111111111111111" } })
++    }
++
++    async fn start_mock() -> Mock {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let mock = Mock {
++            url: format!("http://{}", listener.local_addr().unwrap()),
++            events: Arc::new(Mutex::new(Vec::new())),
++            bodies: Arc::new(Mutex::new(HashMap::new())),
++            responses: Arc::new(Mutex::new(default_responses())),
++            authorized: Arc::new(AtomicBool::new(false)),
++        };
++        let m = mock.clone();
++        tokio::spawn(async move {
++            loop {
++                let (mut sock, _) = listener.accept().await.unwrap();
++                let m = m.clone();
++                tokio::spawn(async move {
++                    let (path, body) = read_request(&mut sock).await;
++                    let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
++                    let (status, resp) = if let Some(tool) = path.strip_prefix("/tools/") {
++                        m.events.lock().unwrap().push(format!("mcp:{tool}"));
++                        m.bodies.lock().unwrap().insert(tool.to_string(), req);
++                        match m.responses.lock().unwrap().get(tool).cloned() {
++                            Some(r) => (200, r),
++                            None => (500, json!({ "error": format!("unexpected tool {tool}") })),
++                        }
++                    } else {
++                        let params = &req["params"];
++                        let method = params["method_name"].as_str().unwrap_or("?").to_string();
++                        m.events.lock().unwrap().push(format!("view:{method}"));
++                        let args: serde_json::Value = base64::engine::general_purpose::STANDARD
++                            .decode(params["args_base64"].as_str().unwrap_or(""))
++                            .ok()
++                            .and_then(|b| serde_json::from_slice(&b).ok())
++                            .unwrap_or(json!({}));
++                        let out = match method.as_str() {
++                            "estimate_fee" => fee(args["action"].as_str().unwrap_or("")).to_string(),
++                            "is_authorized" => m.authorized.load(Ordering::SeqCst).to_string(),
++                            _ => "null".to_string(),
++                        };
++                        (200, rpc_result(&req["id"], out.into_bytes()))
++                    };
++                    let text = resp.to_string();
++                    let reply = format!(
++                        "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
++                        status, text.len(), text
++                    );
++                    let _ = sock.write_all(reply.as_bytes()).await;
++                    let _ = sock.shutdown().await;
++                });
++            }
++        });
++        mock
++    }
++
++    struct MockSigner {
++        account: String,
++        events: Arc<Mutex<Vec<String>>>,
++        calls: Arc<Mutex<Vec<WalletFunctionCall>>>,
++        reject: bool,
++    }
++
++    impl NovaWalletSigner for MockSigner {
++        fn account_id(&self) -> &str { &self.account }
++        fn sign_and_send_function_call<'a>(
++            &'a self,
++            call: WalletFunctionCall,
++        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
++            Box::pin(async move {
++                self.events.lock().unwrap().push(format!("wallet:{}", call.method_name));
++                let method = call.method_name.clone();
++                self.calls.lock().unwrap().push(call);
++                if self.reject { Err("User rejected the request".to_string()) } else { Ok(format!("TX_{method}")) }
++            })
++        }
++    }
++
++    fn session_token() -> String {
++        let b64u = |s: String| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
++        let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
++        format!("{}.{}.sig",
++            b64u(r#"{"alg":"HS256","typ":"JWT"}"#.to_string()),
++            b64u(format!(r#"{{"account_id":"{ACCOUNT}","exp":{exp}}}"#)))
++    }
++
++    struct Harness {
++        sdk: NovaSdk,
++        mock: Mock,
++        calls: Arc<Mutex<Vec<WalletFunctionCall>>>,
++    }
++
++    impl Harness {
++        fn calls(&self) -> Vec<WalletFunctionCall> { self.calls.lock().unwrap().clone() }
++    }
++
++    async fn harness(wallet: bool, reject: bool) -> Harness {
++        let mock = start_mock().await;
++        let calls = Arc::new(Mutex::new(Vec::new()));
++        let mut config = NovaSdkConfig {
++            rpc_url: mock.url.clone(),
++            mcp_url: mock.url.clone(),
++            ..NovaSdkConfig::default()
++        }
++        .with_session_token(&session_token());
++        if wallet {
++            config = config.with_wallet_signer(Arc::new(MockSigner {
++                account: ACCOUNT.to_string(),
++                events: mock.events.clone(),
++                calls: calls.clone(),
++                reject,
++            }));
++        }
++        let sdk = NovaSdk::with_config(ACCOUNT, config).unwrap();
++        Harness { sdk, mock, calls }
++    }
++
++    fn ev(list: &[&str]) -> Vec<String> { list.iter().map(|s| s.to_string()).collect() }
++
++    // ── construction ────────────────────────────────────────────────────────
++
++    #[test]
++    fn rejects_a_signer_for_a_different_account() {
++        let signer = Arc::new(MockSigner {
++            account: "mallory.near".into(),
++            events: Arc::new(Mutex::new(Vec::new())),
++            calls: Arc::new(Mutex::new(Vec::new())),
++            reject: false,
++        });
++        let err = NovaSdk::with_config(ACCOUNT, NovaSdkConfig::default().with_wallet_signer(signer)).unwrap_err();
++        assert!(matches!(err, NovaError::Wallet(_)), "got {err:?}");
++        assert!(err.to_string().contains("does not match SDK account"), "got {err}");
++    }
++
++    #[tokio::test]
++    async fn signer_mode_reports_the_mode() {
++        assert_eq!(harness(true, false).await.sdk.signer_mode(), "wallet");
++        assert_eq!(harness(false, false).await.sdk.signer_mode(), "nova");
++    }
++
++    // ── owner operations ────────────────────────────────────────────────────
++
++    #[tokio::test]
++    async fn register_group_live_fee_then_wallet_then_mcp() {
++        let h = harness(true, false).await;
++        h.sdk.register_group("test-group").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&["view:estimate_fee", "wallet:register_group", "mcp:register_group"]));
++        let c = &h.calls()[0];
++        assert_eq!(c.receiver_id, "nova-sdk.near");
++        assert_eq!(c.args, json!({ "group_id": "test-group" }));
++        assert_eq!(c.deposit, fee("register_group"));
++        assert!(c.gas > 0);
++        assert_eq!(h.mock.body("register_group"), json!({ "group_id": "test-group" }));
++    }
++
++    #[tokio::test]
++    async fn register_group_declined_means_mcp_never_called() {
++        let h = harness(true, true).await;
++        let err = h.sdk.register_group("test-group").await.unwrap_err();
++        assert!(matches!(err, NovaError::Wallet(_)), "got {err:?}");
++        assert!(err.to_string().contains("register_group' failed or was rejected"), "got {err}");
++        assert!(h.mock.mcp_events().is_empty());
++    }
++
++    #[tokio::test]
++    async fn add_group_member_wallet_user_id_then_mcp_member_id() {
++        let h = harness(true, false).await;
++        h.sdk.add_group_member("test-group", "bob.near").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&["view:estimate_fee", "wallet:add_group_member", "mcp:add_group_member"]));
++        assert_eq!(h.calls()[0].args, json!({ "group_id": "test-group", "user_id": "bob.near" }));
++        assert_eq!(h.calls()[0].deposit, fee("add_group_member"));
++        assert_eq!(h.mock.body("add_group_member"), json!({ "group_id": "test-group", "member_id": "bob.near" }));
++    }
++
++    #[tokio::test]
++    async fn add_group_member_with_access_minutes_refused_before_any_call() {
++        let h = harness(true, false).await;
++        let err = h.sdk
++            .add_group_member_with_options("test-group", "bob.near", AddGroupMemberOptions { access_minutes: Some(60) })
++            .await
++            .unwrap_err();
++        assert!(err.to_string().contains("not available for wallet-owned groups"), "got {err}");
++        assert!(h.mock.events().is_empty(), "events: {:?}", h.mock.events());
++    }
++
++    #[tokio::test]
++    async fn revoke_group_member_wallet_then_mcp() {
++        let h = harness(true, false).await;
++        h.sdk.revoke_group_member("test-group", "bob.near").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&["view:estimate_fee", "wallet:revoke_group_member", "mcp:revoke_group_member"]));
++        assert_eq!(h.calls()[0].args, json!({ "group_id": "test-group", "user_id": "bob.near" }));
++        assert_eq!(h.calls()[0].deposit, fee("revoke_group_member"));
++    }
++
++    #[tokio::test]
++    async fn revoke_group_member_declined_means_no_rotation() {
++        let h = harness(true, true).await;
++        assert!(matches!(h.sdk.revoke_group_member("test-group", "bob.near").await, Err(NovaError::Wallet(_))));
++        assert!(h.mock.mcp_events().is_empty());
++    }
++
++    #[tokio::test]
++    async fn set_group_retention_mcp_registry_first_then_zero_fee_wallet() {
++        for days in [Some(30u32), None] {
++            let h = harness(true, false).await;
++            h.sdk.set_group_retention("test-group", days).await.unwrap();
++            assert_eq!(h.mock.events(), ev(&["mcp:set_group_retention", "wallet:set_group_retention"]), "days={days:?}");
++            assert_eq!(h.calls()[0].deposit, 0);
++            assert_eq!(h.calls()[0].args, json!({ "group_id": "test-group", "retention_days": days }));
++        }
++    }
++
++    // ── member operations ───────────────────────────────────────────────────
++
++    #[tokio::test]
++    async fn join_group_not_a_member_wallet_join_no_mcp() {
++        let h = harness(true, false).await;
++        h.mock.authorized.store(false, Ordering::SeqCst);
++        h.sdk.join_group("open-group").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&["view:is_authorized", "view:estimate_fee", "wallet:join_group"]));
++        assert_eq!(h.calls()[0].deposit, fee("join_group"));
++    }
++
++    #[tokio::test]
++    async fn join_group_already_a_member_no_wallet_prompt() {
++        let h = harness(true, false).await;
++        h.mock.authorized.store(true, Ordering::SeqCst);
++        assert!(h.sdk.join_group("open-group").await.unwrap().contains("Already a member"));
++        assert_eq!(h.mock.events(), ev(&["view:is_authorized"]));
++    }
++
++    // ── upload (record-first) ───────────────────────────────────────────────
++
++    #[tokio::test]
++    async fn upload_prepare_fee_wallet_record_then_finalize_with_tx_hash() {
++        let h = harness(true, false).await;
++        let data = b"Hello NOVA!";
++        let plain_hash = NovaSdk::compute_hash(data);
++        let res = h.sdk.upload("test-group", data, "hello.txt").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&[
++            "mcp:prepare_upload", "view:estimate_fee", "wallet:record_transaction", "mcp:finalize_upload",
++        ]));
++        assert_eq!(h.calls()[0].args, json!({
++            "group_id": "test-group", "user_id": ACCOUNT, "file_hash": plain_hash,
++            "ipfs_hash": LOCATION, "backend": "FastFS",
++        }));
++        assert_eq!(h.calls()[0].deposit, fee("record_transaction"));
++        let fin = h.mock.body("finalize_upload");
++        assert_eq!(fin["upload_id"], "up-1");
++        assert_eq!(fin["file_hash"], plain_hash);
++        assert_eq!(fin["tx_hash"], "TX_record_transaction");
++        assert_eq!(res.cid, LOCATION);
++        assert_eq!(res.trans_id, "trans-1");
++    }
++
++    #[tokio::test]
++    async fn upload_declined_means_finalize_never_called() {
++        let h = harness(true, true).await;
++        let err = h.sdk.upload("test-group", b"Hello NOVA!", "hello.txt").await.unwrap_err();
++        assert!(err.to_string().contains("record_transaction' failed or was rejected"), "got {err}");
++        assert!(!h.mock.events().contains(&"mcp:finalize_upload".to_string()));
++    }
++
++    /// A wallet that "succeeds" without a transaction hash must not let finalize run
++    /// (finalize verifies the record by that hash; an empty one would skip the gate).
++    struct EmptyHashSigner { events: Arc<Mutex<Vec<String>>> }
++    impl NovaWalletSigner for EmptyHashSigner {
++        fn account_id(&self) -> &str { ACCOUNT }
++        fn sign_and_send_function_call<'a>(
++            &'a self,
++            call: WalletFunctionCall,
++        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
++            Box::pin(async move {
++                self.events.lock().unwrap().push(format!("wallet:{}", call.method_name));
++                Ok(String::new())
++            })
++        }
++    }
++
++    #[tokio::test]
++    async fn upload_wallet_without_tx_hash_means_finalize_never_called() {
++        let mock = start_mock().await;
++        let config = NovaSdkConfig { rpc_url: mock.url.clone(), mcp_url: mock.url.clone(), ..NovaSdkConfig::default() }
++            .with_session_token(&session_token())
++            .with_wallet_signer(Arc::new(EmptyHashSigner { events: mock.events.clone() }));
++        let sdk = NovaSdk::with_config(ACCOUNT, config).unwrap();
++        let err = sdk.upload("test-group", b"Hello NOVA!", "hello.txt").await.unwrap_err();
++        assert!(matches!(err, NovaError::Wallet(_)), "got {err:?}");
++        assert!(err.to_string().contains("no transaction hash"), "got {err}");
++        assert!(!mock.events().contains(&"mcp:finalize_upload".to_string()));
++    }
++
++    #[tokio::test]
++    async fn upload_without_location_refused_before_the_wallet_prompt() {
++        let h = harness(true, false).await;
++        h.mock.responses.lock().unwrap().insert("prepare_upload".into(), json!({ "result": {
++            "upload_id": "up-1", "key": KEY_B64, "group_id": "test-group", "filename": "hello.txt" } }));
++        let err = h.sdk.upload("test-group", b"Hello NOVA!", "hello.txt").await.unwrap_err();
++        assert!(err.to_string().contains("no upload location"), "got {err}");
++        assert_eq!(h.mock.events(), ev(&["mcp:prepare_upload"]));
++    }
++
++    // ── regression: NOVA-signed mode is unchanged ────────────────────────────
++
++    #[tokio::test]
++    async fn nova_mode_upload_no_fee_view_no_tx_hash() {
++        let h = harness(false, false).await;
++        h.sdk.upload("test-group", b"x", "x.txt").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&["mcp:prepare_upload", "mcp:finalize_upload"]));
++        assert!(h.mock.body("finalize_upload").get("tx_hash").is_none());
++    }
++
++    #[tokio::test]
++    async fn nova_mode_owner_and_member_ops_go_straight_to_mcp() {
++        let h = harness(false, false).await;
++        h.sdk.register_group("test-group").await.unwrap();
++        h.sdk.add_group_member("test-group", "bob.near").await.unwrap();
++        h.sdk.revoke_group_member("test-group", "bob.near").await.unwrap();
++        h.sdk.set_group_retention("test-group", Some(30)).await.unwrap();
++        h.mock.authorized.store(false, Ordering::SeqCst);
++        h.sdk.join_group("open-group").await.unwrap();
++        assert_eq!(h.mock.events(), ev(&[
++            "mcp:register_group", "mcp:add_group_member", "mcp:revoke_group_member",
++            "mcp:set_group_retention", "view:is_authorized", "mcp:join_group",
++        ]));
++    }
++
++    #[tokio::test]
++    async fn nova_mode_access_minutes_still_allowed() {
++        let h = harness(false, false).await;
++        h.sdk
++            .add_group_member_with_options("test-group", "bob.near", AddGroupMemberOptions { access_minutes: Some(60) })
++            .await
++            .unwrap();
++        assert_eq!(h.mock.body("add_group_member"),
++            json!({ "group_id": "test-group", "member_id": "bob.near", "access_minutes": 60 }));
++    }
++}

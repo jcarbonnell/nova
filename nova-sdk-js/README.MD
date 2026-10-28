@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -13,7 +13,8 @@ A JavaScript/TypeScript SDK for NOVA's secure, decentralized file-sharing primit
 - 🌐 **FastFS Storage** - File data on NEAR via FastFS (FastNear); legacy IPFS reads preserved
 - ⛓️ **NEAR Blockchain** - Immutable access control & transaction logs
 - 🛡️ **API Key Auth** - Secure authentication via API keys (get yours at nova-sdk.com)
-- 🔑 **Automated Signing** - MCP server signs transactions using keys from Shade TEE
+- 🔑 **Automated Signing** - For NOVA accounts, MCP signs transactions using keys from the Shade TEE
+- 👛 **Self-Custodial Wallet Mode** - Bring your own NEAR wallet: it signs and pays every contract write; NOVA never holds the key
 - 👥 **Group Management** - Fine-grained membership with automatic key rotation on revocation
 - 🔑 **Per-File Keys** - Each file encrypted with its own key; deletion crypto-shreds it (permanently undecryptable)
 - ⏳ **Retention** - Optional per-group retention windows for time-based deletion
@@ -102,6 +103,43 @@ const sdk = new NovaSdk('alice.nova-sdk.near', {
 });
 ```
 
+## 👛 Self-Custodial Wallet Mode
+
+Pass a `walletSigner` and every contract write goes to **your own wallet** to sign and pay. NOVA never holds the key. Your session (`apiKey` or `sessionToken`) still identifies you to MCP; the wallet signs.
+
+```typescript
+import { NovaSdk, NovaWalletSigner } from 'nova-sdk-js';
+
+// Any wallet can back this: wallet-selector in a browser, a local key in a script.
+const walletSigner: NovaWalletSigner = {
+  accountId: 'alice.near',              // must equal the SDK account
+  async signAndSendFunctionCall(call) { // { receiverId, methodName, args, gas, deposit }
+    const txHash = await myWallet.signAndSend(call); // sign, send, wait; reject if declined
+    return { txHash };
+  },
+};
+
+const sdk = new NovaSdk('alice.near', { apiKey: process.env.NOVA_API_KEY, walletSigner });
+sdk.signerMode; // 'wallet'
+```
+
+| SDK call | Your wallet signs | Then NOVA |
+|---|---|---|
+| `registerGroup` | `register_group` | checks the on-chain owner is you, creates the group key in the TEE |
+| `addGroupMember` | `add_group_member` | — |
+| `revokeGroupMember` | `revoke_group_member` | checks the member is gone on chain, rotates the group key |
+| `upload` | `record_transaction` (record-first) | verifies that transaction on chain, then writes the bytes |
+| `setGroupRetention` | `set_group_retention` (zero fee) | registers the group for the retention sweep *before* you sign |
+| `joinGroup` | `join_group` | — |
+
+Reads (`retrieve`, member and group lists, transactions) need no signature.
+
+- **Fees** are read live from the contract (`estimateFee`) and attached by your wallet, plus gas (100 Tgas ceiling, unused gas refunded).
+- **Declining** a signature throws a `NovaError` and nothing happens on NOVA's side: no group key, no rotation, no bytes stored.
+- **Uploads** are refused unless the on-chain record was signed by your account for this file.
+- **Not yet available** for wallet-owned groups: `accessMinutes` (refused before anything is signed).
+- The signer must be for the SDK account; a signer for another account is rejected at construction.
+
 
 ## 📖 Core Operations
 
@@ -133,7 +171,7 @@ await sdk.addGroupMember('team-files', 'carol.nova-sdk.near');
 
 // Time-limited access: NOVA revokes dave ~1 minute after 60 minutes and rotates
 // the group key. Calling again for an existing member sets/extends the window.
-// Requires a custodial owner (API-key or email account).
+// Requires a custodial owner (API-key or email account); not yet available in wallet mode.
 await sdk.addGroupMember('team-files', 'dave.nova-sdk.near', { accessMinutes: 60 });
 
 // Read a member's window (owner only); null = permanent member / no window
@@ -153,7 +191,7 @@ await sdk.joinGroup('hackathon-group-id');
 
 ### Read-Only Queries
 
-These don't require authentication:
+These don't require authentication (except `getTransactionsForGroup`, which goes through MCP and returns the index only to a current member):
 ```typescript
 // Account balance
 const balance = await sdk.getBalance();
@@ -179,6 +217,15 @@ const fee = await sdk.estimateFee('register_group');
 4. Shade signs a FastFS envelope (data lands on NEAR); MCP records the location on-chain
 5. Returns: { cid, trans_id, file_hash } // cid is now a FastFS location
 ```
+
+In wallet mode the record comes first:
+```
+1. prepare_upload → per-file key + the FastFS location
+2. SDK encrypts locally and hashes the plaintext
+3. Your wallet signs record_transaction(group, you, hash, location)
+4. finalize_upload(tx_hash) → MCP checks that transaction on chain, then writes the bytes
+```
+A declined signature stops at step 3: nothing is stored.
 
 ### Retrieve Flow
 ```
@@ -258,7 +305,7 @@ try {
 
 ## Costs (Mainnet)
 
-Some operations require NEAR token deposits (paid from user's NOVA account):
+Some operations require NEAR token deposits (paid from your NOVA account; in wallet mode, by your wallet, which also pays gas):
 
 - `registerGroup()` - ~0.64 NEAR
 - `addGroupMember()` - ~0.0000129 NEAR
@@ -266,7 +313,9 @@ Some operations require NEAR token deposits (paid from user's NOVA account):
 - `upload()` - ~0.039 NEAR (claim token + record Tx)
 - `retrieve()` - ~0.013 NEAR (claim only)
 
-Ensure your NOVA account has sufficient balance before calling these methods.
+In wallet mode, `upload()` costs the `record_transaction` fee (~0.0000256 NEAR at the time of writing) plus gas, and `setGroupRetention()` costs gas only.
+
+Ensure your NOVA account (or wallet) has sufficient balance before calling these methods.
 
 ## API Reference
 
@@ -274,6 +323,8 @@ Ensure your NOVA account has sufficient balance before calling these methods.
 ```typescript
 new NovaSdk(accountId: string, config?: NovaSdkConfig)
 ```
+
+`NovaSdkConfig`: `apiKey`, `sessionToken`, `walletSigner`, `rpcUrl`, `contractId`, `mcpUrl`, `authUrl`.
 
 ### Methods
 
@@ -300,6 +351,7 @@ new NovaSdk(accountId: string, config?: NovaSdkConfig)
 | `refreshToken()` | Force token refresh |
 | `computeHash(data)` | SHA-256 hash (sync) |
 | `computeHashAsync(data)` | SHA-256 hash (async) |
+| `signerMode` | `'wallet'` when a `walletSigner` is configured, `'nova'` otherwise |
 
 ## License
 

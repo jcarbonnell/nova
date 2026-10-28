@@ -82,6 +82,13 @@ class NovaSdk {
      *   rpcUrl: 'https://rpc.mainnet.near.org',
      *   contractId: 'nova-sdk.near',
      * });
+     *
+     * @example
+     * // Self-custodial: the user's wallet signs and pays every contract write
+     * const sdk = new NovaSdk('alice.near', {
+     *   apiKey: process.env.NOVA_API_KEY,
+     *   walletSigner, // { accountId: 'alice.near', signAndSendFunctionCall(call) }
+     * });
      */
     constructor(accountId, config = {}) {
         if (!accountId || typeof accountId !== 'string') {
@@ -324,9 +331,10 @@ class NovaSdk {
         return this.callMcpTool('get_member_groups', {});
     }
     // List the members of a group. Routed through MCP because the underlying
-    // contract read is authorization-gated; an unauthorized caller is rejected by
-    // the contract and surfaced here as a NovaError. Caller must be authorized
-    // on the group.
+    // contract read is authorization-gated: custodial sessions use the signed read,
+    // wallet/Agent Connect sessions the reader-gated view (MCP v0.4.12, contract
+    // v0.3.8). Joinable groups use the free public view. A non-member is refused by
+    // the contract and surfaced here as a NovaError.
     async getGroupMembers(groupId) {
         return this.callMcpTool('get_group_members', { group_id: groupId });
     }
@@ -348,8 +356,9 @@ class NovaSdk {
      * options.accessMinutes (1..525600) sells a WINDOW, not a copy: NOVA revokes the
      * member about a minute after expiry (signed as the owner, inside the TEE) and
      * rotates the group key. Calling again for an existing member sets/extends the
-     * window. Requires a custodial owner (API key or email account); wallet sessions
-     * are refused by MCP.
+     * window. Requires a custodial owner (API key or email account): in wallet mode the
+     * SDK refuses accessMinutes before anything is signed, until wallet-owned groups get
+     * contract-enforced member expiry.
      */
     async addGroupMember(groupId, memberId, options = {}) {
         const args = { group_id: groupId, member_id: memberId };
@@ -448,10 +457,11 @@ class NovaSdk {
      * Upload a file with end-to-end encryption
      *
      * Flow:
-     * 1. SDK calls prepare_upload to get encryption key
-     * 2. SDK encrypts data locally (AES-256-GCM)
-     * 3. SDK calls finalize_upload with encrypted data
-     * 4. MCP uploads to IPFS and records on NEAR
+     * 1. SDK calls prepare_upload to get the per-file key (and, in wallet mode, the FastFS location)
+     * 2. SDK encrypts data locally (AES-256-GCM, v1 format) and hashes the plaintext
+     * 3. Wallet mode only: the wallet signs record_transaction at that location (record-first)
+     * 4. SDK calls finalize_upload; MCP writes the bytes to FastFS. Custodial: MCP records
+     *    on NEAR. Wallet: MCP first verifies the wallet's record tx on chain.
      *
      * @param groupId - The group to upload to
      * @param data - Raw file data as Buffer
@@ -616,13 +626,14 @@ class NovaSdk {
             throw new errors_js_2.NovaError(`Fee estimate error: ${e}`, e);
         }
     }
-    // Routed through MCP (not direct RPC). The contract's get_transactions_for_group
-    // is #[payable] + gated (is_authorized || owner), so a free view call panics
-    // ("Attach at least … for fee"). MCP's get_group_transactions branches on
-    // joinability: a joinable group uses the free public view; a private group uses
-    // the signed, fee'd path (~0.0013 NEAR) and returns the list only to an
-    // authorized member. The `userId` param is dropped — MCP derives identity from
-    // the verified session, so a caller can't query as another account.
+    // Routed through MCP (not direct RPC): the contract read is gated, so a free view
+    // call cannot return a private group's index. MCP branches on the group and the
+    // session: a joinable group uses the free public view; a private group uses the
+    // signed, fee'd path (~0.0013 NEAR) for custodial sessions, and the free
+    // reader-gated view for wallet/Agent Connect sessions (MCP v0.4.6+). Either way
+    // the list is returned only to a current member. There is no `userId` param: MCP
+    // derives identity from the verified session, so a caller can't query as another
+    // account.
     async getTransactionsForGroup(groupId) {
         return this.callMcpTool('get_group_transactions', { group_id: groupId });
     }

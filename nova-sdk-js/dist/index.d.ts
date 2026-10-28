@@ -105,6 +105,13 @@ export declare class NovaSdk {
      *   rpcUrl: 'https://rpc.mainnet.near.org',
      *   contractId: 'nova-sdk.near',
      * });
+     *
+     * @example
+     * // Self-custodial: the user's wallet signs and pays every contract write
+     * const sdk = new NovaSdk('alice.near', {
+     *   apiKey: process.env.NOVA_API_KEY,
+     *   walletSigner, // { accountId: 'alice.near', signAndSendFunctionCall(call) }
+     * });
      */
     constructor(accountId: string, config?: NovaSdkConfig);
     /**
@@ -144,8 +151,9 @@ export declare class NovaSdk {
      * options.accessMinutes (1..525600) sells a WINDOW, not a copy: NOVA revokes the
      * member about a minute after expiry (signed as the owner, inside the TEE) and
      * rotates the group key. Calling again for an existing member sets/extends the
-     * window. Requires a custodial owner (API key or email account); wallet sessions
-     * are refused by MCP.
+     * window. Requires a custodial owner (API key or email account): in wallet mode the
+     * SDK refuses accessMinutes before anything is signed, until wallet-owned groups get
+     * contract-enforced member expiry.
      */
     addGroupMember(groupId: string, memberId: string, options?: AddGroupMemberOptions): Promise<string>;
     /** Read a member's access window (group owner only). null when the member has none. */
@@ -165,10 +173,11 @@ export declare class NovaSdk {
      * Upload a file with end-to-end encryption
      *
      * Flow:
-     * 1. SDK calls prepare_upload to get encryption key
-     * 2. SDK encrypts data locally (AES-256-GCM)
-     * 3. SDK calls finalize_upload with encrypted data
-     * 4. MCP uploads to IPFS and records on NEAR
+     * 1. SDK calls prepare_upload to get the per-file key (and, in wallet mode, the FastFS location)
+     * 2. SDK encrypts data locally (AES-256-GCM, v1 format) and hashes the plaintext
+     * 3. Wallet mode only: the wallet signs record_transaction at that location (record-first)
+     * 4. SDK calls finalize_upload; MCP writes the bytes to FastFS. Custodial: MCP records
+     *    on NEAR. Wallet: MCP first verifies the wallet's record tx on chain.
      *
      * @param groupId - The group to upload to
      * @param data - Raw file data as Buffer
