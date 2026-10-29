@@ -1,6 +1,6 @@
 [package]
 name = "nova"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 repository = "https://github.com/jcarbonnell/nova"
 

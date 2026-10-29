@@ -1,4 +1,4 @@
-// NOVA contract v0.3.8 - reader-gated member list.
+// NOVA contract v0.3.9 - bounded write inputs (storage-drain fix).
 use near_sdk::{env, log, near, AccountId, BorshStorageKey, PanicOnDefault, Promise};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::store::{LookupMap, Vector as StoreVec, IterableMap};
@@ -164,6 +164,30 @@ fn assert_valid_group_id(group_id: &str) {
     assert!(ok, "Invalid group_id: use 1-64 characters from [A-Za-z0-9._-]");
 }
 
+/// v0.3.9: every string a caller can make the contract STORE is bounded. NEAR charges
+/// storage to the contract's own balance and no method charges the caller for it, so
+/// an unbounded string let any member lock the contract's free balance with one
+/// transaction (~4 MB of args) until every write failed (LackBalanceForState).
+/// Fees cover the bounded worst case (set with set_fee after deploy).
+pub const FILE_HASH_HEX_LEN: usize = 64;   // SHA-256, hex
+pub const MAX_LOCATION_BYTES: usize = 160; // FastFS location (~127 mainnet, ~135 testnet) or legacy CID (<60)
+pub const MAX_CHECKSUM_HEX_LEN: usize = 64; // 32 bytes, hex
+pub const MAX_NONCE_BYTES: usize = 64;
+
+fn assert_valid_file_hash(file_hash: &str) {
+    assert!(
+        file_hash.len() == FILE_HASH_HEX_LEN && file_hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Invalid file_hash: expected 64 hex characters (SHA-256)"
+    );
+}
+
+fn assert_valid_location(location: &str) {
+    assert!(
+        !location.is_empty() && location.len() <= MAX_LOCATION_BYTES,
+        "Invalid ipfs_hash: expected 1-160 bytes"
+    );
+}
+
 #[derive(Serialize)]
 #[serde(tag = "event_type", content = "data")]
 enum NovaEvent {
@@ -215,7 +239,7 @@ impl Contract {
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
-        // v0.3.7 and v0.3.8 add NO state field: the deployed layout is the current 17-field
+        // v0.3.7, v0.3.8 and v0.3.9 add NO state field: the deployed layout is the current 17-field
         // Contract (owner … retention_windows), so this is an identity read and
         // the upgrade is code-only (no migrate call needed). Kept as the template
         // for the next layout change: copy the 17 fields into an OldContract,
@@ -852,6 +876,9 @@ impl Contract {
 
     #[payable]
     pub fn record_transaction(&mut self, group_id: String, user_id: AccountId, file_hash: String, ipfs_hash: String, backend: Option<StorageBackend>) -> String {
+        // v0.3.9: bounded inputs, checked before anything else (no fee, no storage).
+        assert_valid_file_hash(&file_hash);
+        assert_valid_location(&ipfs_hash);
         let attached = env::attached_deposit().as_yoctonear();
         self.collect_fee("record_transaction", attached);
         
@@ -945,7 +972,11 @@ impl Contract {
         let group = self.groups.get(&group_id).expect("Group not found");
         assert_eq!(caller, group.owner, "Only group owner can update checksum");
         if let Some(group) = self.groups.get_mut(&group_id) {  // get_mut for mutable ref
-            // Optional: Validate hex (32 bytes)
+            // v0.3.9: bounded (at most 32 bytes as hex), then valid hex.
+            assert!(
+                !checksum.is_empty() && checksum.len() <= MAX_CHECKSUM_HEX_LEN,
+                "Invalid checksum: expected 1-64 hex characters"
+            );
             hex::decode(&checksum).expect("Invalid hex checksum");
             group.shade_checksum = Some(checksum.clone());
             log!("Updated checksum for {}: {}", group_id, checksum);
@@ -970,6 +1001,10 @@ impl Contract {
     }
 
     pub fn register_shade_worker(&mut self, worker_id: AccountId, attestation: Vec<u8>) {
+        // v0.3.9: was callable by anyone, with no fee, storing one entry per call.
+        let caller = env::predecessor_account_id();
+        assert!(caller == self.owner || caller == self.shade_contract_id,
+            "Only owner or Shade contract can register workers");
         let _expected_hash = self.shade_code_hash.as_ref().expect("No code hash approved");
         // Simplified verify (in local ac-proxy: assume valid; prod: integrate phala-sdk for TEE quote)
         let checksum = hex::encode(env::sha256(&attestation));
@@ -1001,6 +1036,8 @@ impl Contract {
         let payload_group_id = payload["group_id"].as_str().expect("Missing group_id");
         let payload_user_id = payload["user_id"].as_str().expect("Missing user_id");
         let nonce = payload["nonce"].as_str().expect("Missing nonce");
+        // v0.3.9: the nonce is stored (used_nonces key): bound it.
+        assert!(nonce.len() <= MAX_NONCE_BYTES, "Invalid nonce: at most 64 bytes");
         let timestamp = payload["timestamp"].as_u64().expect("Missing timestamp");
         
         // Validate group_id matches
@@ -1247,16 +1284,16 @@ mod tests {
         let trans_id = contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
-            "file_hash".to_string(),
-            "ipfs_hash".to_string(),
+            "aa".repeat(32),
+            "nova-sdk.near/fastfs.near/x/1".to_string(),
             None,
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0]["group_id"], "test_group");
         assert_eq!(transactions[0]["user_id"], member.to_string());
-        assert_eq!(transactions[0]["file_hash"], "file_hash");
-        assert_eq!(transactions[0]["ipfs_hash"], "ipfs_hash");
+        assert_eq!(transactions[0]["file_hash"], "aa".repeat(32));
+        assert_eq!(transactions[0]["ipfs_hash"], "nova-sdk.near/fastfs.near/x/1");
         assert!(contract.transactions.contains_key(&trans_id));
     }
 
@@ -1278,8 +1315,8 @@ mod tests {
         let trans_id = contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
-            "file_hash".to_string(),
-            "ipfs_hash".to_string(),
+            "aa".repeat(32),
+            "nova-sdk.near/fastfs.near/x/1".to_string(),
             None,
         );
         assert!(contract.transactions.contains_key(&trans_id));
@@ -1301,8 +1338,8 @@ mod tests {
         contract.record_transaction(
             "test_group".to_string(),
             non_member,
-            "file_hash".to_string(),
-            "ipfs_hash".to_string(),
+            "aa".repeat(32),
+            "nova-sdk.near/fastfs.near/x/1".to_string(),
             None,
         );
     }
@@ -1322,21 +1359,21 @@ mod tests {
         contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
-            "file_hash1".to_string(),
-            "ipfs_hash1".to_string(),
+            "11".repeat(32),
+            "loc-1".to_string(),
             None,
         );
         contract.record_transaction(
             "test_group".to_string(),
             member.clone(),
-            "file_hash2".to_string(),
-            "ipfs_hash2".to_string(),
+            "22".repeat(32),
+            "loc-2".to_string(),
             None,
         );
         let transactions = contract.get_transactions_for_group("test_group".to_string());
         assert_eq!(transactions.len(), 2);
-        assert!(transactions.iter().any(|tx| tx["file_hash"] == "file_hash1" && tx["ipfs_hash"] == "ipfs_hash1"));
-        assert!(transactions.iter().any(|tx| tx["file_hash"] == "file_hash2" && tx["ipfs_hash"] == "ipfs_hash2"));
+        assert!(transactions.iter().any(|tx| tx["file_hash"] == "11".repeat(32) && tx["ipfs_hash"] == "loc-1"));
+        assert!(transactions.iter().any(|tx| tx["file_hash"] == "22".repeat(32) && tx["ipfs_hash"] == "loc-2"));
     }
 
     #[test]
@@ -2096,8 +2133,8 @@ mod tests {
         contract.record_transaction(
             "hack".to_string(),
             owner.clone(),
-            "fh1".to_string(),
-            "ih1".to_string(),
+            "f1".repeat(32),
+            "loc-1".to_string(),
             None,
         );
 
@@ -2218,3 +2255,7 @@ mod tests_v037;
 #[cfg(test)]
 #[path = "../tests/unit/v038.rs"]
 mod tests_v038;
+
+#[cfg(test)]
+#[path = "../tests/unit/v039.rs"]
+mod tests_v039;
