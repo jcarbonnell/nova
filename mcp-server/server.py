@@ -78,7 +78,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.11 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.12 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -728,9 +728,10 @@ def _validate_access_minutes(access_minutes) -> int:
 # come from the contract, and an upload's record tx is fetched from the chain
 # and matched field by field against what this upload_id was issued.
 #
-# Agents (Agent Connect wallets) also have wallet sessions, but cannot sign
-# contract calls, so they can never become on-chain owners: every owner-side
-# branch below is gated on get_group_owner == session account.
+# Agents (Agent Connect wallets) have wallet sessions too and sign their own
+# contract calls through Agent Connect native/near/call (observed 2026-10-29:
+# signer_id = the agent's own account), so every branch below serves them
+# unchanged. Every owner-side branch is gated on get_group_owner == session account.
 
 CHAIN_SETTLE_SECONDS = 15.0   # a wallet tx the SDK just sent may not be `final` yet
 CHAIN_POLL_SECONDS = 1.0
@@ -888,8 +889,9 @@ async def add_group_member(ctx: Context, user: dict, group_id: str, member_id: s
     #   already a member + window  → no add (it would panic): set/extend the window.
     #   already a member, no window → unchanged (contract panics "User already a
     #                                member"); the existing window is NOT touched.
-    # Wallet/agent sessions cannot use windows: the scheduler signs as the owner
-    # with NOVA's custodial key, which they don't have (Deliverable 2 lifts this).
+    # Wallet/agent sessions cannot use windows: the scheduler revokes by signing as
+    # the owner with NOVA's custodial key, and NOVA never signs for a self-custodial
+    # owner. Windows for wallet-owned groups are not built (roadmap §5.18).
     member_id = normalize_account_id(member_id)
     config = get_config(user["near_account_id"])
     window_ref = {"group_id": group_id, "member_id": member_id, "contract_id": config["contract_id"]}
@@ -1194,8 +1196,8 @@ async def revoke_group_member(ctx: Context, user: dict, group_id: str, member_id
 @require_auth
 async def get_member_window(ctx: Context, user: dict, group_id: str, member_id: str) -> dict:
     # §6.1 Piece 4 — OWNER-ONLY read of a member's access window. Gated on the
-    # ON-CHAIN owner (below), so wallet owners (D2 A) may read; agents can never
-    # own a group (they cannot sign register_group), so this stays owner-only.
+    # ON-CHAIN owner (below): any owner may read, custodial or self-custodial
+    # (browser wallet or Agent Connect agent).
     member_id = normalize_account_id(member_id)
     config = get_config(user["near_account_id"])
     owner = await view_contract(user, "get_group_owner", {"group_id": group_id})

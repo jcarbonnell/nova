@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "nova-sdk-js": "^1.2.5"
+    "@near-intents-agent-api/sdk": "0.7.2",
+    "nova-sdk-js": "^1.4.0"
   }
 }

@@ -1,0 +1,59 @@
+{
+  "started_at": "2026-10-29T14:31:21.715Z",
+  "agent_id": "03363967db25b34a7940523a59975691f41f8b123bdeda93ac8c70a521a51986",
+  "results": [
+    {
+      "name": "H1 MCP /health is 0.4.12",
+      "ok": true,
+      "detail": "{\"status\":\"MCP ready\",\"version\":\"0.4.12\",\"auth\":\"enabled\",\"rpc_reachable\":true}"
+    },
+    {
+      "name": "H2 Agent API mainnet, operational",
+      "ok": true,
+      "detail": "mainnet operational"
+    },
+    {
+      "name": "H3 owner policy in force with native.near.call=[nova-sdk.near]",
+      "ok": true,
+      "detail": "rev 3 APPLIED synced=true call=[\"nova-sdk.near\"]"
+    },
+    {
+      "name": "H4 agent NEAR account funded (≥ 0.01 NEAR)",
+      "ok": true,
+      "detail": "0.19813961334015281 NEAR"
+    },
+    {
+      "name": "H5 no write pending from an earlier run",
+      "ok": true
+    },
+    {
+      "name": "V1 Agent Connect refuses an unlisted contract (wrap.near): 403 native_method_denied",
+      "ok": true,
+      "detail": "403 native_method_denied [policy]"
+    },
+    {
+      "name": "V2 Agent Connect refuses a deposit above the 0.01 NEAR cap: 409 policy_denied",
+      "ok": false,
+      "detail": "429 provider_rate_limited [provider]"
+    },
+    {
+      "name": "run completed",
+      "ok": false,
+      "detail": "Provider rate limited"
+    }
+  ],
+  "balance_before": "198139613340152800000000",
+  "invariant_unlisted_contract": {
+    "accepted": false,
+    "status": 403,
+    "code": "native_method_denied",
+    "layer": "policy",
+    "detail": "The account policy's `native` block does not switch this method on, or does not list this contract, recipient or EIP-712 domain. Ask the owner to enable it with policy_update."
+  },
+  "invariant_over_cap": {
+    "accepted": false,
+    "status": 429,
+    "code": "provider_rate_limited",
+    "layer": "provider"
+  }
+}

@@ -81,3 +81,7 @@ paid-handoff/native-sign-fixture.json
 paid-handoff/.venv/
 paid-handoff/node_modules/ 
 paid-handoff/readpath-state.json
+
+# Agent Connect
+nova-agent-connect/.env*
+nova-agent-connect/node_modules/

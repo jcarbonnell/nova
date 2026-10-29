@@ -1,0 +1,108 @@
+{
+  "started_at": "2026-10-29T13:22:28.221Z",
+  "agent_id": "03363967db25b34a7940523a59975691f41f8b123bdeda93ac8c70a521a51986",
+  "results": [
+    {
+      "name": "H1 MCP /health is 0.4.12",
+      "ok": true,
+      "detail": "{\"status\":\"MCP ready\",\"version\":\"0.4.12\",\"auth\":\"enabled\",\"rpc_reachable\":true}"
+    },
+    {
+      "name": "H2 Agent API mainnet, operational",
+      "ok": true,
+      "detail": "mainnet operational"
+    },
+    {
+      "name": "H3 owner policy in force with native.near.call=[nova-sdk.near]",
+      "ok": true,
+      "detail": "rev 3 APPLIED synced=true call=[\"nova-sdk.near\"]"
+    },
+    {
+      "name": "H4 agent NEAR account funded (≥ 0.01 NEAR)",
+      "ok": true,
+      "detail": "0.1989817294550803 NEAR"
+    },
+    {
+      "name": "H5 no write pending from an earlier run",
+      "ok": true
+    },
+    {
+      "name": "V1 Agent Connect refuses an unlisted contract (wrap.near): 403 native_method_denied",
+      "ok": true,
+      "detail": "403 native_method_denied [policy]"
+    },
+    {
+      "name": "V2 Agent Connect refuses a deposit above the 0.01 NEAR cap: 409 policy_denied",
+      "ok": true,
+      "detail": "409 policy_denied [policy]"
+    },
+    {
+      "name": "V3 agent signs in to NOVA as its own account",
+      "ok": true,
+      "detail": "5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288"
+    },
+    {
+      "name": "V4 MCP refuses a record signed by another account",
+      "ok": true,
+      "detail": "500 RPC tx lookup failed: ReadTimeout"
+    },
+    {
+      "name": "V5 MCP refuses the agent's own earlier record for a new upload",
+      "ok": true,
+      "detail": "500 Upload record does not match this upload"
+    },
+    {
+      "name": "V6 connectNovaAgent → NovaSdk in wallet mode for the agent account",
+      "ok": true
+    },
+    {
+      "name": "V7 contract refuses add_group_member on a group the agent does not own",
+      "ok": true,
+      "detail": "Wallet transaction 'add_group_member' failed or was rejected: add_group_member ended FAILED (native_request_failed): Smart contract panicked: panicked at src/lib.rs:375:9:\nassertion `left == right` failed: Only group owner can add\n  left: AccountId(\"5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200"
+    },
+    {
+      "name": "V8 no write left pending after the refusal",
+      "ok": true
+    },
+    {
+      "name": "P1 upload signed and paid by the agent, finalized by MCP",
+      "ok": true,
+      "detail": "nova-sdk.near/fastfs.near/8641e048d973ef5c83d1a0088f93638eb5c3f86746ee2d34c4b5cb0430083c5d/b1442388-49e6-49d7-8c21-4181de6fb83e"
+    },
+    {
+      "name": "P2 retrieve byte-identical",
+      "ok": true
+    },
+    {
+      "name": "P3 on-chain row: uploader = agent, file_hash matches",
+      "ok": true,
+      "detail": "5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288 b739f5969d6d0df733f1d4083e904161ff69f2d0a2a3ef6ba629fcfe60311ae8"
+    },
+    {
+      "name": "P4 agent joins ironclaw-hackathon-260618 itself",
+      "ok": false,
+      "detail": "Wallet transaction 'join_group' failed or was rejected: join_group ended FAILED (native_request_failed): Smart contract panicked: panicked at src/lib.rs:475:55:\nGroup not open for join"
+    }
+  ],
+  "balance_before": "198981729455080300000000",
+  "invariant_unlisted_contract": {
+    "accepted": false,
+    "status": 403,
+    "code": "native_method_denied",
+    "layer": "policy",
+    "detail": "The account policy's `native` block does not switch this method on, or does not list this contract, recipient or EIP-712 domain. Ask the owner to enable it with policy_update."
+  },
+  "invariant_over_cap": {
+    "accepted": false,
+    "status": 409,
+    "code": "policy_denied",
+    "layer": "policy",
+    "detail": "The account's wallet policy refuses this request (token, capability, destination, per-token limit or rate). A larger USD budget or a new grant does not lift it; the owner changes the blocking rule with policy_update. Read GET /agents/{agent_id}/policy."
+  },
+  "upload": {
+    "cid": "nova-sdk.near/fastfs.near/8641e048d973ef5c83d1a0088f93638eb5c3f86746ee2d34c4b5cb0430083c5d/b1442388-49e6-49d7-8c21-4181de6fb83e",
+    "trans_id": "b739f5969d6d0df733f1d4083e904161ff69f2d0a2a3ef6ba629fcfe60311ae8",
+    "file_hash": "ef514a021550898cecd6abb1bded7566cf95706ba26d78d9d787b367d00f3819"
+  },
+  "balance_after": "97440386858074600000000"
+}
