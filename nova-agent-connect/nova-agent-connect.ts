@@ -45,7 +45,10 @@
  *
  * Limits
  *   - Owner operations need a group the agent owns; `register_group` costs 0.64 NEAR (fee), so the
- *     owner's per-transaction cap must allow it. Access windows (`accessMinutes`) stay custodial-only.
+ *     owner's per-transaction cap must allow it. Keep every other call small with `maxDepositByMethod`
+ *     (e.g. `{ register_group: 640000000000000000000000n }` with `maxDepositYocto` 0.01 NEAR), and
+ *     limit what the agent may sign with `methods` (e.g. member-only). Access windows
+ *     (`accessMinutes`) stay custodial-only.
  *   - A NOVA session is a short-lived token: call `connectNovaAgent()` again when the SDK reports it expired.
  */
 
@@ -71,6 +74,8 @@ export const NOVA_WRITE_METHODS = [
   'set_group_retention',
   'join_group',
 ] as const;
+
+export type NovaWriteMethod = (typeof NOVA_WRITE_METHODS)[number];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Owner side: the policy additions NOVA needs
@@ -199,6 +204,14 @@ export interface AgentSignerOptions {
   store: PendingStore;
   /** Refuse any call attaching more than this (yoctoNEAR). Keep it ≤ the owner's wNEAR cap. */
   maxDepositYocto: bigint;
+  /** The NOVA methods this agent may sign (default: all of NOVA_WRITE_METHODS), e.g. member-only
+   * `['record_transaction', 'join_group']`. Agent Connect cannot restrict methods itself: its
+   * `native.near.call` allows a whole contract and native calls skip owner approval. */
+  methods?: readonly NovaWriteMethod[];
+  /** Per-method caps (yoctoNEAR) that replace `maxDepositYocto` for those methods only, e.g.
+   * `{ register_group: 640000000000000000000000n }` so the agent can pay the 0.64 NEAR
+   * registration fee while every other call stays under `maxDepositYocto`. */
+  maxDepositByMethod?: Partial<Record<NovaWriteMethod, bigint>>;
   contractId?: string;
   /** How long to keep polling a dispatched call before leaving it pending (default 5 min). */
   pollDeadlineMs?: number;
@@ -260,6 +273,18 @@ export function agentConnectSigner(
   const deadline = opts.pollDeadlineMs ?? 5 * 60_000;
   const { store } = opts;
 
+  // Which NOVA methods this agent may sign, and the deposit cap for each (checked once, here).
+  const allowed = new Set<string>(opts.methods ?? NOVA_WRITE_METHODS);
+  for (const m of allowed) {
+    if (!(NOVA_WRITE_METHODS as readonly string[]).includes(m)) throw new Error(`methods: ${m} is not a NOVA write method`);
+  }
+  const perMethod = (opts.maxDepositByMethod ?? {}) as Record<string, bigint | undefined>;
+  for (const [m, cap] of Object.entries(perMethod)) {
+    if (!allowed.has(m)) throw new Error(`maxDepositByMethod.${m}: that method is not allowed for this agent`);
+    if (typeof cap !== 'bigint' || cap < 0n) throw new Error(`maxDepositByMethod.${m} must be a bigint >= 0`);
+  }
+  const capFor = (method: string): bigint => perMethod[method] ?? opts.maxDepositYocto;
+
   // Settle a dispatched (or possibly dispatched) call. Returns the final status, or throws
   // NativeCallPendingError while it is still unsettled.
   async function settle(p: PendingNativeCall): Promise<StatusResponse> {
@@ -307,8 +332,12 @@ export function agentConnectSigner(
       if (!(NOVA_WRITE_METHODS as readonly string[]).includes(call.methodName)) {
         throw new Error(`refusing: ${call.methodName} is not a NOVA write method`);
       }
-      if (call.deposit < 0n || call.deposit > opts.maxDepositYocto) {
-        throw new Error(`refusing: deposit ${call.deposit} yocto exceeds the cap ${opts.maxDepositYocto}`);
+      if (!allowed.has(call.methodName)) {
+        throw new Error(`refusing: ${call.methodName} is not allowed for this agent`);
+      }
+      const cap = capFor(call.methodName);
+      if (call.deposit < 0n || call.deposit > cap) {
+        throw new Error(`refusing: deposit ${call.deposit} yocto exceeds the cap ${cap} for ${call.methodName}`);
       }
       const existing = await store.load();
       if (existing) {

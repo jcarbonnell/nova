@@ -127,7 +127,7 @@ def grant(m, api, state, rpc_url: str) -> None:
     print(f"✓ grant {g['grant_id'][:12]}… issued, expires {g.get('expires_at')}; token moved to {GRANT_FILE}")
 
 
-def enable_call(m, api, state, rpc_url: str) -> None:
+def enable_call(m, api, state, rpc_url: str, cap: str = WNEAR_CAP) -> None:
     agent_id = state["agent_id"]
     view = api.get_policy(agent_id)
     if not (view.get("status") == "APPLIED" and view.get("provider_policy_synced")):
@@ -142,10 +142,10 @@ def enable_call(m, api, state, rpc_url: str) -> None:
         assets.append(WNEAR)
     per_tx = policy.setdefault("limits", {}).setdefault("per_transaction", {})
     if (native["near"].get("call") == [NOVA_CONTRACT] and (assets == "any" or WNEAR in view["policy"]["assets"])
-            and per_tx.get(WNEAR) == WNEAR_CAP):
+            and per_tx.get(WNEAR) == cap):
         print(f"✓ already enabled (revision {view.get('revision')})")
         return
-    per_tx[WNEAR] = WNEAR_CAP
+    per_tx[WNEAR] = cap
     native["near"]["call"] = [NOVA_CONTRACT]
     if native["near"].get("transfer") is not False:
         die("native.near.transfer is not false; refusing to send a policy that moves NEAR out")
@@ -153,7 +153,7 @@ def enable_call(m, api, state, rpc_url: str) -> None:
     print("new policy (complete, as it will be signed):")
     print(json.dumps(policy, indent=2))
     print(f"changes: native.near.call=[{NOVA_CONTRACT}], assets += {WNEAR}, "
-          f"limits.per_transaction[{WNEAR}]={int(WNEAR_CAP) / 1e24} NEAR")
+          f"limits.per_transaction[{WNEAR}]={int(cap) / 1e24} NEAR")
 
     key = owner_key(m)
     check_full_access(m, key, rpc_url)
@@ -181,6 +181,7 @@ def main() -> None:
     g.add_argument("--status", action="store_true")
     g.add_argument("--grant", action="store_true")
     g.add_argument("--enable-call", action="store_true")
+    ap.add_argument("--cap-yocto", default=WNEAR_CAP, help="wNEAR per-transaction cap for --enable-call, in yoctoNEAR")
     args = ap.parse_args()
 
     load_env(ENV_FILE)
@@ -195,7 +196,9 @@ def main() -> None:
     elif args.grant:
         grant(m, api, state, rpc_url)
     else:
-        enable_call(m, api, state, rpc_url)
+        if not args.cap_yocto.isdigit() or int(args.cap_yocto) <= 0:
+            die("--cap-yocto must be a positive integer (yoctoNEAR)")
+        enable_call(m, api, state, rpc_url, args.cap_yocto)
 
 
 if __name__ == "__main__":

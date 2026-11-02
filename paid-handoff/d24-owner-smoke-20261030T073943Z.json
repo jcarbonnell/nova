@@ -1,0 +1,96 @@
+{
+  "started_at": "2026-10-30T07:39:43.469Z",
+  "agent_id": "03363967db25b34a7940523a59975691f41f8b123bdeda93ac8c70a521a51986",
+  "group": "agent-owned-20261030T073943Z",
+  "results": [
+    {
+      "name": "H1 MCP /health is 0.4.12",
+      "ok": true,
+      "detail": "{\"status\":\"MCP ready\",\"version\":\"0.4.12\",\"auth\":\"enabled\",\"rpc_reachable\":true}"
+    },
+    {
+      "name": "H2 owner policy in force, call=[nova-sdk.near], wNEAR cap ≥ 0.64 NEAR",
+      "ok": true,
+      "detail": "rev 4 cap 0.65 NEAR"
+    },
+    {
+      "name": "H3 agent NEAR account holds ≥ 0.84 NEAR (0.64 deposit + fee headroom)",
+      "ok": true,
+      "detail": "0.8965022764071633 NEAR"
+    },
+    {
+      "name": "H4 no write pending from an earlier run",
+      "ok": true
+    },
+    {
+      "name": "H5 group id agent-owned-20261030T073943Z is free",
+      "ok": true
+    },
+    {
+      "name": "H6 agent signs in to NOVA as its own account",
+      "ok": true,
+      "detail": "5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288"
+    },
+    {
+      "name": "V1 member-only agent cannot register a group (nothing sent)",
+      "ok": true,
+      "detail": "Wallet transaction 'register_group' failed or was rejected: refusing: register_group is not allowed for this agent"
+    },
+    {
+      "name": "V2 without a register cap, the 0.64 NEAR fee is refused (nothing sent)",
+      "ok": true,
+      "detail": "Wallet transaction 'register_group' failed or was rejected: refusing: deposit 640000000000000000000000 yocto exceeds the cap 10000000000000000000000 for register_group"
+    },
+    {
+      "name": "V3 nothing reached the chain: the group still does not exist",
+      "ok": true
+    },
+    {
+      "name": "O1 agent registered the group itself (signed + paid by the agent; MCP made the key)",
+      "ok": true,
+      "detail": "5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288"
+    },
+    {
+      "name": "O2 agent added hello-partage.nova-sdk.near as a member",
+      "ok": true
+    },
+    {
+      "name": "O3 agent uploaded into its own group",
+      "ok": true,
+      "detail": "nova-sdk.near/fastfs.near/4e329863a7d14b1fbd5b0c844cb74e4b14195f38767523bd445363425d8bc5a6/4f3ccbe0-d525-4d61-8f16-8c2de527328e"
+    },
+    {
+      "name": "O4 the member retrieves it byte-identical",
+      "ok": true
+    },
+    {
+      "name": "V4 the member cannot administer the agent's group (contract)",
+      "ok": true,
+      "detail": "MCP tool 'add_group_member' failed: {'ActionError': {'index': 0, 'kind': {'FunctionCallError': {'ExecutionError': 'Smart contract panicked: panicked at src/lib.rs:399:9:\\nassertion `left == right` failed: Only group owner can add\\n  left: AccountId(\"hello-partage.nova-sdk.near\")\\n right: AccountId(\"5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288\")'}}}}"
+    },
+    {
+      "name": "O5 agent revoked the member (MCP rotated the key)",
+      "ok": true
+    },
+    {
+      "name": "O6 the revoked member can no longer retrieve",
+      "ok": true,
+      "detail": "MCP tool 'prepare_retrieve' failed: Shade retrieve failed: 403 - {\"error\":\"Unauthorized\",\"code\":\"UNAUTHORIZED\"}"
+    },
+    {
+      "name": "O7 the agent (owner) still reads its file",
+      "ok": true
+    },
+    {
+      "name": "O8 no write left pending",
+      "ok": true
+    }
+  ],
+  "balance_before": "896502276407163200000000",
+  "upload": {
+    "cid": "nova-sdk.near/fastfs.near/4e329863a7d14b1fbd5b0c844cb74e4b14195f38767523bd445363425d8bc5a6/4f3ccbe0-d525-4d61-8f16-8c2de527328e",
+    "trans_id": "ea1d7558539a9798a7c8a17bc38dd2bb4a00d523a8e27fb6ea1334fd452d4c21",
+    "file_hash": "c66989dd606f5d3c0e99e50eee29e5a2c73cfaeeb2007dca36d39dae61d89158"
+  },
+  "balance_after": "254859436424507600000000"
+}

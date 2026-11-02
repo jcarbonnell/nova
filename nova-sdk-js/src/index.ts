@@ -557,8 +557,8 @@ export class NovaSdk {
       args.access_minutes = m;
     }
     if (this.walletSigner) {
-      // Windows need NOVA to revoke as the owner at expiry; a wallet owner has
-      // not granted that (Deliverable 2 (B), grant_revoker). Refuse BEFORE signing.
+      // Windows need NOVA to revoke as the owner at expiry, and NOVA never signs
+      // for a self-custodial owner (wallet or agent). Refuse BEFORE signing.
       if (options.accessMinutes !== undefined) {
         throw new NovaError('accessMinutes is not available for wallet-owned groups yet');
       }

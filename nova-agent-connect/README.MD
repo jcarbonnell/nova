@@ -122,6 +122,34 @@ const store: PendingStore = {                          // one row per agent in y
 If `resolvePending()` reports `SUCCESS` for an upload whose finalize never ran, the record is on chain
 without bytes; the NOVA console labels it "record without bytes".
 
+## 5. Owner operations: the agent owns its groups
+
+An agent can register its own groups and administer them (add, revoke, retention) with its own
+signature. NOVA creates the group key and rotates it on revoke only after the chain shows the agent as
+owner. The registration fee is 0.64 NEAR; every other owner call is tiny. Give the fee its own cap so
+nothing else can attach that much, and decide what this agent may sign:
+
+```ts
+const { nova, signer } = await connectNovaAgent(agentApi, agentId, {
+  store,
+  maxDepositYocto: 10n ** 22n,                                     // 0.01 NEAR for every call…
+  maxDepositByMethod: { register_group: 640_000_000_000_000_000_000_000n }, // …except registration
+  // methods: ['record_transaction', 'join_group'],                // or: a member-only agent
+});
+await nova.registerGroup('acme-agent-proofs');
+await nova.addGroupMember('acme-agent-proofs', 'partner.near');
+await nova.revokeGroupMember('acme-agent-proofs', 'partner.near'); // key rotated
+```
+
+- The owner's policy cap (`limits.per_transaction["nep141:wrap.near"]`) must be ≥ 0.64 NEAR. It
+  applies to every NOVA call, which is why the module's per-method caps keep the others small: the
+  contract keeps any surplus deposit.
+- Keep ~0.2 NEAR above the deposit on the agent's account: Agent Connect refuses a call it cannot pay
+  the network fee for (`409 custody_native_balance_required`, nothing sent).
+- Agent Connect cannot restrict methods or require owner approval for native calls; `methods` and
+  `maxDepositByMethod` are where your backend decides.
+- Access windows (`accessMinutes`) stay custodial-only.
+
 ## Refusals you can expect (observed on mainnet)
 
 | Layer | Request | Answer |
@@ -142,10 +170,9 @@ without bytes; the NOVA console labels it "record without bytes".
 
 ## Limits
 
-- **Owner operations by an agent** need a group the agent owns. `register_group` costs 0.64 NEAR, so the
-  owner's per-transaction cap must allow it; this path is supported by the same code but not yet proven
-  live for agents. The common pattern: your custodial NOVA account (backend, `nova_sk_` API key) owns
-  and administers the group; agents sign in as themselves, read, and upload with their own signature.
+- **Owner operations by an agent** (live on mainnet since 2026-10-30): see "Owner operations" above.
+  The agent's own account pays `register_group`'s 0.64 NEAR fee, so the owner's per-transaction cap
+  must allow it, and the account must hold ~0.2 NEAR more for the network fee.
 - **Access windows** (`accessMinutes`, "sell a window, not a copy") need a custodial owner: NOVA's
   scheduler revokes by signing as the owner, and NOVA never signs for a self-custodial account.
 - One write at a time per agent (the pending-call rule).

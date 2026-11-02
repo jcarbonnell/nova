@@ -8,7 +8,7 @@ const MUTANTS = [
   ['persist AFTER send', [`      await store.save(p); // BEFORE sending\n`, ``], [`      const withId = { ...p, correlationId: first.correlation_id };`, `      await store.save(p);\n      const withId = { ...p, correlationId: first.correlation_id };`]],
   ['receiver check dropped', [`if (call.receiverId !== contract) throw`, `if (false) throw`]],
   ['method allowlist dropped', [`if (!(NOVA_WRITE_METHODS as readonly string[]).includes(call.methodName)) {`, `if (false) {`]],
-  ['cap off by one (>=)', [`call.deposit > opts.maxDepositYocto`, `call.deposit >= opts.maxDepositYocto`]],
+  ['cap off by one (>=)', [`call.deposit > cap)`, `call.deposit >= cap)`]],
   ['retryable treated as refusal', [`&& !e.retryable) {`, `) {`]],
   ['replay under a new key', [`\n        st = await api.nativeNearCall(agentId, p.body, { idempotencyKey: p.idempotencyKey });`, `\n        st = await api.nativeNearCall(agentId, p.body, { idempotencyKey: 'nova-' + crypto.randomUUID() });`]],
   ['UNCERTAIN treated as settled', [`new Set(['PROCESSING', 'QUEUED', 'UNCERTAIN'])`, `new Set(['PROCESSING', 'QUEUED'])`]],
@@ -21,6 +21,11 @@ const MUTANTS = [
   ['policy turns transfer on', [`next.native = native;`, `native.near.transfer = true;\n  next.native = native;`]],
   ['policy mutates input', [`const next: Policy = structuredClone(policy);`, `const next: Policy = policy;`]],
   ['instanceof only', [`  if (e instanceof AgentApiError) return true;\n  const x`, `  return e instanceof AgentApiError;\n  const x`]],
+  ['methods allowlist ignored', [`if (!allowed.has(call.methodName)) {\n        throw`, `if (false) {\n        throw`]],
+  ['methods not validated', [`if (!(NOVA_WRITE_METHODS as readonly string[]).includes(m)) throw new Error(\`methods:`, `if (false) throw new Error(\`methods:`]],
+  ['per-method cap for a disallowed method accepted', [`if (!allowed.has(m)) throw new Error(\`maxDepositByMethod.`, `if (false) throw new Error(\`maxDepositByMethod.`]],
+  ['per-method cap ignored', [`const capFor = (method: string): bigint => perMethod[method] ?? opts.maxDepositYocto;`, `const capFor = (_method: string): bigint => opts.maxDepositYocto;`]],
+  ['largest cap applied to every method', [`const capFor = (method: string): bigint => perMethod[method] ?? opts.maxDepositYocto;`, `const capFor = (_method: string): bigint => Object.values(perMethod).reduce<bigint>((a, b) => (b !== undefined && b > a ? b : a), opts.maxDepositYocto);`]],
   ['no tx-hash check', [`if (!txHash) throw new Error(`, `if (false) throw new Error(`]],
 ];
 let caught = 0;

@@ -238,6 +238,47 @@ const CALL = {
   void net;
 }
 
+// ── owner operations: methods allowlist and per-method caps ─────────────────────────────────
+const REG_FEE = 640_000_000_000_000_000_000_000n; // register_group fee, 0.64 NEAR
+function setupWith(extra: Record<string, unknown>) {
+  const net = new Net();
+  const api = createAgentApi({ apiKey: API_KEY, baseUrl: 'https://api.test', fetch: net.fetch as typeof fetch }).forGrant(GRANT);
+  const store = M.memoryStore();
+  const signer = M.agentConnectSigner(api, AGENT, ACCOUNT, { store, maxDepositYocto: 10n ** 22n, pollDeadlineMs: 50, ...extra } as any);
+  return { net, store, signer };
+}
+const REG = { ...CALL, methodName: 'register_group', args: { group_id: 'agent-owned' }, deposit: REG_FEE };
+{
+  const { net, signer } = setupWith({ methods: ['record_transaction', 'join_group'] });
+  ok('O1 member-only agent: add_group_member refused, nothing sent',
+    !!(await rejects(() => signer.signAndSendFunctionCall({ ...CALL, methodName: 'add_group_member', deposit: 1n }), /add_group_member is not allowed for this agent/)) && net.calls().length === 0);
+  net.callReplies.push(st('SUCCESS'));
+  ok('O2 member-only agent: record_transaction still goes through', (await signer.signAndSendFunctionCall(CALL)).txHash === TX);
+}
+{
+  let msg = '';
+  try { setupWith({ methods: ['record_transaction', 'ft_transfer'] }); } catch (e) { msg = String((e as Error).message); }
+  ok('O3 an unknown method in `methods` is refused at construction', /methods: ft_transfer is not a NOVA write method/.test(msg));
+  msg = '';
+  try { setupWith({ methods: ['record_transaction'], maxDepositByMethod: { register_group: REG_FEE } }); } catch (e) { msg = String((e as Error).message); }
+  ok('O4 a cap for a method the agent may not sign is refused at construction', /maxDepositByMethod.register_group: that method is not allowed/.test(msg));
+}
+{
+  const { net, signer } = setupWith({ maxDepositByMethod: { register_group: REG_FEE } });
+  net.callReplies.push(st('SUCCESS'));
+  const r = await signer.signAndSendFunctionCall(REG).catch((e) => ({ txHash: `refused: ${e.message}` }));
+  ok('O5 register_group at its 0.64 NEAR per-method cap goes through', r.txHash === TX && net.calls()[0].body.deposit === REG_FEE.toString());
+  ok('O6 the register cap does not leak to other methods (record at 0.02 NEAR refused, nothing sent)',
+    !!(await rejects(() => signer.signAndSendFunctionCall({ ...CALL, deposit: 2n * 10n ** 22n }), /exceeds the cap 10000000000000000000000 for record_transaction/)) && net.calls().length === 1);
+  ok('O7 register_group one yocto above its cap refused, nothing sent',
+    !!(await rejects(() => signer.signAndSendFunctionCall({ ...REG, deposit: REG_FEE + 1n }), /exceeds the cap 640000000000000000000000 for register_group/)) && net.calls().length === 1);
+}
+{
+  const { net, signer } = setupWith({});
+  ok('O8 without a per-method cap, register_group is held to maxDepositYocto',
+    !!(await rejects(() => signer.signAndSendFunctionCall(REG), /exceeds the cap 10000000000000000000000 for register_group/)) && net.calls().length === 0);
+}
+
 // ── sign-in ──────────────────────────────────────────────────────────────────────────────────
 {
   const { net, api } = setup();

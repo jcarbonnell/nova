@@ -1,0 +1,55 @@
+{
+  "started_at": "2026-10-30T07:33:38.978Z",
+  "agent_id": "03363967db25b34a7940523a59975691f41f8b123bdeda93ac8c70a521a51986",
+  "group": "agent-owned-20261030T073338Z",
+  "results": [
+    {
+      "name": "H1 MCP /health is 0.4.12",
+      "ok": true,
+      "detail": "{\"status\":\"MCP ready\",\"version\":\"0.4.12\",\"auth\":\"enabled\",\"rpc_reachable\":true}"
+    },
+    {
+      "name": "H2 owner policy in force, call=[nova-sdk.near], wNEAR cap ≥ 0.64 NEAR",
+      "ok": true,
+      "detail": "rev 4 cap 0.65 NEAR"
+    },
+    {
+      "name": "H3 agent NEAR account holds ≥ 0.66 NEAR",
+      "ok": true,
+      "detail": "0.6965022764071632 NEAR"
+    },
+    {
+      "name": "H4 no write pending from an earlier run",
+      "ok": true
+    },
+    {
+      "name": "H5 group id agent-owned-20261030T073338Z is free",
+      "ok": true
+    },
+    {
+      "name": "H6 agent signs in to NOVA as its own account",
+      "ok": true,
+      "detail": "5a5d96f384a41ba3d1c90399dcd563ed6f52c34aa28ba5f200902a655d8ab288"
+    },
+    {
+      "name": "V1 member-only agent cannot register a group (nothing sent)",
+      "ok": true,
+      "detail": "Wallet transaction 'register_group' failed or was rejected: refusing: register_group is not allowed for this agent"
+    },
+    {
+      "name": "V2 without a register cap, the 0.64 NEAR fee is refused (nothing sent)",
+      "ok": true,
+      "detail": "Wallet transaction 'register_group' failed or was rejected: refusing: deposit 640000000000000000000000 yocto exceeds the cap 10000000000000000000000 for register_group"
+    },
+    {
+      "name": "V3 nothing reached the chain: the group still does not exist",
+      "ok": true
+    },
+    {
+      "name": "run completed",
+      "ok": false,
+      "detail": "Wallet transaction 'register_group' failed or was rejected: Agent API refused register_group: 409 custody_native_balance_required [balance]"
+    }
+  ],
+  "balance_before": "696502276407163200000000"
+}
