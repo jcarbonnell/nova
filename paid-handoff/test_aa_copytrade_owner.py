@@ -108,6 +108,40 @@ ok("F4 it signs in to NOVA only: sign_message nova-sdk.near, no NEAR transfer, n
 ok("F5 no owner approval, no timelock, not frozen, assets USDC and wNEAR",
    f["owner_approval"] is False and f["timelock_ms"] == 0 and f["frozen"] is False and f["assets"] == [USDC, WNEAR])
 
+# ── seller revision 6 ───────────────────────────────────────────────────────────────────────
+V5 = O.seller_policy_v5(copy.deepcopy(V4))
+before6 = copy.deepcopy(V5)
+v6 = O.seller_policy_v6(V5)
+ok("S6a revision 6 changes exactly one field: destinations.mode only -> any (the list is kept)",
+   O.changed_paths(V5, v6) == ["destinations.mode"] and v6["destinations"] == {"mode": "any", "list": V5["destinations"]["list"]}, O.changed_paths(V5, v6))
+ok("S6b everything else is sent back exactly as in force, and the policy in force is not modified",
+   json.dumps({**v6, "destinations": None}, sort_keys=True) == json.dumps({**V5, "destinations": None}, sort_keys=True) and V5 == before6)
+ok("S6c the seller still cannot move funds: swap only, no NEAR transfer, NOVA calls only",
+   v6["actions"] == ["swap"] and v6["native"]["near"] == {"sign_message": ["nova-sdk.near"], "transfer": False, "call": ["nova-sdk.near"]})
+
+
+def with5(f):
+    p = copy.deepcopy(V5)
+    f(p)
+    return p
+
+
+bad6 = [
+    ("already any", lambda p: p["destinations"].update(mode="any"), 'current destinations.mode is \'any\', expected "only" (already changed?)'),
+    ("no destinations", lambda p: p.pop("destinations"), 'current destinations.mode is None, expected "only" (already changed?)'),
+    ("withdraw back in actions", lambda p: p.update(actions=["swap", "withdraw"]), "current actions is ['swap', 'withdraw'], expected revision 5's ['swap']"),
+    ("revision 4 (not 5)", lambda p: p.update(actions=["withdraw"]), "current actions is ['withdraw'], expected revision 5's ['swap']"),
+    ("confidential off", lambda p: p.update(confidential=False), "current confidential is False, expected revision 5's True"),
+    ("another action cap", lambda p: p.update(max_actions_per_hour=20), "current max_actions_per_hour is 20, expected revision 5's 12"),
+    ("another wNEAR cap", lambda p: p["limits"]["per_transaction"].update({WNEAR: "1"}), "current wNEAR per-transaction cap is not revision 5's"),
+    ("NEAR transfer on", lambda p: p["native"]["near"].update(transfer=True), "native.near.transfer is not false; refusing to sign a policy that can move NEAR out"),
+    ("another contract callable", lambda p: p["native"]["near"].update(call=["nova-sdk.near", "x.near"]), "native.near.sign_message/call are not [nova-sdk.near]; refusing"),
+]
+fails = [f"{what}: {refusal(lambda: O.seller_policy_v6(with5(fn)))}" for what, fn, want in bad6 if refusal(lambda: O.seller_policy_v6(with5(fn))) != want]
+ok(f"S6d revision 6 is built only from revision 5 with destinations still \"only\" ({len(bad6)} refusals, each by its message)", not fails, fails)
+ok("S6e it is never built from the follower's policy (refused at the NOVA-only guard)",
+   refusal(lambda: O.seller_policy_v6(O.follower_policy())) == "native.near.sign_message/call are not [nova-sdk.near]; refusing")
+
 # ── where each step may run ─────────────────────────────────────────────────────────────────
 SELLER = O.SELLER_AGENT_ID
 ok("W1 the follower is created only in a directory that holds no agent yet",

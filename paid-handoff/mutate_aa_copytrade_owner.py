@@ -32,7 +32,16 @@ MUTANTS = [
     ("O8", "action cap not raised", 'new["max_actions_per_hour"] = SELLER_V5["max_actions_per_hour"]', "pass"),
     ("O9", "wNEAR cap ten times too high", '"wnear_cap": "60000000000000000000000",', '"wnear_cap": "600000000000000000000000",'),
     ("O10", "daily budget not set", 'new.setdefault("budget", {})["daily_usd"] = SELLER_V5["daily_usd"]', "pass"),
-    ("O11", "the policy in force is modified", "new = copy.deepcopy(current)", "new = current"),
+    ("O11", "the policy in force is modified", 'new = copy.deepcopy(current)\n    new["actions"]', 'new = current\n    new["actions"]'),
+    # seller revision 6
+    ("O22", "revision 6 sets another mode", 'SELLER_V6 = {"destinations_mode": "any"}', 'SELLER_V6 = {"destinations_mode": "except"}'),
+    ("O23", "revision 6 not built from revision 5", '        if current.get(field) != SELLER_V5[field]:', '        if False:'),
+    ("O24", "revision 6 ignores the wNEAR cap", 'if ((current.get("limits") or {}).get("per_transaction") or {}).get(WNEAR) != SELLER_V5["wnear_cap"]:', 'if False:'),
+    ("O25", "revision 6 built over any destinations", 'if not isinstance(dest, dict) or dest.get("mode") != "only":', 'if not isinstance(dest, dict):'),
+    ("O26", "revision 6 drops the list", '    new["destinations"]["mode"] = SELLER_V6["destinations_mode"]', '    new["destinations"] = {"mode": SELLER_V6["destinations_mode"], "list": []}'),
+    ("O27", "revision 6 modifies the policy in force", '    new = copy.deepcopy(current)\n    new["destinations"]', '    new = current\n    new["destinations"]'),
+    ("O28", "revision 6 skips the NOVA-only guard", '    _native_nova_only(current)\n    for field in ("actions", "confidential", "max_actions_per_hour"):\n        if current.get(field) != SELLER_V5[field]:',
+     '    for field in ("actions", "confidential", "max_actions_per_hour"):\n        if current.get(field) != SELLER_V5[field]:'),
     # follower
     ("O12", "the follower may pay anyone listed by an attacker", '"address": PROCEEDS, "memo": FOLLOWER_MEMO', '"address": "attacker.near", "memo": FOLLOWER_MEMO'),
     ("O13", "the follower may transfer", '"actions": ["withdraw", "swap"],', '"actions": ["withdraw", "swap", "transfer"],'),

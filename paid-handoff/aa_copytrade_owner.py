@@ -11,13 +11,14 @@ directory, ~/near/nova/paid-handoff/follower-1 (with a symlink to ../.env); the 
     # seller (from ~/near/nova/paid-handoff)
     .venv/bin/python aa_copytrade_owner.py --status
     .venv/bin/python aa_copytrade_owner.py --seller-policy     # revision 5: one policy_update (nep366)
+    .venv/bin/python aa_copytrade_owner.py --seller-policy-v6  # revision 6: destinations.mode only -> any
     .venv/bin/python aa_copytrade_owner.py --grant seller      # new 7-day grant "nova-copytrade-seller"
 
     # follower (from ~/near/nova/paid-handoff/follower-1)
     ../.venv/bin/python ../aa_copytrade_owner.py --create-follower   # agent_create + 7-day grant
     ../.venv/bin/python ../aa_copytrade_owner.py --grant follower    # later: a fresh 7-day grant
 
-What gets signed is decided by the pure functions below (seller_policy_v5, follower_policy); their harness
+What gets signed is decided by the pure functions below (seller_policy_v5, seller_policy_v6, follower_policy); their harness
 is test_aa_copytrade_owner.py and runs without network or keys. Nothing secret is printed.
 """
 
@@ -49,6 +50,12 @@ SELLER_V5 = {
     "wnear_cap": "60000000000000000000000",   # 0.06 NEAR
     "daily_usd": "2",
 }
+# Seller revision 6 (approved 2026-11-04): destinations.mode "only" -> "any", nothing else. On 2026-11-04 the Agent API
+# refused the seller's first live record_transaction under revision 5 with 403 policy_destination_denied, and a
+# destination entry can only be a withdraw or a transfer. The seller's only money action is swap (no withdraw, no
+# transfer, native transfer off, native calls to nova-sdk.near only), so "any" opens no new path for its funds.
+SELLER_V6 = {"destinations_mode": "any"}
+
 # What revision 4 must look like before revision 5 is built (read on 2026-11-03, observe-h2).
 SELLER_V4 = {
     "actions": ["withdraw"],
@@ -102,6 +109,25 @@ def seller_policy_v5(current: dict) -> dict:
     new["max_actions_per_hour"] = SELLER_V5["max_actions_per_hour"]
     new["limits"]["per_transaction"][WNEAR] = SELLER_V5["wnear_cap"]
     new.setdefault("budget", {})["daily_usd"] = SELLER_V5["daily_usd"]
+    return new
+
+
+def seller_policy_v6(current: dict) -> dict:
+    """The seller's revision 6 from the policy in force. Refuses unless it is revision 5 and still "only"."""
+    if not isinstance(current, dict):
+        raise Refused("current policy is not an object")
+    _native_nova_only(current)
+    for field in ("actions", "confidential", "max_actions_per_hour"):
+        if current.get(field) != SELLER_V5[field]:
+            raise Refused(f"current {field} is {current.get(field)!r}, expected revision 5's {SELLER_V5[field]!r}")
+    if ((current.get("limits") or {}).get("per_transaction") or {}).get(WNEAR) != SELLER_V5["wnear_cap"]:
+        raise Refused("current wNEAR per-transaction cap is not revision 5's")
+    dest = current.get("destinations")
+    if not isinstance(dest, dict) or dest.get("mode") != "only":
+        raise Refused(f"current destinations.mode is {(dest or {}).get('mode')!r}, expected \"only\" (already changed?)")
+
+    new = copy.deepcopy(current)
+    new["destinations"]["mode"] = SELLER_V6["destinations_mode"]
     return new
 
 
@@ -186,6 +212,40 @@ def seller_policy(m, api, state, rpc_url: str) -> None:
     raise Refused("policy not in force after ~2 min; rerun --seller-policy later (it resumes)")
 
 
+def seller_policy_6(m, api, state, rpc_url: str) -> None:
+    agent_id = state["agent_id"]
+    view = api.get_policy(agent_id)
+    if not (view.get("status") == "APPLIED" and view.get("provider_policy_synced")):
+        raise Refused(f"current policy not in force: {view.get('status')} synced={view.get('provider_policy_synced')}")
+    current = view["policy"]
+    if (current.get("destinations") or {}).get("mode") == SELLER_V6["destinations_mode"]:
+        print(f"✓ revision 6 already in force (revision {view.get('revision')})")
+        return
+    new = seller_policy_v6(current)
+    print("new policy (complete, as it will be signed):")
+    print(json.dumps(new, indent=2))
+    print("changes: " + ", ".join(changed_paths(current, new)))
+
+    key = aa_setup.owner_key(m)
+    aa_setup.check_full_access(m, key, rpc_url)
+    sign = aa_setup.guarded_signer(m, key, rpc_url, api.get_network()["contract_id"])
+    req = {"type": "policy_update", "agent_id": agent_id, "policy": new, "expected_revision": view["revision"]}
+    st = aa_setup.run_intent(m, api, state, "policy_copytrade_v6", req, sign)
+    if st["status"] != "SUCCESS":
+        raise Refused(f"policy_update ended {st['status']} failure_code={st.get('failure_code')}")
+    for _ in range(12):
+        v = api.get_policy(agent_id)
+        p = v.get("policy") or {}
+        if v.get("status") == "APPLIED" and v.get("provider_policy_synced") and (p.get("destinations") or {}).get("mode") == SELLER_V6["destinations_mode"]:
+            state.pop("policy_copytrade_v6", None)
+            aa_setup.save_state(state)
+            print(f"✓ policy revision {v.get('revision')} APPLIED + synced")
+            return
+        print(f"· policy {v.get('status')} synced={v.get('provider_policy_synced')}; waiting")
+        time.sleep(10)
+    raise Refused("policy not in force after ~2 min; rerun --seller-policy-v6 later (it resumes)")
+
+
 def create_follower() -> None:
     aa_setup.AGENT_NAME = FOLLOWER_NAME
     aa_setup.EXTERNAL_USER_ID = FOLLOWER_EXTERNAL_ID
@@ -205,6 +265,7 @@ def main() -> None:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--status", action="store_true")
     g.add_argument("--seller-policy", action="store_true")
+    g.add_argument("--seller-policy-v6", action="store_true")
     g.add_argument("--create-follower", action="store_true")
     g.add_argument("--grant", choices=["seller", "follower"])
     args = ap.parse_args()
@@ -228,6 +289,9 @@ def main() -> None:
         elif args.seller_policy:
             require_cwd_agent(state, SELLER_AGENT_ID, "seller")
             seller_policy(m, api, state, rpc_url)
+        elif args.seller_policy_v6:
+            require_cwd_agent(state, SELLER_AGENT_ID, "seller")
+            seller_policy_6(m, api, state, rpc_url)
         else:
             if args.grant == "seller":
                 require_cwd_agent(state, SELLER_AGENT_ID, "seller")
