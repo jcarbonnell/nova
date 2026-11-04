@@ -127,7 +127,7 @@ def seller_policy_v6(current: dict) -> dict:
         raise Refused(f"current destinations.mode is {(dest or {}).get('mode')!r}, expected \"only\" (already changed?)")
 
     new = copy.deepcopy(current)
-    new["destinations"]["mode"] = SELLER_V6["destinations_mode"]
+    new["destinations"] = {"mode": SELLER_V6["destinations_mode"], "list": []}   # the API refuses an "any" rule with a list
     return new
 
 

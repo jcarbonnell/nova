@@ -112,8 +112,8 @@ ok("F5 no owner approval, no timelock, not frozen, assets USDC and wNEAR",
 V5 = O.seller_policy_v5(copy.deepcopy(V4))
 before6 = copy.deepcopy(V5)
 v6 = O.seller_policy_v6(V5)
-ok("S6a revision 6 changes exactly one field: destinations.mode only -> any (the list is kept)",
-   O.changed_paths(V5, v6) == ["destinations.mode"] and v6["destinations"] == {"mode": "any", "list": V5["destinations"]["list"]}, O.changed_paths(V5, v6))
+ok("S6a revision 6 changes exactly destinations: mode only -> any, list emptied (the API refuses an any rule with a list)",
+   O.changed_paths(V5, v6) == ["destinations.list", "destinations.mode"] and v6["destinations"] == {"mode": "any", "list": []}, O.changed_paths(V5, v6))
 ok("S6b everything else is sent back exactly as in force, and the policy in force is not modified",
    json.dumps({**v6, "destinations": None}, sort_keys=True) == json.dumps({**V5, "destinations": None}, sort_keys=True) and V5 == before6)
 ok("S6c the seller still cannot move funds: swap only, no NEAR transfer, NOVA calls only",

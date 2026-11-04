@@ -38,8 +38,8 @@ MUTANTS = [
     ("O23", "revision 6 not built from revision 5", '        if current.get(field) != SELLER_V5[field]:', '        if False:'),
     ("O24", "revision 6 ignores the wNEAR cap", 'if ((current.get("limits") or {}).get("per_transaction") or {}).get(WNEAR) != SELLER_V5["wnear_cap"]:', 'if False:'),
     ("O25", "revision 6 built over any destinations", 'if not isinstance(dest, dict) or dest.get("mode") != "only":', 'if not isinstance(dest, dict):'),
-    ("O26", "revision 6 drops the list", '    new["destinations"]["mode"] = SELLER_V6["destinations_mode"]', '    new["destinations"] = {"mode": SELLER_V6["destinations_mode"], "list": []}'),
-    ("O27", "revision 6 modifies the policy in force", '    new = copy.deepcopy(current)\n    new["destinations"]', '    new = current\n    new["destinations"]'),
+    ("O26", "revision 6 keeps the list (refused by the API)", 'new["destinations"] = {"mode": SELLER_V6["destinations_mode"], "list": []}', 'new["destinations"] = {**current["destinations"], "mode": SELLER_V6["destinations_mode"]}'),
+    ("O27", "revision 6 modifies the policy in force", '    new = copy.deepcopy(current)\n    new["destinations"] = {', '    new = current\n    new["destinations"] = {'),
     ("O28", "revision 6 skips the NOVA-only guard", '    _native_nova_only(current)\n    for field in ("actions", "confidential", "max_actions_per_hour"):\n        if current.get(field) != SELLER_V5[field]:',
      '    for field in ("actions", "confidential", "max_actions_per_hour"):\n        if current.get(field) != SELLER_V5[field]:'),
     # follower
