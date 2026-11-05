@@ -331,14 +331,16 @@ Comprehensive documentation is available on GitBook:
 ## Future Roadmap
 
 ### In Progress
-- **Write paths for self-custodial sessions**: wallet and agent sessions can sign in and read today; writes (upload, group admin) come next — wallet-signed transactions, and NOVA signing on behalf of a verified session. This also extends access windows to wallet-owned groups.
+- **Write paths for self-custodial sessions**: agent sessions write today. An Agent Connect agent signs and pays its own uploads and group admin (add, revoke with key rotation) through `nova-sdk-js` wallet mode and `nova-agent-connect`, proven on mainnet on 2026-11-04 in [nova-copy-trading](https://github.com/jcarbonnell/nova-copy-trading). Next: wallet-signed writes for wallet sessions, NOVA signing on behalf of a verified session, and access windows for wallet-owned groups.
+- **Agent Connect policy guidance**: a native call's attached deposit is checked against the policy's destinations as a withdrawal on chain `near` (observed 2026-11-04: `policy_destination_denied` on `record_transaction` under `destinations.mode: only`). The note "native calls skip destinations" in `nova-agent-connect`'s header is to be corrected, and the recommended agent policy narrowed to a withdrawal entry for `nova-sdk.near` instead of `destinations: any`.
+- **Read-after-write**: right after an upload, `get_group_transactions` can answer `NOT_OBSERVED` until the record is indexed (observed 2026-11-04). Callers retry today; a read that waits for the writer's own record is planned.
 - **Codex / ChatGPT plugin**: The Claude plugin (`nova-ai-memory`) is shipped. A Codex/ChatGPT equivalent is deferred — those surfaces require a hosted MCP endpoint consumed by a cloud agent, which is incompatible with NOVA's client-side encryption model (plaintext and keys never leave the user's machine). NOVA ships there unchanged if/when they support local, client-side-encrypting plugins in their public directories.
 - **Cold master-seed backup**: NOVA accounts and group keys persist on `nova-kv.near` and recover across TEE restarts via the master seed. Remaining risk is master seed loss — a cold backup mechanism for the encrypted master seed blob is on the roadmap.
 
 ### Potential Enhancements
 - **AI Metadata Extraction**: Automate metadata extraction for optimized storage indexing.
-- **Dataset Monetization**: Add pricing for file access/downloads.
-- **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated.
+- **Dataset Monetization**: Paid, time-limited access to a group is demonstrated agent to agent in [nova-copy-trading](https://github.com/jcarbonnell/nova-copy-trading): the buyer pays through NEAR Intents, the group owner verifies the payment on chain, admits the buyer, then revokes it and rotates the key at the end of the period. Next: contract-enforced settlement (escrow), so the buyer no longer trusts the owner to admit it; parked until a withdrawal's memo reaches the chain.
+- **Per-user rights**: So far all group members can upload files in the group. This could be controllable with per-member rights to be set at add member or later updated. Needed for groups sold as read access: a paying member should read, not write into the owner's journal (nova-copy-trading, deferral S3).
 - **Chainlink Oracles**: Dynamic fee calculation (NEAR/USD + storage costs)
 - **Multi-Chain Support**: Expand to other NEAR-compatible chains
 
