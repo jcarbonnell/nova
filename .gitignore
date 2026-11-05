@@ -86,3 +86,8 @@ paid-handoff/__pycache__/
 # Agent Connect
 nova-agent-connect/.env*
 nova-agent-connect/node_modules/
+# per-agent credentials and state, in every subdirectory
+**/.grant-token
+**/.grant-token.new
+**/aa-state.json
+**/.env
