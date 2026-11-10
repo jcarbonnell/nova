@@ -55,7 +55,6 @@ shade-agent/.env
 shade-agent/.env*.local
 shade-agent/deployment.yaml
 shade-agent/docker-compose.yaml
-shade-agent/package-lock.json
 shade-agent/frontend/package-lock.json
 shade-agent/near-rpc.json
 
