@@ -19,13 +19,13 @@
 // NOVA contract (see lib/near.ts resolveContract), not to KV. Routing KV reads
 // through NEAR_TESTNET_RPC_URL would query a contract that does not exist.
 
-import crypto, { hkdfSync } from 'crypto';
+import crypto from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
 
 import { log } from './logger.js';
-import { getTeeKeys } from './tee-keys.js';
+import { deriveKey } from './crypto.js';
 import { KV_RPC_URL, KV_CONTRACT, KV_CONTRACT_OWNER } from './config.js';
 
 // ────────────────────────────────────────────────
@@ -256,13 +256,13 @@ export function _signerLockCount(): number {
 }
 
 // ────────────────────────────────────────────────
-// Signer keys (§5.12): one per receiver, from the TEE
+// Signer keys (§5.12): one per receiver, from the master seed
 // ────────────────────────────────────────────────
 //
 // Shade signs as KV_CONTRACT_OWNER (nova-sdk.near) with FUNCTION-CALL keys only.
 // A function-call key is bound to ONE receiver, so each receiver Shade calls
-// gets its own key, derived from the TEE signer seed:
-//   HKDF-SHA256(getTeeKeys().kvSignerSeed, salt "nova-signer:<receiverId>", info "nova-v1")
+// gets its own key, derived from the master seed (portable across CVMs):
+//   deriveKey("nova-signer:<receiverId>") = HKDF-SHA256(seed, salt, info "nova-v1")
 // Receivers in use: nova-kv.near (store), fastfs.near (__fastdata_fastfs),
 // nova-sdk.near (tombstone_transactions, get_expired_transactions_detailed).
 // Each public key is added on chain by the operator as a scoped, capped
@@ -270,9 +270,7 @@ export function _signerLockCount(): number {
 
 export function signerSeedFor(receiverId: string): Uint8Array {
   if (!receiverId) throw new Error('signerSeedFor: receiverId required');
-  return new Uint8Array(
-    hkdfSync('sha256', getTeeKeys().kvSignerSeed, Buffer.from(`nova-signer:${receiverId}`), Buffer.from('nova-v1'), 32),
-  );
+  return deriveKey(`nova-signer:${receiverId}`, 32);
 }
 
 /** ed25519 public key (NEAR format) of the signer for `receiverId`. Public; safe to log. */

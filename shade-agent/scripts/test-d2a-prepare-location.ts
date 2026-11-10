@@ -20,8 +20,8 @@ import assert from 'node:assert/strict';
 import axios from 'axios';
 import bs58 from 'bs58';
 
-// Throwaway TEE keys (§5.12): random, from a fake key source, never the CVM's.
-import { loadTeeKeys } from '../src/lib/tee-keys.js';
+// Throwaway secret and seed (§5.12): random, never the CVM's.
+import { setMasterSeed } from '../src/lib/crypto.js';
 import { encodeFastfsLocation, parseFastfsLocation, uploadAt } from '../src/lib/fastfs.js';
 import { prepareFileUpload } from '../src/lib/services/fastfs-storage.js';
 import { PrepareFileUploadOutput } from '../src/lib/schemas.js';
@@ -29,8 +29,9 @@ import { PrepareFileUploadOutput } from '../src/lib/schemas.js';
 const CONTRACT = 'nova-sdk.near';
 const GROUP = 'd2a-harness-group';
 
-// ── throwaway TEE keys ──
-  await loadTeeKeys({ async getKey() { return { key: new Uint8Array(crypto.randomBytes(32)) }; } });
+// ── throwaway secret and seed ──
+process.env.TEE_KEY_SECRET = crypto.randomBytes(32).toString('hex');
+setMasterSeed(new Uint8Array(crypto.randomBytes(32)));
 
 // ── RPC stub (one answer table for axios and fetch) ──
 const seen: string[] = [];

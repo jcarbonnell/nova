@@ -1,20 +1,21 @@
 // shade-agent/test/test-kv-signer.mjs
 //
-// §5.12 item 1c-iii — lib/kv.ts signs with one scoped key PER RECEIVER, derived
-// from the TEE signer seed; never with the old seed-derived 'kv-owner-signer-v1'.
+// §5.12 R3 — lib/kv.ts signs with one scoped key PER RECEIVER, derived from the
+// master seed (deriveKey "nova-signer:<receiver>"), never with the retired
+// 'kv-owner-signer-v1' key.
 // OFFLINE: a fake NEAR RPC on localhost records every request. Proves:
 //   S1 one distinct key per receiver (nova-kv.near, fastfs.near, nova-sdk.near),
-//      deterministic, different from the raw TEE seed
+//      deterministic, different from the master seed itself
 //   S2 signerPublicKeyFor() is the ed25519 public key of signerSeedFor()
 //   S3 a KV store call: the nonce lookup asks for nova-sdk.near + the nova-kv.near
 //      key, and the broadcast signature verifies under that key only
 //   S4 a fastfs.near call uses a different key than nova-kv.near
-//   S5 before loadTeeKeys(): refuses, and makes no RPC call
+//   S5 before the master seed is loaded: refuses, and makes no RPC call
 //   S6 missing access key → error names the receiver
 //
 // MUTATIONS (each must turn the named checks ✗):
-//   M1 signerSeedFor returns getTeeKeys().kvSignerSeed for every receiver → S1, S3, S4
-//   M2 the HKDF salt omits the receiver ("nova-signer:")                  → S1, S3, S4
+//   M1 signerSeedFor returns getMasterSeedSync() for every receiver       → S1, S3, S4
+//   M2 the salt omits the receiver ("nova-signer:")                       → S1, S3, S4
 //   M3 signAndBroadcastFunctionCall signs with signerSeedFor('nova-kv.near')
 //      whatever the receiver                                              → S4
 //
@@ -52,7 +53,7 @@ await new Promise((r) => rpc.listen(0, '127.0.0.1', r));
 process.env.NEAR_RPC_URL = `http://127.0.0.1:${rpc.address().port}`;
 process.env.KV_CONTRACT_OWNER_ID = 'nova-sdk.near';
 
-const { loadTeeKeys, _resetTeeKeysForTests, getTeeKeys } = await import('../dist/lib/tee-keys.js');
+const { setMasterSeed, getMasterSeedSync } = await import('../dist/lib/crypto.js');
 const { signerSeedFor, signerPublicKeyFor, signAndBroadcastFunctionCall } = await import('../dist/lib/kv.js');
 
 let pass = 0, fail = 0;
@@ -65,7 +66,7 @@ const refuses = async (fn, needle) => {
   try { await fn(); return false; } catch (e) { return String(e?.message).includes(needle); }
 };
 const hex = (u8) => Buffer.from(u8).toString('hex');
-const fakeTee = { async getKey(p) { return { key: new Uint8Array(crypto.createHash('sha256').update(`app:${p}`).digest()) }; } };
+const SEED = new Uint8Array(crypto.randomBytes(32)); // throwaway, never a real seed
 
 const RECEIVERS = ['nova-kv.near', 'fastfs.near', 'nova-sdk.near'];
 const args = Buffer.from(JSON.stringify({ key: 'k', encrypted_blob: [1, 2, 3] }));
@@ -79,24 +80,23 @@ const verifySigned = async (b64, pubB58) => {
   return ed25519.verifyAsync(sig, digest, bs58.decode(pubB58.replace('ed25519:', '')));
 };
 
-console.log('kv signer (TEE, per receiver)');
+console.log('kv signer (master seed, per receiver)');
 
-await check('S5 before loadTeeKeys(): refuses and makes no RPC call', async () => {
-  _resetTeeKeysForTests();
+await check('S5 before the master seed is loaded: refuses and makes no RPC call', async () => {
   const n = requests.length;
   const refused = await refuses(
     () => signAndBroadcastFunctionCall('nova-kv.near', 'store', args, 30_000_000_000_000n, 0n),
-    'TEE keys not loaded');
+    'Master seed not initialized');
   return refused && requests.length === n;
 });
 
-await loadTeeKeys(fakeTee);
+setMasterSeed(SEED);
 
-await check('S1 one distinct key per receiver, deterministic, not the raw TEE seed', async () => {
+await check('S1 one distinct key per receiver, deterministic, not the master seed itself', async () => {
   const seeds = RECEIVERS.map((r) => hex(signerSeedFor(r)));
   const again = RECEIVERS.map((r) => hex(signerSeedFor(r)));
   return new Set(seeds).size === 3 && seeds.every((s, i) => s === again[i])
-    && !seeds.includes(hex(getTeeKeys().kvSignerSeed));
+    && !seeds.includes(hex(getMasterSeedSync()));
 });
 
 await check('S2 signerPublicKeyFor() = ed25519 public key of signerSeedFor()', async () => {
@@ -135,7 +135,6 @@ await check('S6 missing access key → error names the receiver', async () => {
   } finally { accessKeyExists = true; }
 });
 
-_resetTeeKeysForTests();
 rpc.close();
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

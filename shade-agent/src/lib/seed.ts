@@ -1,20 +1,57 @@
 // shade-agent/src/lib/seed.ts
 //
-// §5.12 (2026-11 incident rebuild): the master seed comes from the TEE
-// (lib/tee-keys.ts, path nova/master-seed/v1), loaded once at boot.
+// Master seed loading — the ONE place the seed is read from KV.
 //
-// Retired with it: the `master-root` KV blob, the seed derived from
-// SPONSOR_PRIVATE_KEY, and MASTER_SEED_INIT_ALLOWED. No KV read happens here.
+// §5.12 (2026-11 incident rebuild), on the portable design (roadmap §5.12):
+// the master seed is RANDOM, generated OFFLINE by the operator, encrypted under
+// TEE_KEY_SECRET (AES-256-GCM) and written to KV as `master-root` by the operator
+// himself, signed with nova-sdk.near's own key. This is the procedure used for the
+// original production seed (March 2026); Shade's former init branch (seed derived
+// from SPONSOR_PRIVATE_KEY, behind MASTER_SEED_INIT_ALLOWED) never produced it and
+// is removed. Because the operator holds the seed before the first boot, he also
+// computes Shade's signer public keys from it and adds them in advance.
 //
-// initializeMasterSeed() keeps its name and signature so its two callers
-// (rpc/base.ts middleware, scheduler-live init) are unchanged. It now only
-// confirms the TEE keys were loaded, and fails closed otherwise.
+// LOAD-ONLY, by design:
+//   • the read is STRICT: an RPC failure throws, it never reads as "no seed";
+//   • there is no write path: Shade cannot create or overwrite `master-root`;
+//   • concurrent first calls share one KV read.
+// This module is separate from crypto.ts to keep the dependency graph acyclic:
+// crypto.ts holds the seed state and does no I/O; this module does the I/O.
 //
-// Harness: test/test-crypto-tee.mjs (C9).
+// Harness: test/test-seed.mjs.
 
-import { getMasterSeedSync } from './crypto.js';
+import { hasMasterSeed, setMasterSeed, getMasterSeedSync, decryptBlob } from './crypto.js';
+import { getBlobFromKVStrict, KV_CONTRACT } from './kv.js';
 
-/** Returns the TEE master seed; throws TeeKeysError until loadTeeKeys() has run. */
+export const MASTER_ROOT_KEY = 'master-root';
+
+let inFlight: Promise<Uint8Array> | null = null;
+
+/**
+ * Load the master seed from KV once; afterwards return it from memory.
+ * Safe to call on every request (rpc/base.ts middleware does).
+ */
 export async function initializeMasterSeed(): Promise<Uint8Array> {
-  return getMasterSeedSync();
+  if (hasMasterSeed()) return getMasterSeedSync();
+  if (!inFlight) {
+    inFlight = loadMasterSeed().finally(() => { inFlight = null; });
+  }
+  return inFlight;
+}
+
+async function loadMasterSeed(): Promise<Uint8Array> {
+  const blob = await getBlobFromKVStrict(MASTER_ROOT_KEY); // throws on RPC failure
+  if (!blob) {
+    throw new Error(
+      `${MASTER_ROOT_KEY} not found in ${KV_CONTRACT}. Shade never creates the master seed: ` +
+      'the operator writes it once (offline seed procedure, roadmap §5.12).',
+    );
+  }
+  const seed = decryptBlob(blob); // GCM only; refuses legacy CBC and wrong keys
+  if (seed.length !== 32) {
+    throw new Error(`${MASTER_ROOT_KEY} holds ${seed.length} bytes; expected 32`);
+  }
+  setMasterSeed(seed);
+  console.log('✅ Master seed loaded from KV');
+  return seed;
 }

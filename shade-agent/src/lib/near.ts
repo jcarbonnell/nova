@@ -8,7 +8,7 @@
 //
 // ⚠️  ONE SIGNER IDENTITY REMAINS. History matters here:
 //   1. lib/kv.ts signAndBroadcastFunctionCall → signs as nova-sdk.near with one
-//      function-call key PER RECEIVER, seeded from the TEE (signerSeedFor, §5.12).
+//      function-call key PER RECEIVER, derived from the master seed (signerSeedFor, §5.12).
 //      LIVE. Its predecessor, salt 'kv-owner-signer-v1', is retired: that key was
 //      derivable from the leaked seed and has been deleted from nova-sdk.near.
 //   2. (RETIRED, Shade v38)     → kv-signer.nova-kv.near, salt 'nova-signer-v1'.

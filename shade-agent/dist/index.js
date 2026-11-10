@@ -33,7 +33,8 @@ import { startScheduler } from "./lib/services/scheduler-live.js";
 import { log } from "./lib/logger.js";
 import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT, getRpcUrl } from "./lib/config.js";
 import { validateBootEnv } from "./lib/boot-config.js";
-import { loadTeeKeys } from "./lib/tee-keys.js";
+import { initializeMasterSeed } from "./lib/seed.js";
+import { hasMasterSeed } from "./lib/crypto.js";
 import { signerPublicKeyFor } from "./lib/kv.js";
 import { FASTFS_RECEIVER } from "./lib/fastfs.js";
 // ────────────────────────────────────────────────
@@ -41,8 +42,9 @@ import { FASTFS_RECEIVER } from "./lib/fastfs.js";
 // ────────────────────────────────────────────────
 //
 // Throws at module load, DELIBERATELY: a Shade Agent without its contracts cannot
-// perform any of its functions. Also refuses the retired root secrets in
-// production, and a sponsor that is not a dedicated funding account.
+// perform any of its functions. Also requires a well-formed TEE_KEY_SECRET,
+// refuses MASTER_SEED_INIT_ALLOWED in production, and refuses a sponsor that is
+// not a dedicated funding account.
 const boot = validateBootEnv(process.env);
 const { agentContractId, kvContractId, network, isProduction, sponsor } = boot;
 console.log("🔧 Initializing NOVA Shade Agent 2.0...");
@@ -51,20 +53,29 @@ console.log(`🔐 KV Contract: ${kvContractId}`);
 console.log(`🌐 Sponsor Account: ${sponsor ? sponsor.accountId : "none (agent funding disabled)"}`);
 console.log(`📜 Agent Contract: ${agentContractId}`);
 // ────────────────────────────────────────────────
-// TEE root keys (§5.12) — BEFORE serve()
+// Master seed + signer keys (§5.12) — in the background, after serve()
 // ────────────────────────────────────────────────
 //
-// A deliberate exception to 7.5's bind-first rule: GetKey is a local socket call
-// (no RPC, no throttling), and without these keys every route fails. Fails closed:
-// no dstack socket in production, or no simulator opt-in elsewhere → throw → exit.
+// The seed is read from KV (`master-root`, decrypted with TEE_KEY_SECRET), which
+// is an RPC call, so it follows 7.5's bind-first rule. A failure is logged, not
+// fatal: every route loads the seed again through the rpc/base.ts middleware.
 //
-// The signer public keys are logged so the operator can add each one to
-// nova-sdk.near as a function-call key restricted to its receiver. They are public
-// keys; the seeds never leave the CVM.
-await loadTeeKeys();
-console.log("🔑 Signer keys (function-call keys on nova-sdk.near, one per receiver):");
-for (const receiver of [kvContractId, FASTFS_RECEIVER, NOVA_MAINNET_CONTRACT]) {
-    console.log(`   ${receiver}: ${await signerPublicKeyFor(receiver)}`);
+// The signer public keys are logged as a CHECK: the operator computes them from
+// the seed before the first boot and adds each one to nova-sdk.near as a
+// function-call key restricted to its receiver. They are public keys.
+async function loadSeedAndLogSigners() {
+    try {
+        await initializeMasterSeed();
+        console.log("🔑 Signer keys (function-call keys on nova-sdk.near, one per receiver):");
+        for (const receiver of [kvContractId, FASTFS_RECEIVER, NOVA_MAINNET_CONTRACT]) {
+            console.log(`   ${receiver}: ${await signerPublicKeyFor(receiver)}`);
+        }
+    }
+    catch (error) {
+        log("error", "master_seed_load_failed", {
+            message: error instanceof Error ? error.message : String(error),
+        });
+    }
 }
 let agentPhase = "starting";
 let agentInstance = null;
@@ -205,16 +216,17 @@ mountRpc(app);
 /**
  * Root health check — UNGATED, and the target for the 7.6 compose healthcheck.
  *
- * ALWAYS 200. `status` is "healthy" only once the agent is registered;
- * "degraded" at every other phase. A healthcheck that only asserts a response
+ * ALWAYS 200. `status` is "healthy" only once the agent is registered AND the
+ * master seed is loaded; "degraded" otherwise. A healthcheck that only asserts a response
  * therefore passes during startup (correct: the process is alive and serving)
  * while an operator or a monitor can still read `agent_phase` to see readiness.
  */
 app.get("/", (c) => c.json({
-    status: agentPhase === "registered" ? "healthy" : "degraded",
+    status: agentPhase === "registered" && hasMasterSeed() ? "healthy" : "degraded",
     service: "nova-shade-agent-2.0",
     version: "2.0.0",
     agent_phase: agentPhase,
+    master_seed: hasMasterSeed() ? "loaded" : "not loaded",
     agent_account: agentAccountId,
     registered_at: registeredAt,
     last_error: lastAgentError,
@@ -288,6 +300,8 @@ console.log(`   - POST /rpc/key-management/rotate_key`);
 // (owner keys / the nova-sdk.near KV signer), and a stalled whitelist must not
 // leave buyers with access. No-op unless SCHEDULER_ENABLED === 'true'.
 startScheduler();
+// Master seed in the background (fire and forget; failures are logged inside).
+void loadSeedAndLogSigners();
 // Fire and forget. Never awaited — that is the entire point of 7.5.
 // A throw inside is already handled (phase => "error"); this catch is a
 // last-resort guard so an unexpected rejection cannot become an unhandled one.

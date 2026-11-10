@@ -3,11 +3,12 @@
 // §5.12 (2026-11 incident rebuild): Shade's boot-time environment, validated in
 // one pure function so the rules are testable (index.ts only calls it).
 //
-// Required: AGENT_CONTRACT_ID, KV_CONTRACT_ID, AUTH0_DOMAIN.
-// Gone:     TEE_KEY_SECRET and MASTER_SEED_INIT_ALLOWED (root keys come from the
-//           TEE, lib/tee-keys.ts). If either is still set, boot is REFUSED in
-//           production: a leftover root secret in the environment is exactly
-//           what this rebuild removes, and must not linger unnoticed.
+// Required: AGENT_CONTRACT_ID, KV_CONTRACT_ID, AUTH0_DOMAIN, and TEE_KEY_SECRET
+//           (64 hex chars: the root secret that decrypts `master-root`; portable
+//           design, roadmap §5.12).
+// Retired:  MASTER_SEED_INIT_ALLOWED. Shade never creates the master seed (the
+//           operator writes it, lib/seed.ts), so the flag means nothing; if it is
+//           still set, boot is REFUSED in production so it cannot linger unnoticed.
 // Optional: SPONSOR_ACCOUNT_ID + SPONSOR_PRIVATE_KEY, both or neither. The
 //           sponsor only funds the agent account. It must be a dedicated small
 //           account: never the KV owner / NOVA contract (nova-sdk.near), never
@@ -34,7 +35,7 @@ export class BootConfigError extends Error {
 
 type Env = Record<string, string | undefined>;
 
-const RETIRED_ROOT_SECRETS = ['TEE_KEY_SECRET', 'MASTER_SEED_INIT_ALLOWED'] as const;
+const RETIRED_VARIABLES = ['MASTER_SEED_INIT_ALLOWED'] as const;
 
 export function validateBootEnv(env: Env): BootConfig {
   const agentContractId = env.AGENT_CONTRACT_ID;
@@ -44,16 +45,21 @@ export function validateBootEnv(env: Env): BootConfig {
     ['AGENT_CONTRACT_ID', agentContractId],
     ['KV_CONTRACT_ID', kvContractId],
     ['AUTH0_DOMAIN', auth0Domain],
+    ['TEE_KEY_SECRET', env.TEE_KEY_SECRET],
   ].filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
     throw new BootConfigError(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
+    if (!/^[0-9a-f]{64}$/i.test(env.TEE_KEY_SECRET!)) {
+    throw new BootConfigError('TEE_KEY_SECRET must be a 64-char hex string');
+  }
+
   const isProduction = env.NODE_ENV === 'production';
-  const leftovers = RETIRED_ROOT_SECRETS.filter((k) => env[k] !== undefined && env[k] !== '');
+  const leftovers = RETIRED_VARIABLES.filter((k) => env[k] !== undefined && env[k] !== '');
   if (isProduction && leftovers.length) {
     throw new BootConfigError(
-      `Retired root secret(s) still set: ${leftovers.join(', ')}. Root keys come from the TEE; ` +
+      `Retired variable(s) still set: ${leftovers.join(', ')}. Shade never creates the master seed; ` +
         'remove them from the CVM environment.',
     );
   }
