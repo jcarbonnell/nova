@@ -1,8 +1,7 @@
 // shade-agent/src/rpc/router.ts
 //
-// oRPC procedures. A SECOND thin adapter over lib/services/* — the Hono routes
-// are the first. One implementation, two surfaces, so parity is structural
-// rather than tested. (Tested anyway: see test-rpc-parity.mjs.)
+// oRPC procedures: the thin adapter over lib/services/* (the legacy Hono routes
+// are gone). Gate order and wire format: test/test-rpc-surface.mjs.
 //
 // EVERY procedure here is tagged `internal`. The Shade Agent's entire API sits
 // behind the X-Internal-Auth gate; none of it is public. The tag drives the

@@ -20,16 +20,8 @@ import assert from 'node:assert/strict';
 import axios from 'axios';
 import bs58 from 'bs58';
 
-// Throwaway TEE secret, set BEFORE any src module loads (hence dynamic imports
-// below: static imports are hoisted above this line). Refuse if one is already
-// in the environment — this harness must never run with a real secret.
-if (process.env.TEE_KEY_SECRET) {
-  console.error('Refusing to run: TEE_KEY_SECRET is set in this shell. Unset it (no .env) and retry.');
-  process.exit(2);
-}
-process.env.TEE_KEY_SECRET = crypto.randomBytes(32).toString('hex');
-
-import { setMasterSeed } from '../src/lib/crypto.js';
+// Throwaway TEE keys (§5.12): random, from a fake key source, never the CVM's.
+import { loadTeeKeys } from '../src/lib/tee-keys.js';
 import { encodeFastfsLocation, parseFastfsLocation, uploadAt } from '../src/lib/fastfs.js';
 import { prepareFileUpload } from '../src/lib/services/fastfs-storage.js';
 import { PrepareFileUploadOutput } from '../src/lib/schemas.js';
@@ -37,8 +29,8 @@ import { PrepareFileUploadOutput } from '../src/lib/schemas.js';
 const CONTRACT = 'nova-sdk.near';
 const GROUP = 'd2a-harness-group';
 
-// ── throwaway seed ──
-setMasterSeed(new Uint8Array(crypto.randomBytes(32)));
+// ── throwaway TEE keys ──
+  await loadTeeKeys({ async getKey() { return { key: new Uint8Array(crypto.randomBytes(32)) }; } });
 
 // ── RPC stub (one answer table for axios and fetch) ──
 const seen: string[] = [];

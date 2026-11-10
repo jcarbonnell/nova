@@ -18,12 +18,12 @@
 // are per-DEPLOYMENT, not per-network; the dual-network split applies to the
 // NOVA contract (see lib/near.ts resolveContract), not to KV. Routing KV reads
 // through NEAR_TESTNET_RPC_URL would query a contract that does not exist.
-import crypto from 'crypto';
+import crypto, { hkdfSync } from 'crypto';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
 import { log } from './logger.js';
-import { deriveKey } from './crypto.js';
+import { getTeeKeys } from './tee-keys.js';
 import { KV_RPC_URL, KV_CONTRACT, KV_CONTRACT_OWNER } from './config.js';
 // ────────────────────────────────────────────────
 // Configuration — single-sourced from lib/config.ts
@@ -222,10 +222,32 @@ export function withSignerLock(signerKey, fn) {
 export function _signerLockCount() {
     return signerLocks.size;
 }
+// ────────────────────────────────────────────────
+// Signer keys (§5.12): one per receiver, from the TEE
+// ────────────────────────────────────────────────
+//
+// Shade signs as KV_CONTRACT_OWNER (nova-sdk.near) with FUNCTION-CALL keys only.
+// A function-call key is bound to ONE receiver, so each receiver Shade calls
+// gets its own key, derived from the TEE signer seed:
+//   HKDF-SHA256(getTeeKeys().kvSignerSeed, salt "nova-signer:<receiverId>", info "nova-v1")
+// Receivers in use: nova-kv.near (store), fastfs.near (__fastdata_fastfs),
+// nova-sdk.near (tombstone_transactions, get_expired_transactions_detailed).
+// Each public key is added on chain by the operator as a scoped, capped
+// function-call key; Shade never holds a full-access key.
+export function signerSeedFor(receiverId) {
+    if (!receiverId)
+        throw new Error('signerSeedFor: receiverId required');
+    return new Uint8Array(hkdfSync('sha256', getTeeKeys().kvSignerSeed, Buffer.from(`nova-signer:${receiverId}`), Buffer.from('nova-v1'), 32));
+}
+/** ed25519 public key (NEAR format) of the signer for `receiverId`. Public; safe to log. */
+export async function signerPublicKeyFor(receiverId) {
+    const pub = await ed25519.getPublicKeyAsync(signerSeedFor(receiverId));
+    return `ed25519:${bs58.encode(pub)}`;
+}
 /**
- * Sign a FunctionCall as the KV-owner signer (nova-sdk.near, salt
- * 'kv-owner-signer-v1' — the ONLY live Shade signing identity; reused, never
- * proliferated, per §10) and broadcast_tx_commit. Returns the finalized outcome.
+ * Sign a FunctionCall as KV_CONTRACT_OWNER (nova-sdk.near) with the receiver's
+ * scoped signer key (signerSeedFor(receiverId), §5.12) and broadcast_tx_commit.
+ * Returns the finalized outcome.
  *
  * DEFAULT: throws on an on-chain execution Failure — KV writes MUST succeed.
  * FastFS __fastdata envelopes have no contract and fail with CodeDoesNotExist
@@ -238,7 +260,7 @@ export function _signerLockCount() {
 export async function signAndBroadcastFunctionCall(receiverId, methodName, argsBytes, gas, deposit, opts = {}) {
     const rpcUrl = KV_RPC_URL;
     const signerAccountId = KV_CONTRACT_OWNER;
-    const signerPriv = deriveKey('kv-owner-signer-v1', 32);
+    const signerPriv = signerSeedFor(receiverId);
     const signerPub = await ed25519.getPublicKeyAsync(signerPriv);
     const signerPubBs58 = `ed25519:${bs58.encode(signerPub)}`;
     // S2.0: nonce read → sign → broadcast is one critical section per access key.
@@ -259,9 +281,8 @@ export async function signAndBroadcastFunctionCall(receiverId, methodName, argsB
             },
         });
         if (!accessKeyResult || typeof accessKeyResult.nonce === 'undefined') {
-            throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}\n` +
-                `Please add the key with:\n` +
-                `near add-key ${signerAccountId} ${signerPubBs58} --accountId nova-kv.near --networkId mainnet`);
+            throw new Error(`Access key not found for ${signerAccountId} with public key ${signerPubBs58}. ` +
+                `The operator must add it as a function-call key for receiver ${receiverId} (§5.12).`);
         }
         const nonce = BigInt(accessKeyResult.nonce) + 1n;
         const blockHash = bs58.decode(accessKeyResult.block_hash);

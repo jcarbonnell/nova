@@ -1,9 +1,8 @@
 // shade-agent/src/lib/config.ts
 // Single source for network/contract configuration.
-// SECRETS ARE DELIBERATELY ABSENT — TEE_KEY_SECRET and SPONSOR_PRIVATE_KEY stay
-// read at their point of use. They feed decryptBlob and master-seed derivation;
-// index.ts already fail-fasts on them at boot. Moving them buys nothing and
-// risks the one key path that cannot be recovered.
+// SECRETS ARE DELIBERATELY ABSENT. Since §5.12 no root secret lives in the
+// environment: root keys come from the TEE (lib/tee-keys.ts). The optional sponsor
+// key (a dedicated funding account) is read only by lib/boot-config.ts.
 // No throws at module load: this module must stay importable by
 // scripts/generate-openapi.ts, which has no production .env.
 

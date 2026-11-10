@@ -24,7 +24,7 @@ import { signAndBroadcastFunctionCall, borshString, borshBytes } from './kv.js';
 // Predecessor = the NOVA account that signs the envelope (Arch 2: the existing
 // KV-owner signer, nova-sdk.near — spike-validated). Receiver = the namespace
 // label in the gateway path; needs no contract. Gateway is the DEFAULT reader.
-const FASTFS_RECEIVER = process.env.FASTFS_RECEIVER || 'fastfs.near';
+export const FASTFS_RECEIVER = process.env.FASTFS_RECEIVER || 'fastfs.near';
 const FASTFS_PREDECESSOR = process.env.FASTFS_PREDECESSOR || 'nova-sdk.near';
 const FASTFS_GATEWAY_TPL = process.env.FASTFS_GATEWAY_TPL || 'https://{pred}.fastfs.io';
 const FASTFS_MIME = 'application/octet-stream'; // opaque ciphertext

@@ -13,38 +13,50 @@
 // That split is what keeps the dependency graph acyclic (kv.ts needs deriveKey
 // to derive its own signer keypair).
 //
-// EVERY function below is lifted verbatim from the pre-extraction routes.
-// Any change to deriveKey's HKDF parameters or decryptBlob's format dispatch is
-// a breaking change against live production KV data. Do not "clean up" here.
+// §5.12 (2026-11 incident rebuild): the two root secrets now come from the TEE
+// (lib/tee-keys.ts), never from the environment:
+//   • blob encryption key  = getTeeKeys().kvEncryptionKey  (was TEE_KEY_SECRET)
+//   • master seed          = getTeeKeys().masterSeed       (was derived from
+//                            SPONSOR_PRIVATE_KEY and stored as the master-root blob)
+// The KV store is fresh (new KV contract), so the legacy CBC read path is gone:
+// decryptBlob accepts AES-256-GCM blobs only and refuses anything else.
+// deriveKey's HKDF parameters are unchanged; any change to them, or to the GCM
+// layout, is a breaking change against KV data. Do not "clean up" here.
+//
+// Harness: test/test-crypto-tee.mjs.
 import crypto, { hkdfSync } from 'crypto';
+import { getTeeKeys, TeeKeysError } from './tee-keys.js';
 // ────────────────────────────────────────────────
-// Master seed state (single shared instance)
+// Master seed (from the TEE)
 // ────────────────────────────────────────────────
 //
-// v0.4 CHANGE: previously each route module held its OWN `let masterSeed` and
-// performed its own lazy KV load — two in-memory copies, two init code paths,
-// two KV reads per cold start. They held the same value, but nothing enforced
-// that. Now there is exactly one.
-let masterSeed = null;
-export function setMasterSeed(seed) {
-    masterSeed = seed;
-}
+// The seed is no longer state held here: it is the TEE-derived key loaded once
+// at boot by loadTeeKeys(). These three functions keep their signatures so that
+// seed.ts and its callers compile unchanged until they are simplified.
+/** True once the TEE keys are loaded (loadTeeKeys() at boot). */
 export function hasMasterSeed() {
-    return masterSeed !== null;
+    try {
+        getTeeKeys();
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
-/** Throws if the seed has not been loaded. Callers must run initializeMasterSeed() first. */
+/** Throws until the TEE keys are loaded. */
 export function getMasterSeedSync() {
-    if (!masterSeed)
-        throw new Error('Master seed not initialized');
-    return masterSeed;
+    return getTeeKeys().masterSeed;
+}
+/** Retired: the master seed comes from the TEE and cannot be set. */
+export function setMasterSeed(_seed) {
+    throw new TeeKeysError('setMasterSeed is retired: the master seed comes from the TEE (loadTeeKeys)');
 }
 // ────────────────────────────────────────────────
 // Deterministic derivation
 // ────────────────────────────────────────────────
 //
-// Live salts in production — changing ANY of these silently orphans data:
-//   'kv-owner-signer-v1'                          → KV store signer (nova-sdk.near)
-//   'nova-signer-v1'                              → contract-call signer (kv-signer.nova-kv.near)
+// Salts in use — changing ANY of these silently orphans data:
+//   'fastfs-path-salt'                            → FastFS path salt (lib/fastfs.ts)
 //   `api-key:{account_id}`                        → deterministic API keys
 //   `group:{group_id}:{network}:{contract}[:v{n}]` → group encryption keys
 export function deriveKey(salt, length = 32) {
@@ -53,69 +65,42 @@ export function deriveKey(salt, length = 32) {
     return new Uint8Array(derived);
 }
 // ────────────────────────────────────────────────
-// Blob encryption (AES-256-GCM, with legacy CBC read path)
+// Blob encryption (AES-256-GCM only)
 // ────────────────────────────────────────────────
 //
-// GCM stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext]
-// New blobs are written with AES-256-GCM. Legacy CBC blobs remain readable via
-// decryptBlob's fallback (shipped v0.3.2 Fix 8; the production master-root is
-// still a CBC blob and MUST keep decrypting).
+// Stored-byte layout: [4-byte magic "NOVG"][12-byte IV][16-byte tag][ciphertext],
+// returned as one hex string. Key: getTeeKeys().kvEncryptionKey (32 bytes).
 export const GCM_MAGIC = Buffer.from([0x4e, 0x4f, 0x56, 0x47]); // "NOVG"
+function blobKey() {
+    return Buffer.from(getTeeKeys().kvEncryptionKey); // throws until loadTeeKeys()
+}
 export function encryptBlob(data) {
-    const TEE_SECRET = process.env.TEE_KEY_SECRET;
-    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
-        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
-    }
+    const key = blobKey();
     const iv = crypto.randomBytes(12); // GCM standard IV length
-    const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(TEE_SECRET, 'hex'), iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
     const encrypted = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
     const tag = cipher.getAuthTag(); // 16 bytes
-    // Return the COMPLETE stored layout as a single hex string (no colons).
     return Buffer.concat([GCM_MAGIC, iv, tag, encrypted]).toString('hex');
 }
 export function decryptBlob(enc) {
-    const TEE_SECRET = process.env.TEE_KEY_SECRET;
-    if (!TEE_SECRET || !/^[0-9a-f]{64}$/i.test(TEE_SECRET)) {
-        throw new Error('TEE_KEY_SECRET must be a 64-char hex string');
+    const key = blobKey();
+    if (typeof enc === 'string' && enc.includes(':')) {
+        throw new Error('Legacy CBC blob refused: only AES-256-GCM blobs are readable');
     }
-    const key = Buffer.from(TEE_SECRET, 'hex');
-    // Normalize input to the raw stored bytes.
-    let raw;
-    if (Array.isArray(enc)) {
-        raw = Buffer.from(enc);
+    const raw = Array.isArray(enc) ? Buffer.from(enc) : Buffer.from(enc, 'hex');
+    // Magic + 12-byte IV + 16-byte tag = 32 bytes of framing.
+    if (raw.length < 32 || !raw.subarray(0, 4).equals(GCM_MAGIC)) {
+        throw new Error('Not an AES-256-GCM blob (missing NOVG header); legacy CBC blobs are refused');
     }
-    else if (enc.includes(':')) {
-        // Legacy CBC string form "ivhex:encryptedhex"
-        const [ivStr, encStr] = enc.split(':');
-        if (!ivStr || !encStr)
-            throw new Error('Invalid encrypted blob format');
-        const iv = Buffer.from(ivStr, 'hex');
-        const encrypted = Buffer.from(encStr, 'hex');
-        const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-        return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
-    }
-    else {
-        raw = Buffer.from(enc, 'hex'); // new complete-layout hex
-    }
-    // GCM? magic present and enough bytes for framing (4 magic + 12 iv + 16 tag).
-    if (raw.length >= 32 && raw.subarray(0, 4).equals(GCM_MAGIC)) {
-        const iv = raw.subarray(4, 16); // 12 bytes
-        const tag = raw.subarray(16, 32); // 16 bytes
-        const ciphertext = raw.subarray(32);
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-        decipher.setAuthTag(tag);
-        return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
-    }
-    // Legacy CBC raw bytes: [16-byte IV][ciphertext].
-    if (raw.length < 17)
-        throw new Error('Encrypted blob too short');
-    const iv = raw.subarray(0, 16);
-    const encrypted = raw.subarray(16);
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-    return new Uint8Array(Buffer.concat([decipher.update(encrypted), decipher.final()]));
+    const iv = raw.subarray(4, 16);
+    const tag = raw.subarray(16, 32);
+    const ciphertext = raw.subarray(32);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
 }
 // Parameterized AES-256-GCM for KEY WRAPPING 
-// encryptBlob/decryptBlob above wrap under TEE_KEY_SECRET (KV blobs at rest);
+// encryptBlob/decryptBlob above wrap under the TEE KV key (KV blobs at rest);
 // gcmWrap/gcmUnwrap wrap under an ARBITRARY 32-byte key — used to wrap a random
 // per-file key under a group key v{N}. Layout: [12 IV][16 tag][ciphertext] hex.
 export function gcmWrap(data, key) {

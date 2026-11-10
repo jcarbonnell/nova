@@ -29,50 +29,52 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
 import { ShadeClient } from "@neardefi/shade-agent-js";
+import { JsonRpcProvider } from "@near-js/providers";
 
 import { mountRpc } from "./rpc/mount.js";
 import { startScheduler } from "./lib/services/scheduler-live.js";
 import { log } from "./lib/logger.js";
 
-import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT } from "./lib/config.js";
+import { NOVA_MAINNET_CONTRACT, NOVA_TESTNET_CONTRACT, getRpcUrl } from "./lib/config.js";
+import { validateBootEnv } from "./lib/boot-config.js";
+import { loadTeeKeys } from "./lib/tee-keys.js";
+import { signerPublicKeyFor } from "./lib/kv.js";
+import { FASTFS_RECEIVER } from "./lib/fastfs.js";
 
 // ────────────────────────────────────────────────
-// Environment validation
+// Environment validation (§5.12: lib/boot-config.ts)
 // ────────────────────────────────────────────────
 //
-// These throws stay at module load, DELIBERATELY — unlike the frontend items in
-// roadmap step 10. A Shade Agent without TEE_KEY_SECRET or KV_CONTRACT_ID cannot
-// perform any of its functions; every request would error. Failing fast at boot
-// is correct here. (The frontend case differs: there a missing var turns a
-// runtime 500 into a BUILD failure.) Not an oversight — a considered difference.
+// Throws at module load, DELIBERATELY: a Shade Agent without its contracts cannot
+// perform any of its functions. Also refuses the retired root secrets in
+// production, and a sponsor that is not a dedicated funding account.
 
-const agentContractId = process.env.AGENT_CONTRACT_ID;
-const sponsorAccountId = process.env.SPONSOR_ACCOUNT_ID;
-const sponsorPrivateKey = process.env.SPONSOR_PRIVATE_KEY;
-const teeKeySecret = process.env.TEE_KEY_SECRET;
-const kvContractId = process.env.KV_CONTRACT_ID;
-const auth0Domain = process.env.AUTH0_DOMAIN;
-
-if (!agentContractId || !sponsorAccountId || !sponsorPrivateKey) {
-  throw new Error(
-    "Missing required environment variables: AGENT_CONTRACT_ID, SPONSOR_ACCOUNT_ID, SPONSOR_PRIVATE_KEY"
-  );
-}
-
-if (!teeKeySecret || !kvContractId || !auth0Domain) {
-  throw new Error(
-    "Missing NOVA environment variables: TEE_KEY_SECRET, KV_CONTRACT_ID, AUTH0_DOMAIN"
-  );
-}
-
-const isProduction = process.env.NODE_ENV === "production";
-const network = agentContractId.endsWith(".testnet") ? "testnet" : "mainnet";
+const boot = validateBootEnv(process.env);
+const { agentContractId, kvContractId, network, isProduction, sponsor } = boot;
 
 console.log("🔧 Initializing NOVA Shade Agent 2.0...");
 console.log(`📍 Environment: ${isProduction ? "production (Phala CVM)" : "development (local)"}`);
 console.log(`🔐 KV Contract: ${kvContractId}`);
-console.log(`🌐 Sponsor Account: ${sponsorAccountId}`);
+console.log(`🌐 Sponsor Account: ${sponsor ? sponsor.accountId : "none (agent funding disabled)"}`);
 console.log(`📜 Agent Contract: ${agentContractId}`);
+
+// ────────────────────────────────────────────────
+// TEE root keys (§5.12) — BEFORE serve()
+// ────────────────────────────────────────────────
+//
+// A deliberate exception to 7.5's bind-first rule: GetKey is a local socket call
+// (no RPC, no throttling), and without these keys every route fails. Fails closed:
+// no dstack socket in production, or no simulator opt-in elsewhere → throw → exit.
+//
+// The signer public keys are logged so the operator can add each one to
+// nova-sdk.near as a function-call key restricted to its receiver. They are public
+// keys; the seeds never leave the CVM.
+
+await loadTeeKeys();
+console.log("🔑 Signer keys (function-call keys on nova-sdk.near, one per receiver):");
+for (const receiver of [kvContractId, FASTFS_RECEIVER, NOVA_MAINNET_CONTRACT]) {
+  console.log(`   ${receiver}: ${await signerPublicKeyFor(receiver)}`);
+}
 
 // ────────────────────────────────────────────────
 // Agent lifecycle state
@@ -111,6 +113,36 @@ export function getAgentPhase(): AgentPhase {
 }
 
 // ────────────────────────────────────────────────
+// Agent funding (§5.12)
+// ────────────────────────────────────────────────
+//
+// Inside the TEE every boot is a NEW random agent account whose key never leaves
+// the CVM, so whatever is sent to it is lost at the next reboot. Send only what
+// registration needs: register() attaches 0.005 NEAR plus gas, and runs again
+// every 6 days, so the balance is checked before each registration too.
+// Starting values; measure on the first boot and adjust.
+const AGENT_MIN_BALANCE_NEAR = 0.05;
+const AGENT_FUND_NEAR = 0.1;
+
+async function topUpAgent(): Promise<void> {
+  if (!sponsor) return; // no sponsor: the operator funds the agent by hand
+  try {
+    const balance = await agentInstance!.balance();
+    console.log(`💰 Agent Balance: ${balance.toFixed(4)} NEAR`);
+    if (balance < AGENT_MIN_BALANCE_NEAR) {
+      console.log(`💸 Funding agent with ${AGENT_FUND_NEAR} NEAR from ${sponsor.accountId}...`);
+      await agentInstance!.fund(AGENT_FUND_NEAR);
+      console.log("✅ Agent funded");
+    }
+  } catch (error) {
+    // Do not abort: registration may still succeed on an existing balance.
+    log("warn", "agent_funding_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// ────────────────────────────────────────────────
 // Background bootstrap (was: everything above serve())
 // ────────────────────────────────────────────────
 
@@ -119,12 +151,14 @@ async function bootstrapAgent(): Promise<void> {
   try {
     agentInstance = await ShadeClient.create({
       networkId: network,
-      agentContractId: agentContractId!,
-      sponsor: {
-        accountId: sponsorAccountId!,
-        privateKey: sponsorPrivateKey!,
-      },
-      derivationPath: sponsorPrivateKey!,
+      agentContractId,
+      // Our own (keyed) RPC. Without it shade-agent-js uses FastNear's anonymous
+      // free tier: the 429s of 27 October.
+      rpc: new JsonRpcProvider({ url: getRpcUrl(network) }),
+      // §5.12: NO derivationPath. It used to be the sponsor's private key, so the
+      // agent key was derivable by anyone holding it. Inside the TEE, 2.2.0 draws a
+      // random agent key per boot that never leaves the CVM.
+      ...(sponsor ? { sponsor } : {}),
     });
 
     agentAccountId = agentInstance.accountId();
@@ -147,21 +181,7 @@ async function bootstrapAgent(): Promise<void> {
   }
 
   // 2. Fund if low (RPC-dependent, non-fatal).
-  try {
-    const balance = await agentInstance.balance();
-    console.log(`💰 Agent Balance: ${balance.toFixed(4)} NEAR`);
-    // Threshold must exceed the cost of registration: ~0.30 NEAR.
-    if (balance < 0.5) {
-      console.log("💸 Funding agent with 1 NEAR...");
-      await agentInstance.fund(1);
-      console.log("✅ Agent funded");
-    }
-  } catch (error) {
-    // Do not abort: registration may still succeed on an existing balance.
-    log("warn", "agent_funding_failed", {
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  await topUpAgent();
 
   // 3. Register — the old `while(true)`, now in the background.
   //    Retries forever by design: the operator may still need to whitelist the
@@ -194,6 +214,7 @@ async function bootstrapAgent(): Promise<void> {
   // 4. Re-register every 6 days. Unchanged — already non-blocking.
   const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
   setInterval(async () => {
+    await topUpAgent();
     try {
       const registered = await agentInstance!.register();
       if (registered) {

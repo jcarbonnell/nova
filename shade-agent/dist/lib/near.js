@@ -7,9 +7,10 @@
 // owns the transaction-serialization primitives this module reuses.
 //
 // ⚠️  ONE SIGNER IDENTITY REMAINS. History matters here:
-//   1. lib/kv.ts storeBlobToKV  → signs as nova-sdk.near, salt 'kv-owner-signer-v1'.
-//      LIVE. The derived public key is registered as an access key on
-//      nova-sdk.near. Changing the salt breaks every KV write.
+//   1. lib/kv.ts signAndBroadcastFunctionCall → signs as nova-sdk.near with one
+//      function-call key PER RECEIVER, seeded from the TEE (signerSeedFor, §5.12).
+//      LIVE. Its predecessor, salt 'kv-owner-signer-v1', is retired: that key was
+//      derivable from the leaked seed and has been deleted from nova-sdk.near.
 //   2. (RETIRED, Shade v38)     → kv-signer.nova-kv.near, salt 'nova-signer-v1'.
 //      Used by broadcastContractCall for the revoke path. Its key was NEVER
 //      provisioned (empty access-key list), so the path threw BigInt(undefined)

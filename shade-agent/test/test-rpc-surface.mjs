@@ -23,16 +23,15 @@ import { pathToFileURL } from 'url';
 
 const INTERNAL_SECRET = 'd'.repeat(64);
 process.env.INTERNAL_API_SECRET = INTERNAL_SECRET;
-process.env.TEE_KEY_SECRET = 'b'.repeat(64);
 process.env.AUTH0_DOMAIN = 'test.auth0.com';
 process.env.SHADE_AGENT_ACCOUNT_ID = 'test-agent';
 delete process.env.AGENT_IDENTITY_RECIPIENT; // assert the default
 
 const imp = (p) => import(pathToFileURL(path.resolve(process.cwd(), p)).href);
 
-let cryptoLib, mount, Hono;
-try {
-  cryptoLib = await imp('./dist/lib/crypto.js');
+let teeKeys, mount, Hono;
+  try {
+    teeKeys = await imp('./dist/lib/tee-keys.js');
   mount = await imp('./dist/rpc/mount.js');
   ({ Hono } = await import('hono'));
 } catch (e) {
@@ -41,8 +40,10 @@ try {
   process.exit(2);
 }
 
-// Pre-seed so initializeMasterSeed() short-circuits and never touches KV.
-cryptoLib.setMasterSeed(new Uint8Array(crypto.createHash('sha256').update('surface-seed').digest()));
+// Throwaway TEE keys (§5.12), one per path, so initializeMasterSeed() never touches KV.
+  await teeKeys.loadTeeKeys({ async getKey(p) {
+    return { key: new Uint8Array(crypto.createHash('sha256').update(`surface:${p}`).digest()) };
+  } });
 
 const app = new Hono();
 mount.mountRpc(app);
