@@ -1,70 +1,85 @@
-services:
-  # always have shade-agent-api first in order of services
-  shade-agent-api:
-    environment:
-      NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
-      NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
-      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
-      API_CODEHASH: ${API_CODEHASH}
-      APP_CODEHASH: ${APP_CODEHASH}
-      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
-    platform: linux/amd64 # Explicitly set for TDX
-    # shade-agent-api-image
-    image: mattdlockyer/shade-agent-api@sha256:a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5
-    container_name: shade-agent-api
-    # DO NOT EXPOSE THE API PORT TO THE PUBLIC
-    volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
-    restart: always
+# NOVA — Phala CVM compose (roadmap §5.12, onchain KMS on Base, dstack-0.5.12)
+#
+# Under onchain KMS this file is part of the attested compose hash: ANY change to
+# it needs an addComposeHash transaction from the DstackApp owner. Changing an
+# encrypted variable's VALUE does not.
+#
+# Literal values below are non-secret configuration (visible, measured).
+# ${NAME} values are encrypted env vars, sent by `phala deploy -e` from the
+# Cleanroom vault (unseal exec nova-deploy); they are decryptable only inside the
+# TEE. Never put a secret value in this file.
+#
+# Set AFTER the first deploy (they depend on the new app_id URL), as env values:
+#   AUTH0_AUDIENCE, SESSION_TOKEN_AUDIENCE
+# Declared now, used by the migration (L1–L4) later:
+#   LEGACY_TEE_KEY_SECRET
 
-  shade-agent-app:
+services:
+  shade-agent:
+    image: jcarbonnell/nova-shade-agent:v62@sha256:0268a5892b3809292a2c71c51fb76751514bdb57055fda39c492f013ab685a6a
+    platform: linux/amd64
+    container_name: shade-agent
     environment:
-      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
-      NEAR_RPC_URL: ${NEAR_RPC_URL}
-      KV_CONTRACT_ID: ${KV_CONTRACT_ID}
-      NOVA_CONTRACT_ID: ${NOVA_CONTRACT_ID}
-      NOVA_TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
-      SHADE_AGENT_ACCOUNT_ID: ${SHADE_AGENT_ACCOUNT_ID}
-      NOVA_SIGNER_ACCOUNT_ID: ${NOVA_SIGNER_ACCOUNT_ID}
-      TEE_KEY_SECRET: ${TEE_KEY_SECRET}
-      JWT_SECRET: ${JWT_SECRET}
-      AUTH0_DOMAIN: ${AUTH0_DOMAIN}
+      NODE_ENV: production
+      PORT: "3000"
+      AGENT_CONTRACT_ID: shade-agent.nova-sdk.near
+      KV_CONTRACT_ID: nova-kv-2.near
+      KV_CONTRACT_OWNER_ID: nova-sdk.near
+      NOVA_MAINNET_CONTRACT: nova-sdk.near
+      NOVA_TESTNET_CONTRACT: nova-sdk-7.testnet
+      SPONSOR_ACCOUNT_ID: nova-sponsor.near
+      AUTH0_DOMAIN: dev-ufzh6532qo5g0m7i.us.auth0.com
+      AUTH0_CLIENT_ID: aosUPWSgJ4pnrK34N7D45tm1AMgkVlGQ
+      SESSION_TOKEN_ISSUER: https://nova-sdk.com
+      SCHEDULER_ENABLED: "true"
+      NEAR_RPC_URL: https://rpc.mainnet.fastnear.com?apiKey=${FASTNEAR_API_KEY}
+      NEAR_TESTNET_RPC_URL: https://rpc.testnet.fastnear.com?apiKey=${FASTNEAR_API_KEY}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
-      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
-      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
-    platform: linux/amd64 # Explicitly set for TDX
-    # shade-agent-app-image – update tag to your new build (v7 or main)
-    image: jcarbonnell/nova-shade-agent:v47
-    container_name: shade-agent-app
+      SESSION_TOKEN_AUDIENCE: ${SESSION_TOKEN_AUDIENCE}
+      TEE_KEY_SECRET: ${TEE_KEY_SECRET}
+      SPONSOR_PRIVATE_KEY: ${SPONSOR_PRIVATE_KEY}
+      SESSION_TOKEN_SECRET: ${SESSION_TOKEN_SECRET}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+      LEGACY_TEE_KEY_SECRET: ${LEGACY_TEE_KEY_SECRET}
     ports:
       - "3000:3000"
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
     restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   nova-mcp:
+    image: jcarbonnell/nova-mcp:v47@sha256:340fabcdb336af668752cbb7d10106c1ca3e8a910e4f21a2b91ce7c331d878e0
+    platform: linux/amd64
+    container_name: nova-mcp
     environment:
-      # Internal Docker hostname — resolves within same CVM, no public URL needed
-      SHADE_API_URL: http://shade-agent-app:3000
-      CONTRACT_ID: ${NOVA_CONTRACT_ID}
-      TESTNET_CONTRACT_ID: ${NOVA_TESTNET_CONTRACT_ID}
-      RPC_URL: ${NEAR_RPC_URL}
-      TESTNET_RPC_URL: https://rpc.testnet.near.org
+      SHADE_API_URL: http://shade-agent:3000
+      CONTRACT_ID: nova-sdk.near
+      TESTNET_CONTRACT_ID: nova-sdk-7.testnet
+      SESSION_TOKEN_ISSUER: https://nova-sdk.com
+      PINATA_GATEWAY: https://green-main-mockingbird-133.mypinata.cloud/ipfs
+      RPC_URL: https://rpc.mainnet.fastnear.com?apiKey=${FASTNEAR_API_KEY}
+      TESTNET_RPC_URL: https://rpc.testnet.fastnear.com?apiKey=${FASTNEAR_API_KEY}
       FASTNEAR_API_KEY: ${FASTNEAR_API_KEY}
-      AUTH0_DOMAIN: ${AUTH0_DOMAIN}
-      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE}
-      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID}
-      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET}
+      SESSION_TOKEN_AUDIENCE: ${SESSION_TOKEN_AUDIENCE}
       SESSION_TOKEN_SECRET: ${SESSION_TOKEN_SECRET}
-      PINATA_GATEWAY: ${PINATA_GATEWAY}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       IPFS_API_KEY: ${IPFS_API_KEY}
       IPFS_API_SECRET: ${IPFS_API_SECRET}
-    platform: linux/amd64
-    image: jcarbonnell/nova-mcp:v28
-    container_name: nova-mcp
+      READER_PRIVATE_KEY: ${READER_PRIVATE_KEY}
     ports:
       - "8000:8000"
     depends_on:
-      - shade-agent-app
+      - shade-agent
     restart: always
-    # No tappd.sock — MCP server does not perform TDX attestation
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
