@@ -67,6 +67,10 @@ S.view_contract = fake_view
 S.call_contract = fake_call
 S.get_reader_signer = fake_reader_signer
 
+async def fake_view_account(account_id):  # v47 6a: the free-balance floor reads this; ample balance
+    return {"amount": str(10**26), "storage_usage": 0}
+S._view_account = fake_view_account
+
 gm = S.get_group_members.__inner__ if hasattr(S.get_group_members, "__inner__") else S.get_group_members
 
 def reset(): calls.clear(); reader_calls.clear(); reader_mode["fail"] = False

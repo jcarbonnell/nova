@@ -253,6 +253,9 @@ logging.getLogger().addHandler(_Capture())
 
 
 def runk(name, headers, expect_accept, expect_account=None, expect_shade=None, mode="normal"):
+    # v47 6b: each case starts with an EMPTY verification cache, so it really reaches
+    # (the stubbed) Shade. The cache's own behaviour is pinned down by K15.
+    server.API_KEY_CACHE = server.VerifiedKeyCache()
     shade_calls.clear()
     shade_mode["m"] = mode
     try:
@@ -320,6 +323,29 @@ results.append(runk("K11 VALID Bearer + key → JWT identity wins, Shade not cal
 results.append(runk("K12 bare x-account-id + x-user-email via resolve_user (T4 through new entry)",
     {"x-account-id": VICTIM, "x-user-email": "anything@example.com"},
     expect_accept=False, expect_shade=False))
+
+# ── K15 (v47 6b): the 60 s verification cache, the agreed trade-off ─────────
+# A verified (key, account) pair is trusted for 60 s without asking Shade; after
+# that Shade is asked again, so a revoked key stops working within 60 s.
+clock = [1000.0]
+server.API_KEY_CACHE = server.VerifiedKeyCache(clock=lambda: clock[0])
+hdr = {"x-api-key": VICTIM_KEY, "x-account-id": VICTIM}
+shade_calls.clear(); shade_mode["m"] = "normal"
+first = asyncio.run(server.resolve_user(request=FakeRequest(hdr)))["near_account_id"]
+shade_mode["m"] = "no_key"                 # the key is revoked right after
+clock[0] += 59
+within = asyncio.run(server.resolve_user(request=FakeRequest(hdr)))["near_account_id"]
+calls_within = len(shade_calls)
+clock[0] += 1                              # 60 s after the verification
+try:
+    asyncio.run(server.resolve_user(request=FakeRequest(hdr)))
+    after_refused = False
+except Exception as e:
+    after_refused = "invalid credential" in str(e)
+k15 = first == within == VICTIM and calls_within == 1 and after_refused and len(shade_calls) == 2
+print(f"[{'PASS' if k15 else 'FAIL'}] K15 60 s cache: revoked key accepted at 59 s without Shade, refused at 60 s"
+      f"  (shade calls: {len(shade_calls)})")
+results.append(k15)
 
 leaked = [m for m in captured if "nova_sk_" in m]
 k13 = not leaked

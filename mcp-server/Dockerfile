@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Remove build tools from the final image — not needed at runtime
 RUN pip uninstall -y wheel pip setuptools
 
-COPY server.py .
+COPY server.py guards.py ./
 CMD ["python", "server.py"]

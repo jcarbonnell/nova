@@ -25,6 +25,8 @@ import jwt
 from fastmcp import FastMCP, Context
 from fastmcp.server.dependencies import get_http_headers
 
+from guards import (FreeBalanceFloor, GuardRefusal, RateLimiter, VerifiedKeyCache, contract_failure, rest_status)
+
 # ─────────────────
 # Configuration
 # ─────────────────
@@ -78,7 +80,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.12 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.13 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -244,6 +246,22 @@ async def _shade_verify_api_key(api_key: str, account_id: str) -> tuple[int, Any
     return resp.status_code, data
 
 
+# v47 6b (guards.py): a verified (key, account) pair is trusted for 60 s without
+# calling Shade again; refusals are never cached. Only sha256(key + account) is kept.
+API_KEY_CACHE = VerifiedKeyCache()
+
+
+def _api_key_user(verified: str) -> dict:
+    return {
+        "email": None,
+        "wallet_id": None,
+        "near_account_id": verified,
+        "access_token": None,
+        "session_token": hashlib.sha256(f"apikey|{verified}".encode()).hexdigest(),
+        "auth_method": "api_key",
+    }
+
+
 async def _user_from_api_key(api_key: str, claimed_account: str) -> dict:
     claimed = (claimed_account or "").strip()
     account_hash = hashlib.sha256(claimed.encode()).hexdigest()[:12] if claimed else "none"
@@ -253,6 +271,10 @@ async def _user_from_api_key(api_key: str, claimed_account: str) -> dict:
     if not api_key.startswith(API_KEY_PREFIX):
         logger.warning(f"API-key auth rejected (malformed) account={account_hash}")
         raise ValueError("Auth failed: malformed credential")
+
+    if API_KEY_CACHE.is_verified(api_key, claimed):
+        logger.info(f"API-key auth ok (cached) account={account_hash}")
+        return _api_key_user(claimed)
 
     try:
         status, data = await _shade_verify_api_key(api_key, claimed)
@@ -270,15 +292,9 @@ async def _user_from_api_key(api_key: str, claimed_account: str) -> dict:
         logger.warning(f"API-key auth rejected (account mismatch) account={account_hash}")
         raise ValueError("Auth failed: account mismatch")
 
+    API_KEY_CACHE.remember(api_key, claimed)
     logger.info(f"API-key auth ok account={account_hash}")
-    return {
-        "email": None,
-        "wallet_id": None,
-        "near_account_id": verified,
-        "access_token": None,
-        "session_token": hashlib.sha256(f"apikey|{verified}".encode()).hexdigest(),
-        "auth_method": "api_key",
-    }
+    return _api_key_user(verified)
 
 
 async def resolve_user(ctx: Context | None = None, request: Request | None = None) -> dict:
@@ -362,8 +378,14 @@ def expose_as_rest(path: str, methods: list[str] = ["POST"]):
                 result = await unwrapped(None, user, **kwargs)
                 return JSONResponse({"result": result})
             except Exception as e:
-                logger.error(f"REST {path} failed: {e}")
-                return JSONResponse({"error": str(e)}, status_code=500)
+                # v47 6c: refusals keep their status (403/404/409/400/429/503); only
+                # unexpected failures are 500.
+                status = rest_status(e)
+                if status >= 500:
+                    logger.error(f"REST {path} failed ({status}): {e}")
+                else:
+                    logger.warning(f"REST {path} refused ({status}): {e}")
+                return JSONResponse({"error": str(e)}, status_code=status)
 
         # Unique name to avoid inspector confusion
         rest_handler.__name__ = f"rest_{original_func.__name__}"
@@ -425,11 +447,41 @@ async def get_reader_signer() -> Account:
     return acc
 
 
+async def _view_account(account_id: str) -> dict:
+    """NEAR view_account on mainnet via direct RPC (keyed by the FastNear patch)."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            CONFIG["mainnet"]["rpc_url"],
+            json={
+                "jsonrpc": "2.0",
+                "id": "floor",
+                "method": "query",
+                "params": {"request_type": "view_account", "finality": "final", "account_id": account_id},
+            },
+        )
+        data = resp.json()
+        if data.get("error"):
+            raise RuntimeError(f"RPC error: {data['error']}")
+        return data["result"]
+
+# v47 6a (guards.py): nothing is signed as nova-sdk.near while its free balance is
+# below the floor. The lambda resolves _view_account at call time (harness seam).
+READER_FLOOR = FreeBalanceFloor(fetch_account=lambda account_id: _view_account(account_id))
+# v47 6b (guards.py): at most 10 signed reader views per session account per minute.
+READER_RATE = RateLimiter()
+
+
 async def read_owner_gated_view(method_name: str, account_id: str, extra_args: dict | None = None) -> Any:
     """Call an owner-gated account view (signed as the reader) and return its
     decoded result. These are function-call *transactions* (they assert on
     predecessor, so a pure view is ProhibitedInView), gas-only, no deposit.
-    `account_id` is ALWAYS the session-verified account, never a client value."""
+    `account_id` is ALWAYS the session-verified account, never a client value.
+    v47 6a: refused (GuardRefusal 503) before signing when nova-sdk.near's free
+    balance is below the floor, or cannot be read.
+    v47 6b: refused (GuardRefusal 429) beyond 10 signed views per account per
+    minute, checked first, so a refused call costs no RPC."""
+    READER_RATE.hit(account_id)
+    await READER_FLOOR.require(READER_ACCOUNT_ID)
     acc = await get_reader_signer()
     result = await acc.function_call(
         contract_id=READER_ACCOUNT_ID,
@@ -445,7 +497,8 @@ async def read_owner_gated_view(method_name: str, account_id: str, extra_args: d
                 return json.loads(base64.b64decode(raw).decode())
             return []
         if "Failure" in result.status:
-            raise RuntimeError(result.status["Failure"])
+            logger.warning(f"contract failure {method_name}: {result.status['Failure']}")
+            raise contract_failure(result.status["Failure"])  # v47 6c: clean message + status
     return []
 
 def _resync_nonce(acc: Account, ak_nonce) -> None:
@@ -510,7 +563,8 @@ async def call_contract(
         if "SuccessValue" in result.status and result.status["SuccessValue"]:
             return base64.b64decode(result.status["SuccessValue"]).decode()
         if "Failure" in result.status:
-            raise RuntimeError(result.status["Failure"])
+            logger.warning(f"contract failure {method_name}: {result.status['Failure']}")
+            raise contract_failure(result.status["Failure"])  # v47 6c: clean message + status
 
     if hasattr(result, 'transaction') and hasattr(result.transaction, 'hash'):
         return result.transaction.hash
@@ -1292,7 +1346,7 @@ async def finalize_upload(ctx: Context, user: dict, upload_id: str, encrypted_da
     ctx_data = PENDING_UPLOADS[upload_id]
 
     if ctx_data["user_id"] != user["near_account_id"]:
-        raise ValueError("Account mismatch - you do not own this upload")
+        raise PermissionError("Account mismatch - you do not own this upload")
 
     if wallet:
         return await _finalize_wallet_upload(user, upload_id, ctx_data, encrypted_data, file_hash, format, tx_hash)
@@ -1568,7 +1622,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.12", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.13", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

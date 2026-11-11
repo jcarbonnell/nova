@@ -329,11 +329,15 @@ run("G2  get_member_window: non-owner refused, Shade never asked", g2, World(own
 
 
 async def g3(w):
-    e = await raises(getw(None, WALLET, group_id=GROUP, member_id=MEMBER))
-    return (isinstance(e, PermissionError) and w.calls == []), f"calls={w.calls} error={e}"
+    try:
+        r = await getw(None, WALLET, group_id=GROUP, member_id=MEMBER)
+    except Exception as e:
+        return False, f"calls={w.calls} error={e}"
+    ok = bool(r.get("window")) and [c[0] for c in w.calls] == ["view", "shade"] \
+        and w.calls[0][1] == "get_group_owner"
+    return ok, f"calls={w.calls} result={r}"
 
-run("G3  get_member_window: wallet/agent session refused, nothing asked", g3, World())
-
+run("G3  get_member_window: a wallet/agent session that OWNS the group gets the window (§6.1 Piece 4)", g3, World())
 
 print("\n" + "=" * 66)
 if all(results):
