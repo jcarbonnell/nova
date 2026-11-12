@@ -1,6 +1,6 @@
 // test-d2a-wallet-smoke.mjs
 // Deliverable 2 (A) LIVE smoke: every self-custodial write signed by the user's own
-// wallet against PROD (mainnet contract nova-sdk.near, MCP v0.4.12). NOVA never sees
+// wallet against PROD (mainnet contract nova-sdk.near, MCP v0.4.13). NOVA never sees
 // the wallet key: the signer below shells out to near-cli, which reads
 // ~/.near-credentials/mainnet/<account>.json itself. This script never opens that file.
 //
@@ -26,7 +26,7 @@ const { NovaSdk, NovaError } = pkg;
 const run = promisify(execFile);
 
 const MCP_URL = process.env.MCP_URL
-  || 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+  || 'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network';
 const ACCOUNT = 'ironclaw-hackathon.near';
 const GROUP = process.env.SMOKE_GROUP || 'd2-wallet-fixture';
 const MEMBER = process.env.SMOKE_MEMBER || 'gmail-14.nova-sdk.near';
@@ -74,7 +74,7 @@ console.log(`\nD2 (A) live wallet smoke — MCP=${MCP_URL}\n  wallet=${ACCOUNT} 
 
 // ── health ───────────────────────────────────────────────────────────────────
 const health = await (await fetch(`${MCP_URL}/health`)).json();
-assert.equal(health.version, '0.4.12', `unexpected MCP version ${health.version}`);
+assert.equal(health.version, '0.4.13', `unexpected MCP version ${health.version}`);
 assert.equal(health.rpc_reachable, true);
 assert.equal(sdk.signerMode, 'wallet');
 step(`health — MCP ${health.version}, rpc reachable, SDK in wallet mode`);

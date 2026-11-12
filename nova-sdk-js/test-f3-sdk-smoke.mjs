@@ -22,7 +22,7 @@ import pkg from './dist/index.js';
 const { NovaSdk } = pkg;
 
 const MCP_URL = process.env.MCP_URL
-  || 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+  || 'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network';
 const API_KEY = process.env.NOVA_API_KEY;
 const GROUP = process.env.SMOKE_GROUP || 'engine-test-evt';
 

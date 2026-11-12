@@ -2,7 +2,7 @@
 import { NovaSdk } from 'nova-sdk-js';
 import { readFileSync } from 'fs';
 
-const API_KEY = 'nova_sk_JsPqb3RRkLXeAuOcCdxZWzPPjxQ65bRP8job4BAtsJc';
+const API_KEY = process.env.NOVA_API_KEY; // never commit a key: read -rs NOVA_API_KEY && export NOVA_API_KEY
 const ACCOUNT_ID = 'hello-partage.nova-sdk.near';
 
 async function main() {

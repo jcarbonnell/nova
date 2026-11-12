@@ -1,7 +1,7 @@
 // Test NOVA SDK with API key authentication
-const API_KEY = 'nova_sk_JsPqb3RRkLXeAuOcCdxZWzPPjxQ65bRP8job4BAtsJc';
+const API_KEY = process.env.NOVA_API_KEY; // never commit a key
 const ACCOUNT_ID = 'hello-partage.nova-sdk.near';
-const MCP_BASE_URL = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+const MCP_BASE_URL = 'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network';
 
 async function testSessionToken() {
   console.log('🧪 Testing session token generation...\n');

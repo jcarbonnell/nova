@@ -39,7 +39,7 @@ describe('NovaSdk v3', () => {
 );
       expect(sdk.accountId).toBe(testAccountId);
       expect(sdk.contractId).toBe('nova-sdk.near');
-      expect(sdk.mcpUrl).toBe('https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network');
+      expect(sdk.mcpUrl).toBe('https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network');
       expect(sdk.rpcUrl).toBe('https://rpc.mainnet.near.org');
     });
 
@@ -86,7 +86,7 @@ describe('NovaSdk v3', () => {
 
       expect(result.authenticated).toBe(true);
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/auth_status',
+        'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network/tools/auth_status',
         { group_id: 'my-group' },
         expect.objectContaining({
           headers: expect.objectContaining({
@@ -109,7 +109,7 @@ describe('NovaSdk v3', () => {
 
       expect(result).toBe("Group 'test-group' registered successfully");
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/register_group',
+        'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network/tools/register_group',
         { group_id: 'test-group' },
         expect.objectContaining({
           headers: expect.objectContaining({
@@ -142,7 +142,7 @@ describe('NovaSdk v3', () => {
 
       expect(result).toContain('with access until');
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/add_group_member',
+        'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network/tools/add_group_member',
         { group_id: 'test-group', member_id: 'bob-nova.nova-sdk.near', access_minutes: 60 },
         expect.anything(),
       );
@@ -206,7 +206,7 @@ describe('NovaSdk v3', () => {
       const result = await sdk.joinGroup('open-group');
       expect(result).toBe("Joined group 'open-group'");
       expect(mockAxiosPost).toHaveBeenCalledWith(
-        'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network/tools/join_group',
+        'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network/tools/join_group',
         { group_id: 'open-group' },
         expect.objectContaining({
           headers: expect.objectContaining({

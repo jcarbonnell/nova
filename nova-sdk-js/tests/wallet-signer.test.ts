@@ -12,7 +12,7 @@ const mockAxiosPost = axios.post as jest.MockedFunction<typeof axios.post>;
 const mockAxiosIsAxiosError = axios.isAxiosError as jest.MockedFunction<typeof axios.isAxiosError>;
 
 const ACCOUNT = 'alice.near';
-const MCP = 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+const MCP = 'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network';
 const KEY_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const LOCATION = 'nova-sdk.near/fastfs.near/test-group/abc123';
 const FEES: Record<string, bigint> = {
