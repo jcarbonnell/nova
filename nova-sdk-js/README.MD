@@ -1,6 +1,6 @@
 # NOVA SDK for JavaScript/TypeScript
 
-**Version:** 1.4.0
+**Version:** 1.4.1
 **License:** MIT  
 **Network:** NEAR Protocol (Mainnet & Testnet)
 **Package:** [nova-sdk-js](https://www.npmjs.com/package/nova-sdk-js)
@@ -275,8 +275,8 @@ Under the hood, API keys are used to generate session tokens:
 
 Session tokens contain:
 - `account_id`: Your NOVA account
-- `sub`: Your Auth0 subject ID
-- `aud`: MCP server URL (port 8000)
+- `sub`: how you authenticated: `apikey|<account>`, `email|<email>` or `wallet|<account>`
+- `aud`: `https://nova-sdk.com/api/mcp` (a stable name, independent of where MCP runs)
 - `exp`: Expiration timestamp (24h)
 
 ## Error Handling
@@ -301,6 +301,7 @@ try {
     }
   }
 }
+**No credential in errors (1.4.1).** A `NovaError` never carries your API key or session token, in its message or in its `cause`. For an HTTP failure, `cause` is a plain `HttpError` with `status` and the server's `error` text only, and every string is redacted. Logging `e`, `e.cause` or `JSON.stringify(e)` is safe. Before 1.4.1, `cause` was the raw axios error, which held the request headers: upgrade if you log SDK errors.
 ```
 
 ## Costs (Mainnet)

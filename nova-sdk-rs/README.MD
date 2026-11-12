@@ -1,6 +1,6 @@
 # NOVA SDK for Rust
 
-**Version:** 1.3.0
+**Version:** 1.4.1
 **License:** MIT  
 **Network:** NEAR Protocol Mainnet
 **Crates:** [nova-sdk-rs](https://crates.io/crates/nova-sdk-rs)
@@ -284,7 +284,9 @@ match sdk.upload("my_group", b"data", "file.txt").await {
     Err(NovaError::Compression(msg)) => eprintln!("Compression error: {}", msg),
     Err(NovaError::UnsupportedFormat(v)) => eprintln!("Unsupported file format version: {}", v),
     Err(NovaError::InvalidArgument(msg)) => eprintln!("Invalid argument: {}", msg),
+    Err(NovaError::Wallet(msg)) => eprintln!("Wallet error: {}", msg),
 }
+**No credential in errors (1.4.1).** A `NovaError` never contains your API key, session token or any JWT. Server error bodies, HTTP errors and token-parse errors pass through `nova_sdk_rs::redact` before they enter an error, and a response of the wrong shape reports only where it failed, never the value. Logging a `NovaError` with `Display` or `Debug` is safe; `redact` is public if you need it for your own logs.
 ```
 
 ## 🔐 Security Considerations
