@@ -34,7 +34,7 @@ async fn test_sdk_initialization() {
     let sdk = result.unwrap();
     assert_eq!(sdk.account_id(), TEST_ACCOUNT_ID);
     assert_eq!(sdk.contract_id(), "nova-sdk.near");
-    assert_eq!(sdk.mcp_url(), "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network");
+    assert_eq!(sdk.mcp_url(), "https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network");
 }
 
 #[tokio::test]

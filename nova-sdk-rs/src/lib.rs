@@ -20,7 +20,7 @@ use aes_gcm::{
 use rand::RngCore;
 
 // Infrastructure endpoints (public, immutable)
-const DEFAULT_MCP_URL: &str = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network";
+const DEFAULT_MCP_URL: &str = "https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network";
 const DEFAULT_RPC_URL: &str = "https://rpc.mainnet.near.org";
 const DEFAULT_CONTRACT_ID: &str = "nova-sdk.near";
 const DEFAULT_AUTH_URL: &str = "https://nova-sdk.com";
@@ -58,8 +58,77 @@ pub enum NovaError {
 
 impl From<reqwest::Error> for NovaError {
     fn from(e: reqwest::Error) -> Self {
-        NovaError::Http(e.to_string())
+        NovaError::Http(redact(&e.to_string()))
     }
+}
+
+/// Replace anything credential-shaped before it can enter a `NovaError`:
+/// `Bearer <token>`, NOVA API keys (`nova_sk_…`), JWTs (three base64url
+/// segments starting `eyJ`), and key-like URL query parameters. A server body or
+/// a reqwest error is not trusted to be free of them (1.4.1, §5.12 item 10).
+pub fn redact(input: &str) -> String {
+    const MARK: &str = "[redacted]";
+    const QUERY_KEYS: [&str; 5] = ["apikey=", "api_key=", "key=", "token=", "access_token="];
+    fn token_char(c: char) -> bool { c.is_ascii_alphanumeric() || "._~+/=-".contains(c) }
+    fn b64url(c: char) -> bool { c.is_ascii_alphanumeric() || c == '_' || c == '-' }
+    fn run(s: &str, f: fn(char) -> bool) -> usize { s.find(|c: char| !f(c)).unwrap_or(s.len()) }
+
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    'scan: while i < input.len() {
+        let rest = &input[i..];
+        // Bearer <token>
+        if rest.get(..6).map_or(false, |w| w.eq_ignore_ascii_case("bearer")) {
+            let after = &rest[6..];
+            let tok = after.trim_start();
+            let ws = after.len() - tok.len();
+            let n = run(tok, token_char);
+            if ws > 0 && n > 0 {
+                out.push_str(MARK);
+                i += 6 + ws + n;
+                continue;
+            }
+        }
+        // nova_sk_<key>
+        if let Some(after) = rest.strip_prefix("nova_sk_") {
+            out.push_str(MARK);
+            i += 8 + run(after, b64url);
+            continue;
+        }
+        // JWT: eyJ<seg>.<seg>.<seg>
+        if rest.starts_with("eyJ") {
+            let a = run(rest, b64url);
+            if a >= 4 && rest[a..].starts_with('.') {
+                let r2 = &rest[a + 1..];
+                let b = run(r2, b64url);
+                if b >= 4 && r2[b..].starts_with('.') {
+                    let c = run(&r2[b + 1..], b64url);
+                    out.push_str(MARK);
+                    i += a + 1 + b + 1 + c;
+                    continue;
+                }
+            }
+        }
+        // ?apiKey=… / &token=… (value up to &, whitespace or a quote)
+        if rest.starts_with('?') || rest.starts_with('&') {
+            let lower = rest[1..].to_ascii_lowercase();
+            for k in QUERY_KEYS {
+                if lower.starts_with(k) {
+                    let v = 1 + k.len();
+                    let n = rest[v..].find(|c: char| c == '&' || c.is_whitespace() || "\"'`".contains(c))
+                        .unwrap_or(rest.len() - v);
+                    out.push_str(&rest[..v]);
+                    out.push_str(MARK);
+                    i += v + n;
+                    continue 'scan;
+                }
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 impl From<aes_gcm::Error> for NovaError {
@@ -678,16 +747,16 @@ impl NovaSdk {
                 error_text
             };
 
-            return Err(NovaError::Token(format!(
+            return Err(NovaError::Token(redact(&format!(
                 "Failed to get session token ({}): {}",
                 status, error_msg
-            )));
+            ))));
         }
 
         let token_response: SessionTokenResponse = response
             .json()
             .await
-            .map_err(|e| NovaError::Token(format!("Failed to parse token response: {}", e)))?;
+            .map_err(|e| NovaError::Token(redact(&format!("Failed to parse token response: {}", e))))?;
 
         // Verify account_id matches
         if token_response.account_id != self.account_id {
@@ -906,10 +975,10 @@ impl NovaSdk {
                 error_text
             };
 
-            return Err(NovaError::Mcp(format!(
+            return Err(NovaError::Mcp(redact(&format!(
                 "MCP tool '{}' failed ({}): {}",
                 tool_name, status, error_msg
-            )));
+            ))));
         }
 
         // Unwrap { result: ... } envelope added by expose_as_rest decorator
@@ -925,7 +994,12 @@ impl NovaSdk {
         };
 
         serde_json::from_value::<T>(inner)
-            .map_err(|e| NovaError::Mcp(format!("Failed to deserialize MCP response: {}", e)))
+            // serde's message quotes the offending value, which may be key material
+            // (e.g. prepare_retrieve's per-file key): keep only where it failed.
+            .map_err(|e| NovaError::Mcp(format!(
+                "Failed to deserialize MCP response for '{}' ({:?} at line {}, column {})",
+                tool_name, e.classify(), e.line(), e.column()
+            )))
     }
 
     /// core NOVA operations
