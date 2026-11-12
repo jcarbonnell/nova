@@ -32,7 +32,7 @@ from aa_setup import (  # noqa: E402
 )
 
 NOVA = "https://nova-sdk.com"
-MCP = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network"
+MCP = "https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network"
 AUDIENCE = "nova-sdk.near"
 SESSION_FILE = Path.cwd() / ".nova-agent-session"
 

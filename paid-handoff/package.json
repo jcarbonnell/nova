@@ -12,6 +12,6 @@
   "type": "commonjs",
   "dependencies": {
     "@near-intents-agent-api/sdk": "0.7.2",
-    "nova-sdk-js": "^1.4.0"
+    "nova-sdk-js": "1.4.1"
   }
 }

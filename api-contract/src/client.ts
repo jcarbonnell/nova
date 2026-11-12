@@ -23,7 +23,7 @@ import type { ContractRouterClient } from '@orpc/contract';
 import { contract, type NovaContract } from './contract.js';
 
 const DEFAULT_MCP_URL =
-  'https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network';
+  'https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network';
 
 export interface NovaClientOptions {
   /** A nova_session JWT, or an (async) getter returning one. The caller owns
