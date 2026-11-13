@@ -11,6 +11,9 @@
 #       reached); every side effect is gated on on-chain owner/membership; an
 #       upload is written only after its exact record tx is verified on chain.
 #   C*  custodial sessions: unchanged behaviour (signs as before, no tx_hash).
+#   I2* §5.13 MCP I2: an unknown tx_hash is refused by name at once (wait_until NONE),
+#       never by a FINAL-lookup timeout; a just-sent tx is retried; other RPC
+#       errors stay transport refusals.
 import asyncio
 import base64
 import importlib.util
@@ -497,6 +500,101 @@ async def K3_tx_lookup_transport_failure_is_a_named_refusal():
     assert "/rpc/fastfs/finalize_upload" not in shade_paths()
     assert p["upload_id"] in S.PENDING_UPLOADS
 
+
+
+# ── §5.13 MCP I2: the REAL _rpc_tx_status against a scripted RPC ──────────────
+# `script` maps wait_until → list of replies (one per call; the last repeats).
+# A reply is a dict (the JSON body) or an exception to raise.
+UNKNOWN = {"jsonrpc": "2.0", "id": "tx", "error": {"name": "HANDLER_ERROR", "cause": {"name": "UNKNOWN_TRANSACTION"}}}
+
+
+def rpc_script(script, calls):
+    class RpcClient(FakeClient):
+        async def post(self, url, json=None, headers=None, **k):
+            if str(url).startswith("http://shade.test"):
+                return await super().post(url, json=json, headers=headers, **k)
+            wu = json["params"]["wait_until"]
+            calls.append(wu)
+            replies = script[wu]
+            r = replies[min(sum(1 for c in calls if c == wu) - 1, len(replies) - 1)]
+            if isinstance(r, Exception):
+                raise r
+            return FakeResp(200, r)
+    return RpcClient
+
+
+async def with_rpc(script, body):
+    calls = []
+    S._rpc_tx_status = REAL_RPC_TX
+    S.httpx.AsyncClient = rpc_script(script, calls)
+    saved = S.TX_KNOWN_RETRY_SECONDS
+    S.TX_KNOWN_RETRY_SECONDS = 0.01
+    try:
+        await body(calls)
+    finally:
+        S._rpc_tx_status = fake_rpc_tx
+        S.httpx.AsyncClient = FakeClient
+        S.TX_KNOWN_RETRY_SECONDS = saved
+
+
+@t
+async def I2a_unknown_hash_is_refused_by_name_without_waiting_for_final():
+    p = await prepare()
+    async def body(calls):
+        await expect_raises(finalize(p["upload_id"]), "this transaction doesn't record this upload")
+        assert calls == ["NONE"] * S.TX_KNOWN_ATTEMPTS, calls            # FINAL never awaited
+    await with_rpc({"NONE": [UNKNOWN], "FINAL": [AssertionError("FINAL must not be called")]}, body)
+    assert "/rpc/fastfs/finalize_upload" not in shade_paths()
+    assert p["upload_id"] in S.PENDING_UPLOADS                               # nothing claimed
+
+
+@t
+async def I2b_known_tx_is_awaited_to_final_and_written():
+    p = await prepare()
+    known = {"jsonrpc": "2.0", "id": "tx", "result": {"final_execution_status": "INCLUDED"}}
+    final = {"jsonrpc": "2.0", "id": "tx", "result": record_tx()}
+    async def body(calls):
+        r = await finalize(p["upload_id"])
+        assert r["trans_id"] == "trans-42" and calls == ["NONE", "FINAL"], (r, calls)
+    await with_rpc({"NONE": [known], "FINAL": [final]}, body)
+    assert "/rpc/fastfs/finalize_upload" in shade_paths()
+
+
+@t
+async def I2c_a_just_sent_tx_unknown_at_first_is_retried_then_written():
+    p = await prepare()
+    known = {"jsonrpc": "2.0", "id": "tx", "result": {"final_execution_status": "NONE"}}
+    final = {"jsonrpc": "2.0", "id": "tx", "result": record_tx()}
+    async def body(calls):
+        r = await finalize(p["upload_id"])
+        assert r["trans_id"] == "trans-42" and calls == ["NONE", "NONE", "FINAL"], calls
+    await with_rpc({"NONE": [UNKNOWN, known], "FINAL": [final]}, body)
+
+
+@t
+async def I2d_a_known_tx_whose_final_lookup_times_out_is_a_transport_refusal():
+    p = await prepare()
+    known = {"jsonrpc": "2.0", "id": "tx", "result": {"final_execution_status": "INCLUDED"}}
+    async def body(calls):
+        await expect_raises(finalize(p["upload_id"]), "tx lookup failed: ReadTimeout")
+    await with_rpc({"NONE": [known], "FINAL": [S.httpx.ReadTimeout("")]}, body)
+    assert p["upload_id"] in S.PENDING_UPLOADS
+
+
+@t
+async def I2e_another_rpc_error_is_not_read_as_unknown():
+    p = await prepare()
+    other = {"jsonrpc": "2.0", "id": "tx", "error": {"name": "HANDLER_ERROR", "cause": {"name": "TIMEOUT_ERROR"}}}
+    async def body(calls):
+        try:
+            await finalize(p["upload_id"])
+            raise AssertionError("expected a refusal")
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert "tx lookup failed: TIMEOUT_ERROR" in str(e) and "doesn't record" not in str(e), str(e)
+        assert calls == ["NONE"], calls
+    await with_rpc({"NONE": [other], "FINAL": [AssertionError("FINAL must not be called")]}, body)
 
 async def main():
     failed = 0

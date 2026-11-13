@@ -813,26 +813,58 @@ async def _require_onchain_owner(user: dict, group_id: str) -> None:
     )
 
 
-async def _rpc_tx_status(tx_hash: str, sender_id: str) -> dict:
-    """Thin transport to RPC `tx` (waits for FINAL). Separate so the harness can stub it."""
-    config = get_config(sender_id)
+# §5.13 MCP I2: an RPC `tx` lookup with wait_until FINAL waits until timeout for a
+# hash the chain does not know for this sender (a forged hash, or a real tx sent by
+# another account), so the refusal used to be "ReadTimeout". A first lookup with
+# wait_until NONE answers at once (measured 2026-11-13 on rpc.mainnet.fastnear.com:
+# UNKNOWN_TRANSACTION in 0.2-0.4 s for a random hash and for a real tx under the
+# wrong sender). A just-sent tx may take a moment to reach the node, so NONE is
+# asked a few times before refusing. Only a known tx is then awaited to FINAL.
+TX_KNOWN_ATTEMPTS = 3
+TX_KNOWN_RETRY_SECONDS = 2.0
+
+
+async def _rpc_tx_call(rpc_url: str, tx_hash: str, sender_id: str, wait_until: str) -> dict:
+    """One RPC `tx` request. Transport failures name the exception type only: its
+    text can carry the RPC URL, which holds ?apiKey=."""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                config["rpc_url"],
+                rpc_url,
                 json={
                     "jsonrpc": "2.0", "id": "tx", "method": "tx",
-                    "params": {"tx_hash": tx_hash, "sender_account_id": sender_id, "wait_until": "FINAL"},
+                    "params": {"tx_hash": tx_hash, "sender_account_id": sender_id, "wait_until": wait_until},
                 },
             )
-        data = resp.json()
+        return resp.json()
     except Exception as e:
-        # An unknown (e.g. forged) hash makes the RPC wait until our timeout, and
-        # httpx timeouts stringify to "". Name the type only: the exception text
-        # can carry the RPC URL, which holds ?apiKey=.
         raise RuntimeError(f"RPC tx lookup failed: {type(e).__name__}") from None
+
+
+def _is_unknown_tx(data: dict) -> bool:
+    err = data.get("error") or {}
+    return (err.get("cause") or {}).get("name") == "UNKNOWN_TRANSACTION"
+
+
+async def _rpc_tx_status(tx_hash: str, sender_id: str) -> dict:
+    """The FINAL outcome of `tx_hash` sent by `sender_id`, or a refusal that names why.
+    Separate so the harness can stub it."""
+    rpc_url = get_config(sender_id)["rpc_url"]
+    for attempt in range(TX_KNOWN_ATTEMPTS):
+        known = await _rpc_tx_call(rpc_url, tx_hash, sender_id, "NONE")
+        if not _is_unknown_tx(known):
+            break
+        if attempt + 1 == TX_KNOWN_ATTEMPTS:
+            raise PermissionError(
+                "Upload record not found: this transaction doesn't record this upload "
+                "(no such transaction sent by this session's account)")
+        await asyncio.sleep(TX_KNOWN_RETRY_SECONDS)
+    if known.get("error"):
+        raise RuntimeError(f"RPC tx lookup failed: {(known['error'].get('cause') or {}).get('name') or known['error'].get('name')}")
+
+    data = await _rpc_tx_call(rpc_url, tx_hash, sender_id, "FINAL")
     if data.get("error"):
-        raise RuntimeError(f"RPC tx lookup failed: {data['error']}")
+        raise RuntimeError(f"RPC tx lookup failed: {(data['error'].get('cause') or {}).get('name') or data['error'].get('name')}")
     if "result" not in data:
         raise RuntimeError("RPC tx lookup failed: no result")
     return data["result"]
