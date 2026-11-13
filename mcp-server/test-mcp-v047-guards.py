@@ -34,7 +34,7 @@
 #
 #   H — 6c HTTP statuses through a REAL expose_as_rest route (Starlette test client):
 #     H1 PermissionError → 403;  H2 ValueError → 400;  H3 GuardRefusal(429) → 429;
-#     H4 contract refusal (409) → 409;  H5 any other exception → 500;  H6 /health reports 0.4.13
+#     H4 contract refusal (409) → 409;  H5 any other exception → 500;  H6 /health reports 0.4.14 (v48)
 #
 # MUTATIONS (each must turn the named checks ❌):
 #   M1 delete `await READER_FLOOR.require(READER_ACCOUNT_ID)` in server.py   → F1, F3, F4, F5, F6
@@ -281,8 +281,8 @@ async def main_c_h():
           got["contract"].status_code == 409 and got["contract"].json() == {"error": "Already a member"})
     check("H5 any other exception → 500", got["other"].status_code == 500)
     src = open(path, encoding="utf-8").read()
-    check("H6 /health and the startup log report 0.4.13",
-          '"version": "0.4.13"' in src and "NOVA MCP Server v0.4.13" in src and "0.4.12 starting" not in src)
+    check("H6 /health and the startup log report 0.4.14 (v48)",
+            '"version": "0.4.14"' in src and "NOVA MCP Server v0.4.14" in src and "0.4.13 starting" not in src)
 
 async def _acc(a): return a
 

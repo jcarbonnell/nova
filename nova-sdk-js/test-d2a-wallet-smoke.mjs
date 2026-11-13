@@ -1,6 +1,6 @@
 // test-d2a-wallet-smoke.mjs
 // Deliverable 2 (A) LIVE smoke: every self-custodial write signed by the user's own
-// wallet against PROD (mainnet contract nova-sdk.near, MCP v0.4.13). NOVA never sees
+// wallet against PROD (mainnet contract nova-sdk.near, MCP v0.4.14). NOVA never sees
 // the wallet key: the signer below shells out to near-cli, which reads
 // ~/.near-credentials/mainnet/<account>.json itself. This script never opens that file.
 //
@@ -61,9 +61,11 @@ const sdk = new NovaSdk(ACCOUNT, { mcpUrl: MCP_URL, apiKey: API_KEY, walletSigne
 const mcp = (tool, args) => sdk['callMcpTool'](tool, args); // raw tool call, same session
 const step = (s) => console.log(`  ✓ ${s}`);
 
-async function refused(label, fn) {
-  try { await fn(); } catch (e) {
-    assert.ok(e instanceof NovaError, `${label}: expected NovaError, got ${e}`);
+async function refused(label, fn, needle) {
+    try { await fn(); } catch (e) {
+      assert.ok(e instanceof NovaError, `${label}: expected NovaError, got ${e}`);
+      // Each refusal by its own reason (§5.13 I2: a timeout is not a refusal).
+      assert.ok(String(e.message).includes(needle), `${label}: refused for the wrong reason: ${e.message}`);
     step(`${label} — refused: ${String(e.message).slice(0, 160)}`);
     return;
   }
@@ -74,7 +76,7 @@ console.log(`\nD2 (A) live wallet smoke — MCP=${MCP_URL}\n  wallet=${ACCOUNT} 
 
 // ── health ───────────────────────────────────────────────────────────────────
 const health = await (await fetch(`${MCP_URL}/health`)).json();
-assert.equal(health.version, '0.4.13', `unexpected MCP version ${health.version}`);
+assert.equal(health.version, '0.4.14', `unexpected MCP version ${health.version}`);
 assert.equal(health.rpc_reachable, true);
 assert.equal(sdk.signerMode, 'wallet');
 step(`health — MCP ${health.version}, rpc reachable, SDK in wallet mode`);
@@ -99,7 +101,7 @@ step('on chain: owner = wallet, wallet is a member');
   await refused('I1 finalize_upload without tx_hash (wallet session)', () => mcp('finalize_upload', {
     upload_id: p.upload_id, encrypted_data: Buffer.from('junk').toString('base64'),
     file_hash: 'ab'.repeat(32), format: null,
-  }));
+    }), 'Wallet uploads need tx_hash');
 }
 {
   // a real mainnet tx that is NOT this wallet recording this upload (the reader-key add, signed by nova-sdk.near)
@@ -107,7 +109,7 @@ step('on chain: owner = wallet, wallet is a member');
   await refused('I2 finalize_upload with a foreign tx_hash', () => mcp('finalize_upload', {
     upload_id: p.upload_id, encrypted_data: Buffer.from('junk').toString('base64'),
     file_hash: 'cd'.repeat(32), format: null, tx_hash: '4nwJ6tZGmLyoou6Pvd4L5ycHit721yg9BNsbQ5L9Xzy1',
-  }));
+  }), "this transaction doesn't record this upload");
 }
 assert.deepEqual(await sdk.getTransactionsForGroup(GROUP).then(r => r.filter(t => /^(ab|cd)+$/.test(t.file_hash))), [],
   'a refused finalize left a record on chain');
