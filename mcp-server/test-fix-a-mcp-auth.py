@@ -26,7 +26,7 @@ from pathlib import Path
 # ── Env must be set BEFORE importing server.py (it reads env at module level) ──
 SECRET = "test-session-secret-do-not-use-in-prod"
 ISSUER = "https://nova-sdk.com"
-AUDIENCE = "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network"
+AUDIENCE = "https://nova-sdk.com/api/mcp"  # the stable audience (§5.12 item 10)
 
 os.environ["SESSION_TOKEN_SECRET"] = SECRET
 os.environ["SESSION_TOKEN_ISSUER"] = ISSUER
@@ -207,6 +207,25 @@ results.append(run(
     {"authorization": f"Bearer {mint(sub=f'apikey|{VICTIM}')}"},
     expect_accept=True, expect_account=VICTIM,
 ))
+
+# ── T13: §5.12 hardening — SESSION_TOKEN_AUDIENCE unset → every session refused ──
+_saved_aud = server.SESSION_TOKEN_AUDIENCE
+server.SESSION_TOKEN_AUDIENCE = None
+try:
+    get_current_user(request=FakeRequest({"authorization": f"Bearer {mint()}"}))
+    t13 = False
+except Exception as e:
+    t13 = "token verification unavailable" in str(e)
+finally:
+    server.SESSION_TOKEN_AUDIENCE = _saved_aud
+print(f"[{'PASS' if t13 else 'FAIL'}] T13 SESSION_TOKEN_AUDIENCE unset → a valid session is refused (no fallback audience)")
+results.append(t13)
+
+# ── T14: no audience default, and no old-CVM URL, anywhere in server.py ──
+_src = SERVER_PATH.read_text()
+t14 = ('os.getenv("SESSION_TOKEN_AUDIENCE")' in _src and "5a5223f7" not in _src and "dstack-prod5." not in _src)
+print(f"[{'PASS' if t14 else 'FAIL'}] T14 server.py: SESSION_TOKEN_AUDIENCE has no default; no old-CVM URL")
+results.append(t14)
 
 # API-key path (nova-reborn): resolve_user + X-API-Key, Shade stubbed.
 # The REAL resolve_user / _user_from_api_key run; only the network is faked.

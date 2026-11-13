@@ -56,7 +56,9 @@ SESSION_TOKEN_SECRET = os.getenv("SESSION_TOKEN_SECRET")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 FASTNEAR_API_KEY = os.getenv("FASTNEAR_API_KEY", "")
 SESSION_TOKEN_ISSUER = os.getenv("SESSION_TOKEN_ISSUER", "https://nova-sdk.com")
-SESSION_TOKEN_AUDIENCE = os.getenv("SESSION_TOKEN_AUDIENCE", "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network")
+# §5.12 hardening: no default. It used to fall back to the old CVM's URL; unset now
+# refuses every session (same rule as SESSION_TOKEN_SECRET), never a stale audience.
+SESSION_TOKEN_AUDIENCE = os.getenv("SESSION_TOKEN_AUDIENCE")
 
 logging.basicConfig(level=logging.INFO)
 class RedactSecrets(logging.Filter):
@@ -174,8 +176,8 @@ def get_current_user(
     else:
         raise ValueError("Must provide either ctx or request")
 
-    if not SESSION_TOKEN_SECRET:
-        logger.error("SESSION_TOKEN_SECRET not configured — refusing all requests")
+    if not SESSION_TOKEN_SECRET or not SESSION_TOKEN_AUDIENCE:
+        logger.error("SESSION_TOKEN_SECRET or SESSION_TOKEN_AUDIENCE not configured — refusing all requests")
         raise ValueError("Server misconfigured: token verification unavailable")
 
     if not token:

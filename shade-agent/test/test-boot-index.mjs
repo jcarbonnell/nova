@@ -9,7 +9,7 @@
 //   I1 TEE_KEY_SECRET missing → exits non-zero (named), never listens
 //   I2 production + MASTER_SEED_INIT_ALLOWED → exits ("Retired variable(s) still set")
 //   I3 the seed loads from KV and the three signer public keys are logged, equal
-//      to signerPublicKeyFor() for nova-kv.near, fastfs.near, nova-sdk.near under
+//      to signerPublicKeyFor() for nova-kv-2.near (KV_CONTRACT_ID), fastfs.near, nova-sdk.near under
 //      the same seed
 //   I4 GET / answers 200 with master_seed "loaded"
 //   I5 ShadeClient talks to NEAR_RPC_URL (the fake RPC sees `status`), not FastNear
@@ -101,8 +101,9 @@ const baseEnv = (port) => ({
   PATH: process.env.PATH,
   PORT: String(port),
   AGENT_CONTRACT_ID: 'shade-agent.nova-sdk.near',
-  KV_CONTRACT_ID: 'nova-kv.near',
+  KV_CONTRACT_ID: 'nova-kv-2.near',
   AUTH0_DOMAIN: 'boot-test.invalid',
+  AUTH0_AUDIENCE: 'https://nova-sdk.com/api/shade',
   NEAR_RPC_URL: `http://127.0.0.1:${rpcPort}`,
   NODE_ENV: 'development',
   TEE_KEY_SECRET: SECRET,
@@ -139,7 +140,7 @@ const { signerPublicKeyFor } = await import('../dist/lib/kv.js');
 masterRoot = [...Buffer.from(encryptBlob(SEED), 'hex')];
 setMasterSeed(new Uint8Array(SEED));
 const expected = {};
-for (const r of ['nova-kv.near', 'fastfs.near', 'nova-sdk.near']) expected[r] = await signerPublicKeyFor(r);
+for (const r of ['nova-kv-2.near', 'fastfs.near', 'nova-sdk.near']) expected[r] = await signerPublicKeyFor(r);
 
 console.log('boot (index.ts)');
 

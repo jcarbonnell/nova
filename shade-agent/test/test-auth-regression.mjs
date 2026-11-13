@@ -116,19 +116,23 @@ async function main() {
   console.log('\nverifyAuth0Token — offline rejection branch:');
   {
     const ORIG_DOMAIN = process.env.AUTH0_DOMAIN;
+    const ORIG_AUD = process.env.AUTH0_AUDIENCE;
     process.env.AUTH0_DOMAIN = 'example.auth0.com'; // so it doesn't throw on missing domain
+    process.env.AUTH0_AUDIENCE = 'https://nova-sdk.com/api/shade';
+    const why = async (fn) => { try { await fn(); return null; } catch (e) { return String(e?.message); } };
     try {
       // A token that jwt.decode can't parse → rejects (before any network).
-      let rejected = false;
-      try {
-        await auth.verifyAuth0Token('not-a-jwt');
-      } catch {
-        rejected = true;
-      }
-      check('malformed JWT → rejects (offline, before JWKS fetch)', rejected === true);
+      check('malformed JWT → rejects (offline, before JWKS fetch)',
+        (await why(() => auth.verifyAuth0Token('not-a-jwt'))) === 'Invalid token format');
+      // §5.12 hardening: no audience default (it was the old CVM's URL).
+      delete process.env.AUTH0_AUDIENCE;
+      check('AUTH0_AUDIENCE unset → rejects by name, no fallback audience',
+        (await why(() => auth.verifyAuth0Token('not-a-jwt'))) === 'AUTH0_AUDIENCE required');
     } finally {
       if (ORIG_DOMAIN === undefined) delete process.env.AUTH0_DOMAIN;
       else process.env.AUTH0_DOMAIN = ORIG_DOMAIN;
+      if (ORIG_AUD === undefined) delete process.env.AUTH0_AUDIENCE;
+      else process.env.AUTH0_AUDIENCE = ORIG_AUD;
     }
   }
 

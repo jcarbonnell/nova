@@ -79,9 +79,12 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
 
 export async function verifyAuth0Token(token: string): Promise<{ email: string; sub: string }> {
   const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
-  const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE || 'https://5a5223f7d1bfe777433c496b9d52ff851e927259-3000.dstack-prod5.phala.network';
+  // §5.12 hardening: no default. A missing audience used to fall back to the old
+  // CVM's URL; now it refuses (boot-config refuses it at start too).
+  const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE;
 
   if (!AUTH0_DOMAIN) throw new Error('AUTH0_DOMAIN required');
+  if (!AUTH0_AUDIENCE) throw new Error('AUTH0_AUDIENCE required');
 
   return new Promise((resolve, reject) => {
     const decoded = jwt.decode(token, { complete: true });

@@ -33,7 +33,7 @@
 //   P5 a master-root that is not 32 bytes → refused by name
 //   P6 a pre-switch record that does not decrypt under the legacy secret → refused
 //   P7 five concurrent first uses read master-root ONCE
-//   P8 KV_CONTRACT_ID = nova-kv.near → refused (KV_MISCONFIGURED), in a fresh process
+//   P8 KV_CONTRACT_ID = nova-kv.near, or unset → refused (KV_MISCONFIGURED), in fresh processes
 //   P9 the production pins are the recorded values
 //
 // Mutations: test/mutate-legacy.mjs (each must turn its named checks ✗).
@@ -310,15 +310,20 @@ await check('P7 five concurrent first uses read master-root once', async () => {
     && requests.filter((x) => x === `${OLD}.get(master-root)`).length === 1;
 });
 
-await check('P8 KV_CONTRACT_ID = nova-kv.near → refused (KV_MISCONFIGURED), in a fresh process', async () => {
+await check('P8 KV_CONTRACT_ID = nova-kv.near, or unset → refused (KV_MISCONFIGURED), in fresh processes', async () => {
   const code = `const l = await import(${JSON.stringify(new URL('../dist/lib/legacy.js', import.meta.url).href)});
     console.error = () => {}; console.log = () => {};
     try { await l.readRecord('x'); process.stdout.write('served'); }
     catch (e) { process.stdout.write(e.code + '|' + e.message); }`;
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
-    env: { ...process.env, KV_CONTRACT_ID: OLD, NEAR_RPC_URL: 'http://127.0.0.1:9' }, encoding: 'utf8',
+  const runWith = (kvId) => {
+    const env = { ...process.env, NEAR_RPC_URL: 'http://127.0.0.1:9' };
+    if (kvId === undefined) delete env.KV_CONTRACT_ID; else env.KV_CONTRACT_ID = kvId;
+    return spawnSync(process.execPath, ['--input-type=module', '-e', code], { env, encoding: 'utf8' }).stdout.trim();
+  };
+  return [OLD, undefined].every((kvId) => {
+    const o = runWith(kvId);
+    return o.startsWith('KV_MISCONFIGURED|') && o.includes('must be set, and not the pre-switch nova-kv.near');
   });
-  return r.stdout.trim().startsWith('KV_MISCONFIGURED|') && r.stdout.includes('must not be the pre-switch nova-kv.near');
 });
 
 await check('P9 the production pins are the recorded values', async () => {

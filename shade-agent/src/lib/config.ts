@@ -17,7 +17,10 @@ export function getRpcUrl(network: string): string {
 
 // KV is SINGLE-NETWORK by design — nova-kv.near has no testnet counterpart.
 export const KV_RPC_URL = NEAR_RPC_URL;
-export const KV_CONTRACT = process.env.KV_CONTRACT_ID || 'nova-kv.near';
+// §5.12 hardening: no default. The old default was nova-kv.near, the pre-switch KV
+// encrypted under the leaked secret. boot-config.ts requires KV_CONTRACT_ID and
+// refuses nova-kv.near; lib/legacy.ts refuses an empty or pre-switch value too.
+export const KV_CONTRACT = process.env.KV_CONTRACT_ID || '';
 export const KV_CONTRACT_OWNER = process.env.KV_CONTRACT_OWNER_ID || 'nova-sdk.near';
 
 // Names match docker-compose. The pre-config code had FOUR names for these two

@@ -140,8 +140,8 @@ async function strictRead(keyId: string, contract: string) {
  * from nova-kv.near under the old secret (era 'legacy'), otherwise null.
  */
 export async function readRecord(keyId: string): Promise<KvRecord | null> {
-  if (KV_CONTRACT === LEGACY_KV_CONTRACT) {
-    throw new ApiError(500, 'KV_MISCONFIGURED', `KV_CONTRACT_ID must not be the pre-switch ${LEGACY_KV_CONTRACT}`);
+  if (!KV_CONTRACT || KV_CONTRACT === LEGACY_KV_CONTRACT) {
+    throw new ApiError(500, 'KV_MISCONFIGURED', `KV_CONTRACT_ID must be set, and not the pre-switch ${LEGACY_KV_CONTRACT}`);
   }
   const current = await strictRead(keyId, KV_CONTRACT);
   if (current) return { bytes: decryptBlob(current), era: 'current' };

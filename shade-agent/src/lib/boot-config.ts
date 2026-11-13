@@ -3,9 +3,13 @@
 // §5.12 (2026-11 incident rebuild): Shade's boot-time environment, validated in
 // one pure function so the rules are testable (index.ts only calls it).
 //
-// Required: AGENT_CONTRACT_ID, KV_CONTRACT_ID, AUTH0_DOMAIN, and TEE_KEY_SECRET
-//           (64 hex chars: the root secret that decrypts `master-root`; portable
-//           design, roadmap §5.12).
+// Required: AGENT_CONTRACT_ID, KV_CONTRACT_ID, AUTH0_DOMAIN, AUTH0_AUDIENCE and
+//           TEE_KEY_SECRET (64 hex chars: the root secret that decrypts
+//           `master-root`; portable design, roadmap §5.12).
+// No defaults (§5.12 hardening): a missing value refuses boot rather than fall
+//           back to an old host or contract. KV_CONTRACT_ID may never be the
+//           pre-switch nova-kv.near (lib/legacy.ts reads it, under the old secret);
+//           AUTH0_AUDIENCE must be an https URL.
 // Retired:  MASTER_SEED_INIT_ALLOWED. Shade never creates the master seed (the
 //           operator writes it, lib/seed.ts), so the flag means nothing; if it is
 //           still set, boot is REFUSED in production so it cannot linger unnoticed.
@@ -21,6 +25,7 @@ export interface BootConfig {
   agentContractId: string;
   kvContractId: string;
   auth0Domain: string;
+  auth0Audience: string;
   network: 'mainnet' | 'testnet';
   isProduction: boolean;
   sponsor: { accountId: string; privateKey: string } | null;
@@ -37,18 +42,29 @@ type Env = Record<string, string | undefined>;
 
 const RETIRED_VARIABLES = ['MASTER_SEED_INIT_ALLOWED'] as const;
 
+/** The pre-switch KV (lib/legacy.ts LEGACY_KV_CONTRACT; test-boot-config pins the two equal). */
+export const PRE_SWITCH_KV_CONTRACT = 'nova-kv.near';
+
 export function validateBootEnv(env: Env): BootConfig {
   const agentContractId = env.AGENT_CONTRACT_ID;
   const kvContractId = env.KV_CONTRACT_ID;
   const auth0Domain = env.AUTH0_DOMAIN;
+  const auth0Audience = env.AUTH0_AUDIENCE;
   const missing = [
     ['AGENT_CONTRACT_ID', agentContractId],
     ['KV_CONTRACT_ID', kvContractId],
     ['AUTH0_DOMAIN', auth0Domain],
+    ['AUTH0_AUDIENCE', auth0Audience],
     ['TEE_KEY_SECRET', env.TEE_KEY_SECRET],
   ].filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
     throw new BootConfigError(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+  if (kvContractId === PRE_SWITCH_KV_CONTRACT) {
+    throw new BootConfigError(`KV_CONTRACT_ID must not be the pre-switch ${PRE_SWITCH_KV_CONTRACT}`);
+  }
+  if (!/^https:\/\/[^\s/]+(\/\S*)?$/.test(auth0Audience!) || auth0Audience!.endsWith('/')) {
+    throw new BootConfigError('AUTH0_AUDIENCE must be an https URL without a trailing slash');
   }
 
     if (!/^[0-9a-f]{64}$/i.test(env.TEE_KEY_SECRET!)) {
@@ -88,6 +104,7 @@ export function validateBootEnv(env: Env): BootConfig {
     agentContractId: agentContractId!,
     kvContractId: kvContractId!,
     auth0Domain: auth0Domain!,
+    auth0Audience: auth0Audience!,
     network: agentContractId!.endsWith('.testnet') ? 'testnet' : 'mainnet',
     isProduction,
     sponsor: sponsorId ? { accountId: sponsorId, privateKey: sponsorKey! } : null,
