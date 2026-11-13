@@ -14,7 +14,8 @@
 //   I4 GET / answers 200 with master_seed "loaded"
 //   I5 ShadeClient talks to NEAR_RPC_URL (the fake RPC sees `status`), not FastNear
 //   I6 no derivationPath: two boots → two different agent accounts
-//   I7 funding sends 0.1 NEAR from the sponsor; without a sponsor, no funding at all
+//   I7 funding sends 0.4 NEAR (§5.12 D4, lib/registration.ts) from the sponsor; without a
+//      sponsor, no funding at all
 //   I8 master-root missing → Shade still listens, reports master_seed "not loaded"
 //      and status "degraded", and logs master_seed_load_failed (bind-first, 7.5)
 //
@@ -22,7 +23,7 @@
 //   M1 load the seed BEFORE serve() and let a failure throw              → I8
 //   M2 put back `derivationPath: sponsor!.privateKey` in ShadeClient.create → I6
 //   M3 drop the `rpc:` line from ShadeClient.create                      → I5
-//   M4 AGENT_FUND_NEAR = 1                                                → I7
+//   M4 AGENT_FUND_NEAR = 1 (lib/registration.ts)                          → I7
 //
 // Build first:  npm run build
 // Run:          node ./test/test-boot-index.mjs
@@ -188,13 +189,13 @@ await check('I6 no derivationPath: a second boot gets a different agent account'
   return /^[0-9a-f]{64}$/.test(first.agent ?? '') && /^[0-9a-f]{64}$/.test(agent ?? '') && agent !== first.agent;
 });
 
-await check('I7 funding: 0.1 NEAR from the sponsor; no sponsor → no funding', async () => {
-  const funded = first.out.includes('Funding agent with 0.1 NEAR from nova-sponsor.near');
+await check('I7 funding: 0.4 NEAR from the sponsor (D4); no sponsor → no funding', async () => {
+  const funded = /"event":"agent_funding"[^\n]*"amount":0\.4[,}]/.test(first.out);
   const port = await freePort();
   let agent = null;
   const r = await boot({ ...baseEnv(port) },
     async (out) => !!(agent = await agentOf(port)) && out.includes('Registering agent'));
-  return funded && !!agent && !r.out.includes('Funding agent') && r.out.includes('Sponsor Account: none');
+  return funded && !!agent && !r.out.includes('"event":"agent_funding"') && r.out.includes('Sponsor Account: none');
 });
 
 await check('I8 master-root missing → still listens: seed "not loaded", degraded, failure logged', async () => {

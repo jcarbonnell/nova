@@ -53,7 +53,7 @@ const MUTANTS = [
     '    // §5.12 L2: the current KV first', ['E6']],
 ];
 
-const run = () => spawnSync(process.execPath, ['test/test-legacy.mjs'], { encoding: 'utf8' }).stdout;
+const run = () => (spawnSync(process.execPath, ['test/test-legacy.mjs'], { encoding: 'utf8', timeout: 120_000 }).stdout ?? '');
 const baseline = run();
 if (!/\n(\d+)\/\1 passed/.test(baseline)) { console.log('baseline not green: fix the harness first'); process.exit(1); }
 

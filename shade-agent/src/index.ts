@@ -41,6 +41,7 @@ import { initializeMasterSeed } from "./lib/seed.js";
 import { hasMasterSeed } from "./lib/crypto.js";
 import { signerPublicKeyFor } from "./lib/kv.js";
 import { FASTFS_RECEIVER } from "./lib/fastfs.js";
+import { createRegistrar } from "./lib/registration.js";
 
 // ────────────────────────────────────────────────
 // Environment validation (§5.12: lib/boot-config.ts)
@@ -96,15 +97,23 @@ async function loadSeedAndLogSigners(): Promise<void> {
 
 type AgentPhase =
   | "starting"      // process up, client not yet created
-  | "registering"   // client created, waiting on whitelist/registration
-  | "registered"    // fully operational
+  | "registering"   // client created, waiting on registration (lib/registration.ts)
+  | "registered"    // registered at least once; validity is in valid_until_ms (D2)
   | "error";        // client creation failed outright
 
-let agentPhase: AgentPhase = "starting";
+let clientPhase: "starting" | "created" | "error" = "starting";
 let agentInstance: ShadeClient | null = null;
 let agentAccountId: string | null = null;
-let lastAgentError: string | null = null;
-let registeredAt: string | null = null;
+let clientError: string | null = null;
+let registrar: ReturnType<typeof createRegistrar> | null = null;
+
+function agentPhaseNow(): AgentPhase {
+  if (clientPhase !== "created") return clientPhase === "error" ? "error" : "starting";
+  return registrar?.state.phase ?? "registering";
+}
+function lastAgentError(): string | null {
+  return clientError ?? registrar?.state.lastError ?? null;
+}
 
 /**
  * Accessor for the agent, for any module that needs it.
@@ -119,38 +128,18 @@ export function getAgent(): ShadeClient | null {
 }
 
 export function getAgentPhase(): AgentPhase {
-  return agentPhase;
+  return agentPhaseNow();
 }
 
 // ────────────────────────────────────────────────
-// Agent funding (§5.12)
+// Agent funding and registration (§5.12 D1–D4): lib/registration.ts
 // ────────────────────────────────────────────────
 //
 // Inside the TEE every boot is a NEW random agent account whose key never leaves
-// the CVM, so whatever is sent to it is lost at the next reboot. Send only what
-// registration needs: register() attaches 0.005 NEAR plus gas, and runs again
-// every 6 days, so the balance is checked before each registration too.
-// Starting values; measure on the first boot and adjust.
-const AGENT_MIN_BALANCE_NEAR = 0.05;
-const AGENT_FUND_NEAR = 0.1;
-
-async function topUpAgent(): Promise<void> {
-  if (!sponsor) return; // no sponsor: the operator funds the agent by hand
-  try {
-    const balance = await agentInstance!.balance();
-    console.log(`💰 Agent Balance: ${balance.toFixed(4)} NEAR`);
-    if (balance < AGENT_MIN_BALANCE_NEAR) {
-      console.log(`💸 Funding agent with ${AGENT_FUND_NEAR} NEAR from ${sponsor.accountId}...`);
-      await agentInstance!.fund(AGENT_FUND_NEAR);
-      console.log("✅ Agent funded");
-    }
-  } catch (error) {
-    // Do not abort: registration may still succeed on an existing balance.
-    log("warn", "agent_funding_failed", {
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
+// the CVM, so whatever is sent to it is lost at the next reboot. The registrar
+// tops it up before each attempt (D3/D4), retries with backoff (D3), and
+// re-registers a day before the contract's own expiry, retrying until it
+// succeeds (D1). `/` reports that expiry (D2).
 
 // ────────────────────────────────────────────────
 // Background bootstrap (was: everything above serve())
@@ -178,10 +167,10 @@ async function bootstrapAgent(): Promise<void> {
     // possible after the account is known.
     process.env.SHADE_AGENT_ACCOUNT_ID = agentAccountId;
 
-    agentPhase = "registering";
+    clientPhase = "created";
   } catch (error) {
-    agentPhase = "error";
-    lastAgentError = error instanceof Error ? error.message : String(error);
+    clientPhase = "error";
+    clientError = error instanceof Error ? error.message : String(error);
     // Scrubbed: SDK errors echo the RPC URL, which carries ?apiKey= (7.1).
     log("error", "agent_client_creation_failed", {
       message: error instanceof Error ? error.message : String(error),
@@ -190,52 +179,16 @@ async function bootstrapAgent(): Promise<void> {
     return; // nothing further is possible without a client
   }
 
-  // 2. Fund if low (RPC-dependent, non-fatal).
-  await topUpAgent();
-
-  // 3. Register — the old `while(true)`, now in the background.
-  //    Retries forever by design: the operator may still need to whitelist the
-  //    agent. Phase stays `registering` (=> /health `degraded`) throughout, which
-  //    is now OBSERVABLE rather than a silent hang with no listening port.
+  // 2–4. Top up, register (retry with backoff), re-register before expiry —
+  //      forever, in the background. Phase stays `registering` (=> `degraded`)
+  //      until the first success, observable on `/`.
   console.log("🔐 Registering agent with contract...");
-  while (true) {
-    try {
-      const isWhitelisted = await agentInstance.isWhitelisted();
-      if (isWhitelisted === null || isWhitelisted) {
-        const registered = await agentInstance.register();
-        if (registered) {
-          agentPhase = "registered";
-          registeredAt = new Date().toISOString();
-          lastAgentError = null;
-          console.log("✅ Agent registered successfully");
-          break;
-        }
-      }
-    } catch (error) {
-      lastAgentError = error instanceof Error ? error.message : String(error);
-      log("error", "agent_registration_error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-    console.log("⏳ Waiting for whitelist... (run 'shade whitelist' in another terminal)");
-    await new Promise((resolve) => setTimeout(resolve, 10000));
-  }
-
-  // 4. Re-register every 6 days. Unchanged — already non-blocking.
-  const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
-  setInterval(async () => {
-    await topUpAgent();
-    try {
-      const registered = await agentInstance!.register();
-      if (registered) {
-        console.log("🔄 Agent re-registered");
-      }
-    } catch (error) {
-      log("error", "agent_reregistration_error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }, SIX_DAYS_MS);
+  registrar = createRegistrar({
+    agent: agentInstance,
+    hasSponsor: !!sponsor,
+    log: (level, event, data) => log(level, event, data ?? {}),
+  });
+  await registrar.run();
 }
 
 // ────────────────────────────────────────────────
@@ -255,20 +208,24 @@ mountRpc(app);
  * therefore passes during startup (correct: the process is alive and serving)
  * while an operator or a monitor can still read `agent_phase` to see readiness.
  */
-app.get("/", (c) =>
-  c.json({
-    status: agentPhase === "registered" && hasMasterSeed() ? "healthy" : "degraded",
+app.get("/", (c) => {
+  const validUntilMs = registrar?.state.validUntilMs ?? null;
+  return c.json({
+    // D2: healthy only while the contract's own validity is in the future.
+    status: registrar?.isValid() && hasMasterSeed() ? "healthy" : "degraded",
     service: "nova-shade-agent-2.0",
     version: "2.0.0",
-    agent_phase: agentPhase,
+    agent_phase: agentPhaseNow(),
     master_seed: hasMasterSeed() ? "loaded" : "not loaded",
     agent_account: agentAccountId,
-    registered_at: registeredAt,
-    last_error: lastAgentError,
+    registered_at: registrar?.state.registeredAt ?? null,
+    valid_until_ms: validUntilMs,
+    valid_until: validUntilMs === null ? null : new Date(validUntilMs).toISOString(),
+    last_error: lastAgentError(),
     environment: isProduction ? "production" : "development",
     timestamp: new Date().toISOString(),
-  })
-);
+  });
+});
 
 // Agent info route
 app.get("/api/agent-info", async (c) => {
@@ -278,8 +235,8 @@ app.get("/api/agent-info", async (c) => {
     return c.json(
       {
         error: "Agent not ready",
-        agent_phase: agentPhase,
-        last_error: lastAgentError,
+        agent_phase: agentPhaseNow(),
+        last_error: lastAgentError(),
       },
       503
     );
@@ -296,7 +253,7 @@ app.get("/api/agent-info", async (c) => {
       agentContractId,
       network,
       isWhitelisted,
-      agentPhase,
+      agentPhase: agentPhaseNow(),
       kvContract: kvContractId,
       novaMainnet: NOVA_MAINNET_CONTRACT,
       novaTestnet: NOVA_TESTNET_CONTRACT,
@@ -355,8 +312,8 @@ void loadSeedAndLogSigners();
 // A throw inside is already handled (phase => "error"); this catch is a
 // last-resort guard so an unexpected rejection cannot become an unhandled one.
 void bootstrapAgent().catch((error) => {
-  agentPhase = "error";
-  lastAgentError = error instanceof Error ? error.message : String(error);
+  clientPhase = "error";
+  clientError = error instanceof Error ? error.message : String(error);
   log("error", "agent_bootstrap_failed", {
     message: error instanceof Error ? error.message : String(error),
     stack: error instanceof Error ? error.stack : undefined,
