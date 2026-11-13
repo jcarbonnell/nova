@@ -16,7 +16,7 @@
 
 services:
   shade-agent:
-    image: jcarbonnell/nova-shade-agent:v62@sha256:0268a5892b3809292a2c71c51fb76751514bdb57055fda39c492f013ab685a6a
+    image: jcarbonnell/nova-shade-agent:v63@sha256:b638984d759a00b4f31d71685d624a821c9f703baed12aa07db2120b548161a2
     platform: linux/amd64
     container_name: shade-agent
     environment:
@@ -54,7 +54,7 @@ services:
       start_period: 15s
 
   nova-mcp:
-    image: jcarbonnell/nova-mcp:v47@sha256:340fabcdb336af668752cbb7d10106c1ca3e8a910e4f21a2b91ce7c331d878e0
+    image: jcarbonnell/nova-mcp:v48@sha256:284e472199bd83e82fe2ab584a5c52e7960ef284ac6992d25836a776e7b27ae2
     platform: linux/amd64
     container_name: nova-mcp
     environment:
