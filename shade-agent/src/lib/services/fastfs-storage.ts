@@ -29,6 +29,7 @@ import { encryptBlob, decryptBlob, sha256Hex } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
 import { newRelativePath, uploadAt, retrieve, parseFastfsLocation, encodeFastfsLocation } from '../fastfs.js';
 import { generateFileKey, getFileKey } from './key-management.js';
+import { readRecord } from '../legacy.js';
 import { ApiError } from '../errors.js';
 import { log } from '../logger.js';
 import type { z } from 'zod';
@@ -132,9 +133,10 @@ export async function retrieveFile(input: RetrieveFileInput) {
   // Format record (absent ⇒ null; the SDK treats null as v0, but a FastFS file
   // should always have one — absence means an older finalize path).
   let format: FileFormat | null = null;
-  const metaBlob = await getBlobFromKV(fileMetaIdFor(group_id, file_ref));
-  if (metaBlob) {
-    const parsed = JSON.parse(Buffer.from(decryptBlob(metaBlob)).toString('utf8'));
+  // §5.12 L2: a pre-switch file's format record is in nova-kv.near (legacy secret).
+  const meta = await readRecord(fileMetaIdFor(group_id, file_ref));
+  if (meta) {
+    const parsed = JSON.parse(Buffer.from(meta.bytes).toString('utf8'));
     format = (parsed?.format ?? null) as FileFormat | null;
   }
 

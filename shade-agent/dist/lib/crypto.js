@@ -53,8 +53,15 @@ export function getMasterSeedSync() {
 //   `api-key:{account_id}`                        → deterministic API keys
 //   `group:{group_id}:{network}:{contract}[:v{n}]` → group encryption keys
 export function deriveKey(salt, length = 32) {
-    const master = getMasterSeedSync();
-    const derived = hkdfSync('sha256', master, Buffer.from(salt), Buffer.from('nova-v1'), length);
+    return deriveKeyWith(getMasterSeedSync(), salt, length);
+}
+/**
+ * The same HKDF as deriveKey, from an explicit seed. Exists for the §5.12 legacy
+ * reader (lib/legacy.ts), which derives pre-switch keys from the OLD seed. One
+ * definition of the parameters, so the two derivations cannot drift apart.
+ */
+export function deriveKeyWith(seed, salt, length = 32) {
+    const derived = hkdfSync('sha256', seed, Buffer.from(salt), Buffer.from('nova-v1'), length);
     return new Uint8Array(derived);
 }
 // ────────────────────────────────────────────────

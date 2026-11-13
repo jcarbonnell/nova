@@ -24,10 +24,11 @@
 // §5.3 correction, same reason as §5.1: retrieval has the location (→ file_ref),
 // not the hash, and keying key+meta by the same ref makes retrieve two clean
 // lookups. file_hash stays the on-chain integrity anchor.
-import { encryptBlob, decryptBlob, sha256Hex } from '../crypto.js';
-import { getBlobFromKV, storeBlobToKV } from '../kv.js';
+import { encryptBlob, sha256Hex } from '../crypto.js';
+import { storeBlobToKV } from '../kv.js';
 import { newRelativePath, uploadAt, retrieve, parseFastfsLocation, encodeFastfsLocation } from '../fastfs.js';
 import { generateFileKey, getFileKey } from './key-management.js';
+import { readRecord } from '../legacy.js';
 import { log } from '../logger.js';
 const fileMetaIdFor = (groupId, fileRef) => sha256Hex(`file-meta:${groupId}:${fileRef}`);
 // ────────────────────────────────────────────────
@@ -96,9 +97,10 @@ export async function retrieveFile(input) {
     // Format record (absent ⇒ null; the SDK treats null as v0, but a FastFS file
     // should always have one — absence means an older finalize path).
     let format = null;
-    const metaBlob = await getBlobFromKV(fileMetaIdFor(group_id, file_ref));
-    if (metaBlob) {
-        const parsed = JSON.parse(Buffer.from(decryptBlob(metaBlob)).toString('utf8'));
+    // §5.12 L2: a pre-switch file's format record is in nova-kv.near (legacy secret).
+    const meta = await readRecord(fileMetaIdFor(group_id, file_ref));
+    if (meta) {
+        const parsed = JSON.parse(Buffer.from(meta.bytes).toString('utf8'));
         format = (parsed?.format ?? null);
     }
     log('info', 'fastfs_retrieve_file', {

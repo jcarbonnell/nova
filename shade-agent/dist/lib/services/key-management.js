@@ -8,6 +8,7 @@
 import crypto from 'crypto';
 import { encryptBlob, decryptBlob, deriveKey, sha256Hex, gcmWrap, gcmUnwrap } from '../crypto.js';
 import { getBlobFromKV, storeBlobToKV } from '../kv.js';
+import { readRecord, legacyDeriveKey } from '../legacy.js';
 import { getRpcUrl, viewFunction, resolveContract } from '../near.js';
 import { verifyToken } from '../auth.js';
 import { log } from '../logger.js';
@@ -21,13 +22,22 @@ const groupSalt = (groupId, network, contractId, version) => version
     ? `group:${groupId}:${network}:${contractId}:v${version}`
     : `group:${groupId}:${network}:${contractId}`;
 const versionKeyIdFor = (groupId, network, contractId) => sha256Hex(`group-version:${groupId}:${network}:${contractId}`);
-/** Read the current group key version from KV, or null if never rotated. */
+/**
+ * The current group key version (null if never rotated) and the era of the record
+ * that holds it (§5.12 L2: 'legacy' = written before the switch, in nova-kv.near).
+ * STRICT: an RPC failure is a 503, never "never rotated" — reading a rotated group
+ * as unrotated would wrap new files under the base key a revoked member holds.
+ */
 async function currentVersion(groupId, network, contractId) {
-    const versionBlob = await getBlobFromKV(versionKeyIdFor(groupId, network, contractId));
-    if (!versionBlob)
-        return null;
-    const combined = JSON.parse(Buffer.from(decryptBlob(versionBlob)).toString('utf8'));
-    return combined.version ?? null;
+    const rec = await readRecord(versionKeyIdFor(groupId, network, contractId));
+    if (!rec)
+        return { version: null, era: null };
+    const combined = JSON.parse(Buffer.from(rec.bytes).toString('utf8'));
+    return { version: combined.version ?? null, era: rec.era };
+}
+/** The group key for one version, from the seed of the record's era (§5.12 L2). */
+async function groupKeyFor(salt, era) {
+    return era === 'legacy' ? legacyDeriveKey(salt, 32) : deriveKey(salt, 32);
 }
 /** Derive a fresh version, store it, return it. Used by both revoke and rotate. */
 async function rotateTo(groupId, network, contractId, version) {
@@ -82,8 +92,12 @@ export async function getGroupKey(input) {
     const authorized = await viewFunction(getRpcUrl(network), contractId, 'is_authorized', { group_id, user_id });
     if (!authorized)
         throw new ApiError(403, 'UNAUTHORIZED', 'Unauthorized');
-    const version = await currentVersion(group_id, network, contractId);
-    const keyBytes = deriveKey(groupSalt(group_id, network, contractId, version), 32);
+    // Callers: MCP's legacy-IPFS retrieve only (uploads use per-file keys). A version
+    // recorded before the switch derives from the legacy seed (§5.12 L2). A group never
+    // rotated has no record to date it, so it stays on the current seed: pre-switch
+    // IPFS files of unrotated groups wait for L3.
+    const { version, era } = await currentVersion(group_id, network, contractId);
+    const keyBytes = await groupKeyFor(groupSalt(group_id, network, contractId, version), era);
     return { key: Buffer.from(keyBytes).toString('base64'), checksum: 'derived-verified' };
 }
 // ────────────────────────────────────────────────
@@ -167,7 +181,9 @@ export async function generateFileKey(input) {
     const { group_id, file_ref, token, account_id, contract_id } = input;
     const { contractId, network } = resolveContract(contract_id, group_id);
     await authorizeForGroup(group_id, contractId, network, token, account_id);
-    const version = await currentVersion(group_id, network, contractId); // string | null
+    // §5.12 L2 INVARIANT: a new file key is ALWAYS wrapped under the CURRENT seed,
+    // even when the version comes from a pre-switch record. Never legacyDeriveKey here.
+    const { version } = await currentVersion(group_id, network, contractId); // string | null
     const groupKey = deriveKey(groupSalt(group_id, network, contractId, version), 32);
     const fileKey = crypto.randomBytes(32);
     const wrapped = gcmWrap(fileKey, groupKey);
@@ -187,16 +203,18 @@ export async function getFileKey(input) {
     const { group_id, file_ref, token, account_id, contract_id } = input;
     const { contractId, network } = resolveContract(contract_id, group_id);
     await authorizeForGroup(group_id, contractId, network, token, account_id);
-    const blob = await getBlobFromKV(fileKeyIdFor(group_id, file_ref));
-    if (!blob)
+    // §5.12 L2: the current KV first; a key absent there is read from nova-kv.near
+    // under the legacy secret. A post-switch tombstone shadows a legacy key.
+    const rec = await readRecord(fileKeyIdFor(group_id, file_ref));
+    if (!rec)
         throw new ApiError(404, 'FILE_KEY_NOT_FOUND', 'No key for this file');
-    const decrypted = Buffer.from(decryptBlob(blob));
+    const decrypted = Buffer.from(rec.bytes);
     // 404 (not 410 — 410 is not in ApiStatus). The `code` disambiguates
     // "deleted" from "never existed".
     if (decrypted.equals(TOMBSTONE))
         throw new ApiError(404, 'FILE_DELETED', 'File deleted');
     const { v, w } = JSON.parse(decrypted.toString('utf8'));
-    const groupKey = deriveKey(groupSalt(group_id, network, contractId, v), 32);
+    const groupKey = await groupKeyFor(groupSalt(group_id, network, contractId, v), rec.era);
     const fileKey = gcmUnwrap(w, groupKey); // GCM auth tag fails if v/group key is wrong
     return { file_key: Buffer.from(fileKey).toString('base64'), version: v ?? 'base' };
 }

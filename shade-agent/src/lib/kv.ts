@@ -119,7 +119,10 @@ export async function getBlobFromKV(key: string): Promise<string | number[] | nu
  * result back — silently erasing every other entry. Here, null ⇔ the key
  * genuinely does not exist (or holds an empty value); anything else throws.
  */
-export async function getBlobFromKVStrict(key: string): Promise<string | number[] | null> {
+export async function getBlobFromKVStrict(
+  key: string,
+  contract: string = KV_CONTRACT, // §5.12 L1: lib/legacy.ts reads the pre-switch KV (nova-kv.near)
+): Promise<string | number[] | null> {
   const t0 = Date.now();
   try {
     const result = await rpcCallWithRetry(KV_RPC_URL, {
@@ -129,7 +132,7 @@ export async function getBlobFromKVStrict(key: string): Promise<string | number[
       params: {
         request_type: 'call_function',
         finality: 'final',
-        account_id: KV_CONTRACT,
+        account_id: contract,
         method_name: 'get',
         args_base64: Buffer.from(JSON.stringify({ key })).toString('base64'),
       },
