@@ -26,7 +26,9 @@ import {
   AccessWindowSetSchema, AccessWindowRefSchema,
   AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput,
   SchedulerStatusSchema, SchedulerStatusOutput,
+  RekeySchema, RekeyOutput,
 } from '../lib/schemas.js';
+import * as rekeyService from '../lib/services/rekey.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -359,6 +361,19 @@ const schedulerStatus = walletPub
   .output(SchedulerStatusOutput)
   .handler(() => getSchedulerStatus());
 
+// §5.12 L3 — re-key ONE allowlisted pre-switch custodial account (operator only).
+// Gated + seeded. Without { confirm: true } it returns the plan and changes nothing.
+const migrationRekey = pub
+  .route({
+    method: 'POST',
+    path: '/migration/rekey',
+    tags: INTERNAL,
+    summary: 'Re-key an allowlisted pre-switch custodial account (one tx: AddKey new + DeleteKey others). Requires confirm:true.',
+  })
+  .input(RekeySchema)
+  .output(RekeyOutput)
+  .handler(({ input }) => rekeyService.rekeyAccount(input));
+
 export const router = {
   userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
   keyManagement: { generateKey, getKey, rotateKey },
@@ -368,6 +383,7 @@ export const router = {
   retention: { register: retentionRegister, deregister: retentionDeregister, scan: retentionScan, execute: retentionExecute },
   accessWindows: { set: accessWindowSet, clear: accessWindowClear, get: accessWindowGet },
   scheduler: { status: schedulerStatus },
+  migration: { rekey: migrationRekey },
 };
 
 export type Router = typeof router;

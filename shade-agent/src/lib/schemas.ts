@@ -528,3 +528,26 @@ export const SchedulerStatusOutput = z.object({
   retention_daily: z.record(z.string(), z.unknown()),
   failures: z.array(z.record(z.string(), z.unknown())),
 });
+// ────────────────────────────────────────────────
+// §5.12 L3 — re-key an allowlisted pre-switch custodial account (operator only).
+// `sub` is the account's Auth0 subject: it locates the pre-switch user:{sub}
+// record, which must name `account_id`. Without confirm: the plan, nothing changed.
+// The output never carries a private key.
+// ────────────────────────────────────────────────
+
+export const RekeySchema = z.object({
+  account_id: z.string().min(1),
+  sub: z.string().min(1),
+  confirm: z.boolean().optional(),
+});
+
+export const RekeyOutput = z.object({
+  account_id: z.string(),
+  state: z.enum(['plan', 'rekeyed', 'done']),
+  new_public_key: z.string().nullable(),
+  tx_hash: z.string().nullable(),
+  deleted_keys: z.array(z.string()),
+  old_public_key: z.string().optional(),
+  pending: z.boolean().optional(),
+  finished_on_chain: z.boolean().optional(),
+});
