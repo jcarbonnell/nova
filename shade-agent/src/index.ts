@@ -42,6 +42,7 @@ import { hasMasterSeed } from "./lib/crypto.js";
 import { signerPublicKeyFor } from "./lib/kv.js";
 import { FASTFS_RECEIVER } from "./lib/fastfs.js";
 import { createRegistrar } from "./lib/registration.js";
+import { initializeLegacy, getLegacyStatus } from "./lib/legacy.js";
 
 // ────────────────────────────────────────────────
 // Environment validation (§5.12: lib/boot-config.ts)
@@ -80,6 +81,8 @@ async function loadSeedAndLogSigners(): Promise<void> {
     for (const receiver of [kvContractId, FASTFS_RECEIVER, NOVA_MAINNET_CONTRACT]) {
       console.log(`   ${receiver}: ${await signerPublicKeyFor(receiver)}`);
     }
+    // §5.12 L4: needs the seed (its KV signer writes the key copy). Never throws.
+    await initializeLegacy();
   } catch (error) {
     log("error", "master_seed_load_failed", {
       message: error instanceof Error ? error.message : String(error),
@@ -217,6 +220,7 @@ app.get("/", (c) => {
     version: "2.0.0",
     agent_phase: agentPhaseNow(),
     master_seed: hasMasterSeed() ? "loaded" : "not loaded",
+    legacy: getLegacyStatus(), // §5.12 L4: key_copy_stored ⇒ LEGACY_TEE_KEY_SECRET can be removed
     agent_account: agentAccountId,
     registered_at: registrar?.state.registeredAt ?? null,
     valid_until_ms: validUntilMs,

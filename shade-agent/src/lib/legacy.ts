@@ -25,21 +25,31 @@
 //   • LEGACY_TEE_KEY_SECRET absent → pre-switch records answer 503
 //     LEGACY_UNAVAILABLE; everything post-switch keeps working.
 //
+// L4 (decided 2026-11-13, a divergence from the roadmap's "stores the legacy
+// seed"): the OLD SECRET is copied once into KV_CONTRACT as `legacy-tee-key`,
+// encrypted under the NEW secret, after it has passed every pin. Pre-switch
+// records are encrypted under the old secret, so the seed alone could not open
+// them. Once the copy is stored (`/` → legacy.key_copy_stored), the env variable
+// LEGACY_TEE_KEY_SECRET is removed by an env update; Shade then reads the copy.
+// The copy is never rewritten, and a copy that fails the fingerprint pin is
+// refused (no fallback to the env). Ending legacy access later = tombstoning it.
+//
 // Restores access, not privacy: whoever holds the leaked secret can read every
-// pre-switch record. L3 re-keys the demo accounts; L4 stores the legacy seed
-// under the new secret so LEGACY_TEE_KEY_SECRET can be removed.
+// pre-switch record. L3 re-keys the demo accounts.
 
 import crypto from 'crypto';
 import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
 
-import { decryptBlob, deriveKeyWith, GCM_MAGIC } from './crypto.js';
-import { getBlobFromKVStrict, KV_CONTRACT } from './kv.js';
+import { decryptBlob, encryptBlob, deriveKeyWith, GCM_MAGIC } from './crypto.js';
+import { getBlobFromKVStrict, storeBlobToKV, KV_CONTRACT } from './kv.js';
 import { ApiError } from './errors.js';
 import { log } from './logger.js';
 
 export const LEGACY_KV_CONTRACT = 'nova-kv.near';
 export const LEGACY_MASTER_ROOT_KEY = 'master-root';
+/** L4: the old secret's copy, in KV_CONTRACT, under the new secret. Write-once. */
+export const LEGACY_KEY_COPY = 'legacy-tee-key';
 
 export interface LegacyPins {
   /** sha256 of the raw `master-root` bytes in nova-kv.near (public ciphertext). */
@@ -60,12 +70,18 @@ export const LEGACY_SIGNER_SALT = 'kv-owner-signer-v1';
 let pins: Readonly<LegacyPins> = LEGACY_PINS;
 let legacySeed: Uint8Array | null = null;
 let inFlight: Promise<Uint8Array> | null = null;
+let cachedKey: Buffer | null = null;          // the verified old secret, once read
+let keySource: 'kv' | 'env' | null = null;
+let keyCopyStored = false;
 
 /** Exposed for test/test-legacy.mjs only (its secrets and seeds are random). */
 export function _setLegacyPinsForTest(p: LegacyPins | null): void {
   pins = p ? Object.freeze({ ...p }) : LEGACY_PINS;
   legacySeed = null;
   inFlight = null;
+  cachedKey = null;
+  keySource = null;
+  keyCopyStored = false;
 }
 
 const unavailable = (why: string) => new ApiError(503, 'LEGACY_UNAVAILABLE', `Pre-switch record unavailable: ${why}`);
@@ -74,15 +90,59 @@ const unavailable = (why: string) => new ApiError(503, 'LEGACY_UNAVAILABLE', `Pr
 // The old secret
 // ────────────────────────────────────────────────
 
-function legacyKey(): Buffer {
+const fingerprintOf = (secret: string) => crypto.createHash('sha256').update(secret).digest('hex').slice(0, 12);
+
+/**
+ * The old secret: from the L4 copy in KV_CONTRACT if one exists, otherwise from
+ * LEGACY_TEE_KEY_SECRET. Either source must match the pinned fingerprint; a copy
+ * that does not is refused WITHOUT falling back to the env (it means tampering or
+ * a bug, never a reason to try another key).
+ */
+async function legacyKey(): Promise<Buffer> {
+  if (cachedKey) return cachedKey;
+  const copy = await strictRead(LEGACY_KEY_COPY, KV_CONTRACT);
+  if (copy) {
+    let secret: string;
+    try {
+      secret = Buffer.from(decryptBlob(copy)).toString('utf8');
+    } catch {
+      throw unavailable(`the stored ${LEGACY_KEY_COPY} did not decrypt under the current secret`);
+    }
+    if (!/^[0-9a-f]{64}$/i.test(secret) || fingerprintOf(secret) !== pins.secretFingerprint) {
+      throw unavailable(`the stored ${LEGACY_KEY_COPY} does not match its pinned fingerprint`);
+    }
+    cachedKey = Buffer.from(secret, 'hex');
+    keySource = 'kv';
+    keyCopyStored = true;
+    return cachedKey;
+  }
   const secret = process.env.LEGACY_TEE_KEY_SECRET;
   if (!secret) throw unavailable('LEGACY_TEE_KEY_SECRET is not set');
   if (!/^[0-9a-f]{64}$/i.test(secret)) throw unavailable('LEGACY_TEE_KEY_SECRET is not 64 hex characters');
-  const fingerprint = crypto.createHash('sha256').update(secret).digest('hex').slice(0, 12);
-  if (fingerprint !== pins.secretFingerprint) {
+  if (fingerprintOf(secret) !== pins.secretFingerprint) {
     throw unavailable('LEGACY_TEE_KEY_SECRET does not match its pinned fingerprint');
   }
-  return Buffer.from(secret, 'hex');
+  cachedKey = Buffer.from(secret, 'hex');
+  keySource = 'env';
+  return cachedKey;
+}
+
+/**
+ * L4: once the secret from the env has opened the pinned master-root and derived
+ * the pinned signer, copy it into KV_CONTRACT under the new secret. Write-once
+ * (re-checked strictly just before writing). Non-fatal: a failed write leaves the
+ * env as the source and is retried at the next load.
+ */
+async function storeKeyCopyOnce(key: Buffer): Promise<void> {
+  if (keySource !== 'env' || keyCopyStored) return;
+  try {
+    if (await strictRead(LEGACY_KEY_COPY, KV_CONTRACT)) { keyCopyStored = true; return; }
+    await storeBlobToKV(LEGACY_KEY_COPY, encryptBlob(Buffer.from(key.toString('hex'), 'utf8')));
+    keyCopyStored = true;
+    log('info', 'legacy_key_copy_stored', { contract: KV_CONTRACT });
+  } catch (e) {
+    log('warn', 'legacy_key_copy_failed', { message: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 /**
@@ -148,7 +208,7 @@ export async function readRecord(keyId: string): Promise<KvRecord | null> {
 
   const old = await strictRead(keyId, LEGACY_KV_CONTRACT);
   if (!old) return null;
-  const key = legacyKey();
+  const key = await legacyKey();
   try {
     return { bytes: legacyDecryptBlob(old, key), era: 'legacy' };
   } catch {
@@ -161,7 +221,7 @@ export async function readRecord(keyId: string): Promise<KvRecord | null> {
 // ────────────────────────────────────────────────
 
 async function loadLegacySeed(): Promise<Uint8Array> {
-  const key = legacyKey();
+  const key = await legacyKey();
   const blob = await strictRead(LEGACY_MASTER_ROOT_KEY, LEGACY_KV_CONTRACT);
   if (!blob) throw unavailable(`${LEGACY_MASTER_ROOT_KEY} not found in ${LEGACY_KV_CONTRACT}`);
   const raw = Array.isArray(blob) ? Buffer.from(blob) : Buffer.from(blob, 'hex');
@@ -181,7 +241,8 @@ async function loadLegacySeed(): Promise<Uint8Array> {
     throw unavailable('legacy seed does not derive the pinned old signer key');
   }
   legacySeed = seed;
-  log('info', 'legacy_seed_loaded', { signer }); // public key only
+  log('info', 'legacy_seed_loaded', { signer, key_source: keySource }); // public key only
+  await storeKeyCopyOnce(key); // L4: only after every pin has held
   return seed;
 }
 
@@ -192,4 +253,22 @@ export async function legacyDeriveKey(salt: string, length: number = 32): Promis
     await inFlight;
   }
   return deriveKeyWith(legacySeed!, salt, length);
+}
+
+/**
+ * L4, at boot (after the master seed): load the legacy seed if a source exists,
+ * which stores the key copy when the source is the env. Never throws; a missing
+ * source is the normal state once legacy access has ended.
+ */
+export async function initializeLegacy(): Promise<void> {
+  try {
+    await legacyDeriveKey(LEGACY_SIGNER_SALT, 32);
+  } catch (e) {
+    log('warn', 'legacy_init_skipped', { message: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** For `/`: whether pre-switch records can be read, and whether the env can go. */
+export function getLegacyStatus() {
+  return { seed_loaded: legacySeed !== null, key_source: keySource, key_copy_stored: keyCopyStored };
 }

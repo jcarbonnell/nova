@@ -35,6 +35,16 @@
 //   P7 five concurrent first uses read master-root ONCE
 //   P8 KV_CONTRACT_ID = nova-kv.near, or unset → refused (KV_MISCONFIGURED), in fresh processes
 //   P9 the production pins are the recorded values
+//   K1 L4: the first verified load copies the old secret into the CURRENT KV
+//      (legacy-tee-key, under the new secret); `/` status says so
+//   K2 L4: with the copy stored, the env can go: pre-switch files still served, no write
+//   K3 L4: an existing copy is never rewritten (env present or not)
+//   K4 L4: a copy that fails the fingerprint pin is refused, with NO fallback to the env
+//   K5 L4: a secret that fails a later pin (signer) is never copied
+//   K6 L4: a failed copy write is not fatal (served from the env; retried next load)
+//   K7 L4: initializeLegacy() at boot stores the copy with no request; with no source
+//      at all it neither throws nor writes
+//   K8 index.ts calls initializeLegacy() after the master seed and reports the status on `/`
 //
 // Mutations: test/mutate-legacy.mjs (each must turn its named checks ✗).
 //
@@ -54,6 +64,7 @@ const CUR = 'nova-kv-2.near', OLD = 'nova-kv.near', NOVA = 'nova-sdk.near';
 const kv = { [CUR]: new Map(), [OLD]: new Map() };
 const down = { [CUR]: false, [OLD]: false };
 let authorized = true;
+let failBroadcast = false;
 const requests = [];
 const rpc = http.createServer((req, res) => {
   let body = '';
@@ -81,6 +92,7 @@ const rpc = http.createServer((req, res) => {
       return ok({ nonce: 7, block_hash: bs58.encode(Buffer.alloc(32, 1)) });
     }
     if (msg.method === 'broadcast_tx_commit') {
+      if (failBroadcast) { requests.push('broadcast:failed'); return err('fake broadcast outage'); }
       const tx = Buffer.from(msg.params[0], 'base64').toString('latin1');
       const m = tx.match(/\{"key":"([^"]*)","encrypted_blob":\[([0-9,]*)\]\}/);
       const receiver = tx.includes(CUR) ? CUR : tx.includes(OLD) ? OLD : '?';
@@ -332,6 +344,80 @@ await check('P9 the production pins are the recorded values', async () => {
     && p.masterRootSha256 === '3fcc45faf36fe08213cf8eca5c2b6d6cc9235cd761cc673b45184c0883cd837f'
     && p.secretFingerprint === 'a9a39248a959'
     && p.signerPublicKey === 'ed25519:GhFNnrrZ4roarJDPmP1VPR3KwcmCcBERkb5mdSt5kJ6R';
+});
+
+const COPY = 'legacy-tee-key';
+const { decryptBlob: curDecrypt } = await import('../dist/lib/crypto.js');
+const copyOf = () => kv[CUR].get(COPY);
+const broadcasts = () => requests.filter((x) => x.startsWith('broadcast'));
+
+await check('K1 L4: the first verified load stores the old secret in the current KV, under the new secret', async () => {
+  world(); const fk = oldFile(G, 'p/k1');
+  const r = await get(G, 'p/k1');
+  const c = copyOf();
+  const st = legacy.getLegacyStatus();
+  return r.file_key === b64(fk) && !!c && Buffer.from(curDecrypt(c)).toString() === OLD_SECRET
+    && !kv[OLD].has(COPY) && broadcasts().length === 1 && requests.includes(`broadcast:${CUR}`)
+    && st.key_copy_stored === true && st.key_source === 'env' && st.seed_loaded === true;
+});
+
+await check('K2 L4: copy stored, env removed: pre-switch files still served, nothing written', async () => {
+  world(); const fk = oldFile(G, 'p/k2');
+  await get(G, 'p/k2');                                    // stores the copy
+  delete process.env.LEGACY_TEE_KEY_SECRET; resetLegacy(); requests.length = 0;
+  const r = await get(G, 'p/k2');
+  const st = legacy.getLegacyStatus();
+  return r.file_key === b64(fk) && broadcasts().length === 0 && st.key_source === 'kv' && st.key_copy_stored;
+});
+
+await check('K3 L4: an existing copy is never rewritten', async () => {
+  world(); oldFile(G, 'p/k3');
+  kv[CUR].set(COPY, stored(encryptBlob(Buffer.from(OLD_SECRET))));
+  const before = JSON.stringify(copyOf());
+  await get(G, 'p/k3');
+  return broadcasts().length === 0 && JSON.stringify(copyOf()) === before && legacy.getLegacyStatus().key_source === 'kv';
+});
+
+await check('K4 L4: a copy that fails the fingerprint pin is refused, no fallback to the env', async () => {
+  world(); oldFile(G, 'p/k4');
+  kv[CUR].set(COPY, stored(encryptBlob(Buffer.from(crypto.randomBytes(32).toString('hex')))));
+  const e = await refusal(() => get(G, 'p/k4'));
+  return is(e, 503, 'LEGACY_UNAVAILABLE', 'stored legacy-tee-key does not match its pinned fingerprint')
+    && process.env.LEGACY_TEE_KEY_SECRET === OLD_SECRET && broadcasts().length === 0;
+});
+
+await check('K5 L4: a secret that fails a later pin (signer) is never copied', async () => {
+  world(); oldFile(G, 'p/k5');
+  resetLegacy({ ...PINS, signerPublicKey: await nearPub(crypto.randomBytes(32)) });
+  const e = await refusal(() => get(G, 'p/k5'));
+  return is(e, 503, 'LEGACY_UNAVAILABLE', 'does not derive the pinned old signer key') && !copyOf() && broadcasts().length === 0;
+});
+
+await check('K6 L4: a failed copy write is not fatal; retried at the next load', async () => {
+  world(); const fk = oldFile(G, 'p/k6');
+  failBroadcast = true;
+  const r1 = await get(G, 'p/k6');
+  const st1 = legacy.getLegacyStatus();
+  failBroadcast = false; resetLegacy();
+  await get(G, 'p/k6');
+  return r1.file_key === b64(fk) && st1.key_copy_stored === false && st1.key_source === 'env'
+    && !!copyOf() && legacy.getLegacyStatus().key_copy_stored === true;
+});
+
+await check('K7 L4: initializeLegacy() stores the copy with no request; with no source, no throw, no write', async () => {
+  world();
+  await legacy.initializeLegacy();
+  const stored1 = !!copyOf() && legacy.getLegacyStatus().seed_loaded;
+  world(); delete process.env.LEGACY_TEE_KEY_SECRET; resetLegacy();
+  await legacy.initializeLegacy();
+  const st = legacy.getLegacyStatus();
+  return stored1 && !copyOf() && broadcasts().length === 0 && st.seed_loaded === false && st.key_source === null;
+});
+
+await check('K8 index.ts: initializeLegacy() after the master seed; `/` reports the legacy status', async () => {
+  const src = readFileSync(new URL('../dist/index.js', import.meta.url), 'utf8');
+  const iSeed = src.indexOf('await initializeMasterSeed();'), iLegacy = src.indexOf('await initializeLegacy();');
+  return iSeed > 0 && iLegacy > iSeed && /legacy: getLegacyStatus\(\)/.test(src);
 });
 
 rpc.close();
