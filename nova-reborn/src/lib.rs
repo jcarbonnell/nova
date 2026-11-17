@@ -50,7 +50,7 @@ use crate::near::agent::host::{self, HttpErrorKind, HttpFailure, LogLevel};
 
 /// NOVA MCP (Phala dstack). The manifest credential's audience.
 const NOVA_MCP_BASE: &str =
-    "https://5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network";
+    "https://7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network";
 
 /// Maximum store_file `content` size in bytes.
 const MAX_CONTENT_BYTES: usize = 1024 * 1024;

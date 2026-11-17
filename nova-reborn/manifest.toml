@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "nova"
 name = "NOVA"
-version = "0.2.0"
+version = "0.2.1"
 description = "NOVA capabilities for IronClaw Reborn: store/retrieve encrypted files and manage groups on NEAR, calling the NOVA MCP API. The NOVA credential is host-injected on every request to the MCP host; the guest never holds it."
 # Imported bundles may not claim first-party trust.
 trust = "third_party"
@@ -26,12 +26,12 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/store_file.input.v1.json"
 prompt_doc_ref = "prompts/nova/store_file.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -44,12 +44,12 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/nova/retrieve_file.input.v1.json"
 prompt_doc_ref = "prompts/nova/retrieve_file.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -62,12 +62,12 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/nova/list_group_files.input.v1.json"
 prompt_doc_ref = "prompts/nova/list_group_files.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -80,12 +80,12 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/nova/list_owned_groups.input.v1.json"
 prompt_doc_ref = "prompts/nova/list_owned_groups.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -98,12 +98,12 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/nova/list_member_groups.input.v1.json"
 prompt_doc_ref = "prompts/nova/list_member_groups.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -116,12 +116,12 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/join_group.input.v1.json"
 prompt_doc_ref = "prompts/nova/join_group.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -136,12 +136,12 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/register_group.input.v1.json"
 prompt_doc_ref = "prompts/nova/register_group.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -154,12 +154,12 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/add_group_member.input.v1.json"
 prompt_doc_ref = "prompts/nova/add_group_member.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
@@ -172,12 +172,12 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nova/revoke_group_member.input.v1.json"
 prompt_doc_ref = "prompts/nova/revoke_group_member.md"
-network_targets = [ { scheme = "https", host_pattern = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" } ]
+network_targets = [ { scheme = "https", host_pattern = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" } ]
 
 [[tools.credentials]]
 handle = "nova_api_key"
 vendor = "nova"
-audience = { scheme = "https", host = "5a5223f7d1bfe777433c496b9d52ff851e927259-8000.dstack-prod5.phala.network" }
+audience = { scheme = "https", host = "7e9ff97d35e21fdd0f5c819472217d19e772d017-8000.dstack-base-prod5.phala.network" }
 injection = { type = "header", name = "X-API-Key", prefix = "" }
 placeholder_env = "NOVA_API_KEY"
 
