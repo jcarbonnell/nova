@@ -1,6 +1,6 @@
 {
   "name": "nova-sdk-api-contract",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Contract-first description of NOVA's public wire protocol (MCP /tools/*).",
   "type": "module",
   "license": "MIT",
