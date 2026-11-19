@@ -18,7 +18,9 @@ from starlette.middleware.cors import CORSMiddleware
 
 import base64
 from py_near.account import Account
-from py_near.exceptions.provider import InvalidNonce
+from py_near.exceptions.provider import InvalidNonce, RPCTimeoutError
+from py_near.providers import JsonProvider
+from types import SimpleNamespace
 import httpx
 import jwt
 
@@ -82,7 +84,7 @@ for _h in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-logger.info("🌐 NOVA MCP Server v0.4.14 starting (dual-network mode)")
+logger.info("🌐 NOVA MCP Server v0.4.15 starting (dual-network mode)")
 logger.info(f"   Mainnet: {CONFIG['mainnet']['contract_id']} @ {CONFIG['mainnet']['rpc_url']}")
 logger.info(f"   Testnet: {CONFIG['testnet']['contract_id']} @ {CONFIG['testnet']['rpc_url']}")
 
@@ -524,6 +526,47 @@ def _resync_nonce(acc: Account, ak_nonce) -> None:
     else:
         Account._access_key_nonce[pk] = 0  # no usable ak_nonce → force a fresh chain read
 
+# §5.13 MCP v49 — a broadcast the RPC times out on (TIMEOUT_ERROR: "routed, but not
+# recorded on chain in 10 seconds") may still land. py-near 1.1.59 then waits by
+# itself, looking the tx up with the RECEIVER (the contract) as its sender
+# (providers.wait_for_trx(trx_hash, receiver_id)) — the RPC routes that lookup by
+# the wrong account, so it sleeps ~30 s and raises RPCTimeoutError anyway; MCP
+# then failed a call whose tx had executed (seen 2026-11-13 on get_group_transactions).
+# Now py-near fails fast, and call_contract polls the SAME tx hash with the right
+# sender (the signing account) until it has a final outcome. It never sends again,
+# so a timed-out write can't execute twice. Re-check on any py-near upgrade.
+SENT_TX_ATTEMPTS = 10
+SENT_TX_RETRY_SECONDS = 3.0
+
+
+async def _pynear_fail_fast(self, trx_hash, receiver_id):
+    raise RPCTimeoutError(error_json={"cause": {"name": "TIMEOUT_ERROR"}})
+
+JsonProvider.wait_for_trx = _pynear_fail_fast
+
+
+async def _await_sent_tx(tx_hash: str, sender_id: str) -> dict:
+    """The FINAL outcome of a tx this MCP already sent, polled by its hash (never
+    resent). A lookup error is transient here: nothing is sent, only read again."""
+    rpc_url = get_config(sender_id)["rpc_url"]
+    last = "UNKNOWN_TRANSACTION"
+    for attempt in range(SENT_TX_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(SENT_TX_RETRY_SECONDS)
+        known = await _rpc_tx_call(rpc_url, tx_hash, sender_id, "NONE")
+        if known.get("error"):
+            last = (known["error"].get("cause") or {}).get("name") or known["error"].get("name") or "RPC_ERROR"
+            continue
+        data = await _rpc_tx_call(rpc_url, tx_hash, sender_id, "FINAL")
+        result = data.get("result") or {}
+        if isinstance(result.get("status"), dict):
+            return result
+        last = ((data.get("error") or {}).get("cause") or {}).get("name") or "NO_FINAL_OUTCOME"
+    raise RuntimeError(
+        f"Transaction {tx_hash} was sent but its outcome is unknown ({last}); "
+        "check it on chain before retrying")
+
+
 async def call_contract(
     user: dict,
     method_name: str,
@@ -542,13 +585,21 @@ async def call_contract(
     logger.info(f"call_contract: method={method_name} fee_action={fee_action} fee={fee} total_attach={total_attach}")
 
     async def _submit():
-        return await acc.function_call(
-            contract_id=config["contract_id"],
-            method_name=method_name,
-            args=args,
-            amount=total_attach,
-            gas=gas
-        )
+        try:
+            return await acc.function_call(
+                contract_id=config["contract_id"],
+                method_name=method_name,
+                args=args,
+                amount=total_attach,
+                gas=gas
+            )
+        except RPCTimeoutError as e:
+            tx_hash = getattr(e, "trx_hash", None)
+            if not tx_hash:
+                raise
+            logger.warning(f"call_contract: RPC timeout method={method_name} tx={tx_hash}; polling the same tx")
+            r = await _await_sent_tx(tx_hash, user["near_account_id"])
+            return SimpleNamespace(status=r["status"], transaction=SimpleNamespace(hash=(r.get("transaction") or {}).get("hash", tx_hash)))
 
     try:
         result = await _submit()
@@ -1656,7 +1707,7 @@ async def health(request: Request):
             rpc_ok = resp.status_code == 200
     except Exception as e:
         rpc_ok = str(e)
-    return JSONResponse({"status": "MCP ready", "version": "0.4.14", "auth": "enabled", "rpc_reachable": rpc_ok})
+    return JSONResponse({"status": "MCP ready", "version": "0.4.15", "auth": "enabled", "rpc_reachable": rpc_ok})
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

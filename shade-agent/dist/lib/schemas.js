@@ -468,6 +468,26 @@ export const RekeySchema = z.object({
     sub: z.string().min(1),
     confirm: z.boolean().optional(),
 });
+// Operator-created custodial testnet accounts (services/custodial-accounts.ts).
+export const CustodialPrepareSchema = z.object({
+    account_id: z.string().min(1),
+});
+export const CustodialPrepareOutput = z.object({
+    account_id: z.string(),
+    public_key: z.string(),
+    state: z.enum(['absent', 'ready', 'done']),
+});
+export const CustodialFinalizeSchema = z.object({
+    account_id: z.string().min(1),
+    reissue_api_key: z.boolean().optional(),
+});
+export const CustodialFinalizeOutput = z.object({
+    account_id: z.string(),
+    public_key: z.string(),
+    state: z.enum(['created', 'reissued', 'done']),
+    api_key: z.string().optional(),
+    api_key_version: z.number().optional(),
+});
 export const RekeyOutput = z.object({
     account_id: z.string(),
     state: z.enum(['plan', 'rekeyed', 'done']),

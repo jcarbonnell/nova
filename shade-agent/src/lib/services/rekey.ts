@@ -55,6 +55,13 @@ const pendingIdFor = (accountId: string) => sha256Hex(`rekey-pending:${accountId
 const accountIdFor = (accountId: string) => sha256Hex(`account:${accountId}`);
 const userIdFor = (sub: string) => sha256Hex(`user:${sub}`);
 
+/** How long step 6 waits for the re-key tx to be final (a final block follows in ~2 s). */
+const verifyTiming = { timeoutMs: 30_000, intervalMs: 1_000 };
+/** Exposed for test/test-rekey.mjs only. */
+export function _setRekeyVerifyTimingForTest(timeoutMs: number, intervalMs: number): void {
+  verifyTiming.timeoutMs = timeoutMs; verifyTiming.intervalMs = intervalMs;
+}
+
 export interface RekeyInput { account_id: string; sub: string; confirm?: boolean }
 
 const refuse = (status: 400 | 403 | 404 | 500 | 503, code: string, msg: string) => new ApiError(status, code, msg);
@@ -193,8 +200,16 @@ export async function rekeyAccount(input: RekeyInput) {
     txHash = outcome?.transaction?.hash ?? null;
   }
 
-  // 6. Verify: the new key is the account's ONLY key, FullAccess.
-  const after = await accessKeys(rpcUrl, account_id);
+  // 6. Verify: the new key is the account's ONLY key, FullAccess. The tx returns
+  // before its block is final, and the key list is read at `final`, so the first
+  // read can still show the old keys (v63: the first confirm always ended in
+  // REKEY_UNVERIFIED). Poll until the final state shows the new key alone.
+  const deadline = Date.now() + verifyTiming.timeoutMs;
+  let after = await accessKeys(rpcUrl, account_id);
+  while (!(after.length === 1 && after[0].public_key === newPub && after[0].full) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, verifyTiming.intervalMs));
+    after = await accessKeys(rpcUrl, account_id);
+  }
   if (!(after.length === 1 && after[0].public_key === newPub && after[0].full)) {
     throw refuse(500, 'REKEY_UNVERIFIED', 'The chain does not show the new key as the only key; records not written');
   }

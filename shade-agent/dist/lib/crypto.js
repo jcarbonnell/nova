@@ -51,6 +51,7 @@ export function getMasterSeedSync() {
 //   'fastfs-path-salt'                            → FastFS path salt (lib/fastfs.ts)
 //   `nova-signer:{receiver_id}`                   → Shade's per-receiver signer keys (lib/kv.ts)
 //   `api-key:{account_id}`                        → deterministic API keys
+//   `custodial-account:{account_id}`              → operator-created custodial keys (services/custodial-accounts.ts)
 //   `group:{group_id}:{network}:{contract}[:v{n}]` → group encryption keys
 export function deriveKey(salt, length = 32) {
     return deriveKeyWith(getMasterSeedSync(), salt, length);

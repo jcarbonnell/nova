@@ -360,6 +360,24 @@ export async function rotateApiKey(input) {
         message: 'Key rotated. The previous key is now invalid. Save this key securely.',
     };
 }
+/**
+ * API key for an operator-created custodial account (services/custodial-accounts.ts).
+ * NOT reachable from a client: the only caller is the operator route behind
+ * X-Internal-Auth, which has already checked its allowlist and the chain.
+ *   no key yet          → v1 issued, returned
+ *   a key, rotate=false → null (never re-shown: the key is returned once)
+ *   a key, rotate=true  → next version, the previous key stops verifying
+ */
+export async function issueOperatorApiKey(accountId, rotate) {
+    const existing = await readApiKeyRecord(accountId);
+    if (existing && !rotate)
+        return null;
+    const version = existing ? existing.v + 1 : 1;
+    const apiKey = deriveApiKeyValue(accountId, version);
+    await writeApiKeyRecord(accountId, version, sha256Hex(apiKey));
+    log('warn', 'api_key_issued_by_operator', { account_id: accountId, version, rotated: !!existing });
+    return { api_key: apiKey, version };
+}
 export async function hasApiKey(input) {
     const targetAccountId = await resolveApiKeyTarget(input);
     log('info', 'api_key_checked', { account_id: targetAccountId });

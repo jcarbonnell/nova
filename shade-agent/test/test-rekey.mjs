@@ -28,6 +28,8 @@
 //      not written
 //   R13 the route is internal, and its output schema has no private-key field
 //   R15 a POST-switch user:{sub} (current KV) is never taken as the pre-switch record
+//   R16 finality lag: the key list read at `final` still shows the OLD keys for a
+//      few reads after the tx; the FIRST confirm waits for it and completes (v64)
 //   R14 near-js's own decoder (an independent oracle) reads the re-key tx the same way,
 //      and our AddKey/DeleteKey bytes equal near-js's actionCreators
 //
@@ -47,7 +49,7 @@ const ED = 'ed25519:';
 // ── fake chain + KV ──
 const kv = { [CUR]: new Map(), [OLD]: new Map() };
 const chain = new Map();          // account → { keys: Map<pk, {full, nonce}> }
-let failAccountTx = false, noApply = false;
+let failAccountTx = false, noApply = false, lagReads = 0, lagSnapshot = null;
 const requests = [], txs = [];
 
 function readBorsh(buf) {
@@ -86,6 +88,7 @@ const rpc = http.createServer((req, res) => {
     if (msg.method === 'query' && p.request_type === 'view_access_key_list') {
       requests.push(`keys:${p.account_id}`);
       const a = chain.get(p.account_id);
+      if (a && lagReads > 0 && lagSnapshot) { lagReads--; return ok({ keys: [...lagSnapshot].map(([pk, k]) => ({ public_key: pk, access_key: { nonce: k.nonce, permission: k.full ? 'FullAccess' : { FunctionCall: {} } } })) }); }
       return ok({ keys: a ? [...a.keys].map(([pk, k]) => ({ public_key: pk, access_key: { nonce: k.nonce, permission: k.full ? 'FullAccess' : { FunctionCall: {} } } })) : [] });
     }
     if (msg.method === 'query' && p.request_type === 'view_access_key') {
@@ -114,6 +117,7 @@ const rpc = http.createServer((req, res) => {
           if (x.type === 'AddKey') next.set(x.pk, { full: x.full, nonce: 0 });
           if (x.type === 'DeleteKey') { if (!next.has(x.pk)) return ok({ transaction: { hash: 'x' }, status: { Failure: { ActionError: 'DeleteKeyDoesNotExist' } } }); next.delete(x.pk); }
         }
+        lagSnapshot = a.keys;
         a.keys = next;
       }
       return ok({ transaction: { hash: `rekeytx${txs.length}` }, status: { SuccessValue: '' } });
@@ -134,6 +138,7 @@ const legacy = await import('../dist/lib/legacy.js');
 const { setMasterSeed, decryptBlob, sha256Hex } = await import('../dist/lib/crypto.js');
 const R = await import('../dist/lib/services/rekey.js');
 setMasterSeed(new Uint8Array(crypto.randomBytes(32)));
+R._setRekeyVerifyTimingForTest(600, 20); // fast: R12 waits out the deadline
 legacy._setLegacyPinsForTest({
   masterRootSha256: '0'.repeat(64), signerPublicKey: 'ed25519:none',
   secretFingerprint: crypto.createHash('sha256').update(OLD_SECRET).digest('hex').slice(0, 12),
@@ -155,7 +160,7 @@ const readCur = (k) => { const b = kv[CUR].get(k); return b ? JSON.parse(Buffer.
 let OLDKEY;
 async function world({ record = {}, extraKeys = [], oldOnChain = true } = {}) {
   kv[CUR].clear(); kv[OLD].clear(); chain.clear(); txs.length = 0; requests.length = 0;
-  failAccountTx = false; noApply = false;
+  failAccountTx = false; noApply = false; lagReads = 0; lagSnapshot = null;
   OLDKEY = await newKeypair();
   const rec = { account_id: ACC, private_key: OLDKEY.secret, public_key: OLDKEY.pub, network: 'mainnet', wallet_id: null, created_at: '2026-05-04T00:00:00Z', ...record };
   kv[OLD].set(userKey(SUB), oldEncrypt(JSON.stringify(rec)));
@@ -329,6 +334,14 @@ await check('R15 a post-switch user:{sub} in the current KV is never taken as th
     , 'hex')]);
   const e = await refusal(() => rekey({ confirm: true }));
   return is(e, 'REKEY_RECORD_NOT_FOUND') && txs.length === 0;
+});
+
+await check('R16 finality lag: the first confirm waits for the final key list and completes', async () => {
+  await world();
+  lagReads = 3; // the first three key-list reads after the tx still show the old key
+  const r = await rekey({ confirm: true });
+  return r.state === 'rekeyed' && lagReads === 0 && JSON.stringify(chainKeys()) === JSON.stringify([r.new_public_key])
+    && readCur(accKey(ACC))?.public_key === r.new_public_key && accountTxs().length === 1;
 });
 
 rpc.close();

@@ -91,3 +91,4 @@ nova-agent-connect/node_modules/
 **/.grant-token.new
 **/aa-state.json
 **/.env
+__pycache__/

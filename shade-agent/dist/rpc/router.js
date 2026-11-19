@@ -12,8 +12,9 @@
 // The public NOVA contract (step 6.3) describes MCP's /tools/* and lives in
 // nova-contract/. It never mentions key material.
 import { pub, storeLimited, walletPub } from './base.js';
-import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, AccessWindowSetSchema, AccessWindowRefSchema, AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput, SchedulerStatusSchema, SchedulerStatusOutput, RekeySchema, RekeyOutput, } from '../lib/schemas.js';
+import { StoreSchema, RetrieveSchema, CheckSchema, ApiKeyLookupSchema, VerifyApiKeySchema, GenerateKeySchema, GetKeySchema, RotateKeySchema, StoreOutput, RetrieveOutput, CheckOutput, GenerateApiKeyOutput, HasApiKeyOutput, RotateApiKeyOutput, VerifyApiKeyOutput, GenerateKeyOutput, GetKeyOutput, RotateKeyOutput, PrepareFileUploadSchema, FinalizeFileUploadSchema, RetrieveFileSchema, PrepareFileUploadOutput, FinalizeFileUploadOutput, RetrieveFileOutput, RetentionRegisterSchema, RetentionRegisterOutput, RetentionScanSchema, RetentionScanOutput, RetentionExecuteSchema, RetentionExecuteOutput, AccessWindowSetSchema, AccessWindowRefSchema, AccessWindowSetOutput, AccessWindowClearOutput, AccessWindowGetOutput, SchedulerStatusSchema, SchedulerStatusOutput, RekeySchema, RekeyOutput, CustodialPrepareSchema, CustodialPrepareOutput, CustodialFinalizeSchema, CustodialFinalizeOutput, } from '../lib/schemas.js';
 import * as rekeyService from '../lib/services/rekey.js';
+import * as custodialAccountsService from '../lib/services/custodial-accounts.js';
 import * as userKeysService from '../lib/services/user-keys.js';
 import * as keyMgmtService from '../lib/services/key-management.js';
 import { ApiError } from '../lib/errors.js';
@@ -314,6 +315,29 @@ const migrationRekey = pub
     .input(RekeySchema)
     .output(RekeyOutput)
     .handler(({ input }) => rekeyService.rekeyAccount(input));
+// Operator-created custodial testnet accounts (allowlisted; operator only). Gated + seeded.
+// prepare returns the derived PUBLIC key and writes nothing; finalize checks the chain,
+// stores the key, and returns the account's API key once.
+const accountsCustodialPrepare = pub
+    .route({
+    method: 'POST',
+    path: '/accounts/custodial/prepare',
+    tags: INTERNAL,
+    summary: 'Derive an allowlisted custodial account key in the TEE and return its public key and on-chain state.',
+})
+    .input(CustodialPrepareSchema)
+    .output(CustodialPrepareOutput)
+    .handler(({ input }) => custodialAccountsService.prepareCustodialAccount(input));
+const accountsCustodialFinalize = pub
+    .route({
+    method: 'POST',
+    path: '/accounts/custodial/finalize',
+    tags: INTERNAL,
+    summary: 'Check the created account on chain, store its key, and return its API key once.',
+})
+    .input(CustodialFinalizeSchema)
+    .output(CustodialFinalizeOutput)
+    .handler(({ input }) => custodialAccountsService.finalizeCustodialAccount(input));
 export const router = {
     userKeys: { store, retrieve, check, generateApiKey, hasApiKey, verifyApiKey, rotateApiKey },
     keyManagement: { generateKey, getKey, rotateKey },
@@ -324,4 +348,5 @@ export const router = {
     accessWindows: { set: accessWindowSet, clear: accessWindowClear, get: accessWindowGet },
     scheduler: { status: schedulerStatus },
     migration: { rekey: migrationRekey },
+    accounts: { custodialPrepare: accountsCustodialPrepare, custodialFinalize: accountsCustodialFinalize },
 };

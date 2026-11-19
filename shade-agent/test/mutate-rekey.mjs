@@ -29,6 +29,8 @@ const MUTANTS = [
     'JSON.stringify({ done: true, new_public_key: newPub, old_public_key: oldPub })', 'JSON.stringify({ ...pending, done: true })', ['R5']],
   ['K14 done never detected', K, '        if (rec.rekeyed_at) {', '        if (false) {', ['R6']],
   ['K15 a current-era record taken as pre-switch', K, "if (!user || user.era !== 'legacy')", 'if (!user)', ['R15']],
+  ['K16 no wait for finality (v63 behaviour)', K, 'while (!(after.length === 1 && after[0].public_key === newPub && after[0].full) && Date.now() < deadline) {',
+    'while (false) {', ['R16']],
 ];
 
 const run = () => (spawnSync(process.execPath, ['test/test-rekey.mjs'], { encoding: 'utf8', timeout: 120_000 }).stdout ?? '');
