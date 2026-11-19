@@ -6,7 +6,8 @@
 // (view_account, view_access_key_list). Secrets and the seed are random.
 //
 //   C1 off the allowlist: refused by name before any KV or chain read; the allowlist
-//      is exactly the six ironclaw-swarm testnet names
+//      is exactly the six names (owner: ironclaw-swarm-owner); the pre-switch
+//      ironclaw-swarm.nova-sdk-7.testnet is refused (v65)
 //   C2 prepare, account absent: returns the PUBLIC key derived independently here
 //      (HKDF-SHA256(seed, "custodial-account:{id}", "nova-v1")); state absent;
 //      nothing written; no private field in the response
@@ -42,7 +43,7 @@ import bs58 from 'bs58';
 import * as ed25519 from '@noble/ed25519';
 
 const CUR = 'nova-kv-2.near', ED = 'ed25519:';
-const A1 = 'ironclaw-swarm-agent1.nova-sdk-7.testnet', OWNER = 'ironclaw-swarm.nova-sdk-7.testnet';
+const A1 = 'ironclaw-swarm-agent1.nova-sdk-7.testnet', OWNER = 'ironclaw-swarm-owner.nova-sdk-7.testnet';
 
 // ── fake chain + KV ──
 const kv = new Map();
@@ -153,8 +154,9 @@ await check('C1 off the allowlist: refused before any KV or chain read; the allo
   world();
   const e1 = await refusal(() => S.prepareCustodialAccount({ account_id: 'efizzy.nova-sdk-7.testnet' }));
   const e2 = await refusal(() => S.finalizeCustodialAccount({ account_id: 'gmail-14.nova-sdk.near' }));
-  const want = ['ironclaw-swarm', ...[1, 2, 3, 4, 5].map((n) => `ironclaw-swarm-agent${n}`)].map((n) => `${n}.nova-sdk-7.testnet`).sort();
-  return is(e1, 'CUSTODIAL_NOT_ALLOWED') && is(e2, 'CUSTODIAL_NOT_ALLOWED') && requests.length === 0
+  const e3 = await refusal(() => S.prepareCustodialAccount({ account_id: 'ironclaw-swarm.nova-sdk-7.testnet' }));
+  const want = ['ironclaw-swarm-owner', ...[1, 2, 3, 4, 5].map((n) => `ironclaw-swarm-agent${n}`)].map((n) => `${n}.nova-sdk-7.testnet`).sort();
+  return is(e1, 'CUSTODIAL_NOT_ALLOWED') && is(e2, 'CUSTODIAL_NOT_ALLOWED') && is(e3, 'CUSTODIAL_NOT_ALLOWED') && requests.length === 0
     && JSON.stringify([...S.CUSTODIAL_ALLOWLIST].sort()) === JSON.stringify(want);
 });
 

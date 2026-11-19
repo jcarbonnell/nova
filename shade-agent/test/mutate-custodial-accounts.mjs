@@ -24,6 +24,7 @@ const MUTANTS = [
   ['A9 an RPC failure read as "absent"', C, "if (err.cause?.name === 'UNKNOWN_ACCOUNT')", 'if (err)', ['C10']],
   ['A10 the API key logged', C, 'api_key_issued: !!issued,', 'api_key_issued: issued?.api_key,', ['C11']],
   ['A11 the record marked mainnet', C, 'network: NETWORK, wallet_id: null,', "network: 'mainnet', wallet_id: null,", ['C5', 'C13']],
+  ['A13 the pre-switch owner account allowed again', C, "  'ironclaw-swarm-owner.nova-sdk-7.testnet',", "  'ironclaw-swarm.nova-sdk-7.testnet',", ['C1']],
   ['A12 another derivation salt', C, 'deriveKey(`custodial-account:${accountId}`, 32)', 'deriveKey(`custodial:${accountId}`, 32)', ['C2']],
 ];
 
